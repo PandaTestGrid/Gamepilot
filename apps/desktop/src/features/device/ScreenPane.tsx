@@ -11,6 +11,7 @@ import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
 
 import { RecordOverlay } from '@/features/device/RecordOverlay';
 import { GhostButton, PanelShell, StatusDot } from '@/layout/PanelShell';
+import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { activeDevice, connectedDevices, useDeviceStore } from '@/stores/device.store';
 import { useGraphStore } from '@/stores/graph.store';
@@ -111,11 +112,11 @@ function EmptyState({ onConnect }: { onConnect: () => void }): ReactNode {
           >
             <StatusDot tone={device.status === 'failed' ? 'failed' : 'idle'} />
             <span className="flex-1 truncate text-body text-fg">{device.name}</span>
-            <span>{device.resolution.join('×')}</span>
+            <span>{formatResolution(device.resolution)}</span>
             <span className="text-dim">→</span>
           </button>
         ))}
-        <div className="mt-2">正在扫描：adb 设备 1 个 · Windows 窗口 7 个</div>
+        <div className="mt-2">已发现 {devices.length} 台设备 · 打开设备面板可重新扫描</div>
       </div>
     </div>
   );
@@ -130,7 +131,7 @@ function SingleScreen({
 }: {
   deviceId: string;
   deviceName: string;
-  resolution: readonly [number, number];
+  resolution: readonly [number, number] | null;
 }): ReactNode {
   const recordMode = useUiStore((state) => state.recordMode);
   const draft = useUiStore((state) => state.draft);
@@ -206,7 +207,7 @@ function SingleScreen({
     >
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-faint">
         <span className="text-body">
-          {deviceName} · {resolution[0]}×{resolution[1]}
+          {deviceName} · {formatResolution(resolution)}
         </span>
         <span className="text-badge">实时画面（M1 接入引擎帧推送）</span>
       </div>
@@ -296,9 +297,7 @@ function ScreenGrid(): ReactNode {
             <span className="text-badge text-faint">{device.fps}fps</span>
           </span>
           <span className="flex flex-1 flex-col items-center justify-center gap-1 text-faint">
-            <span className="text-badge">
-              {device.resolution[0]}×{device.resolution[1]}
-            </span>
+            <span className="text-badge">{formatResolution(device.resolution)}</span>
             <span className="text-badge">{device.id === activeId ? '活动设备' : '点击切为活动'}</span>
           </span>
         </button>

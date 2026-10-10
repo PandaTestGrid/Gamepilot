@@ -1,10 +1,3 @@
-/**
- * 界面层的数据模型（**只描述 UI 需要的东西**）。
- *
- * 来源约定：M1 起这些结构由引擎的 RPC / 通知填充（见 docs/rpc.md），
- * 当前 `src/mock/seed.ts` 提供样本数据，仅供布局与交互验证。
- */
-
 export type DeviceKind = 'android' | 'emulator' | 'windows' | 'mock' | 'remote';
 
 export type DeviceStatus = 'idle' | 'discovered' | 'connecting' | 'connected' | 'failed';
@@ -15,8 +8,10 @@ export interface DeviceRuntime {
   readonly uri: string;
   readonly kind: DeviceKind;
   readonly status: DeviceStatus;
-  readonly resolution: [number, number];
+  /** 未连接或查询失败时为 null（真实设备要先连上才能读到分辨率） */
+  readonly resolution: readonly [number, number] | null;
   readonly fps: number;
+  readonly model?: string;
   readonly error?: string;
   readonly suggestedFix?: string;
   /** 是否已在多开网格 / 独立窗口中打开 */
@@ -80,6 +75,7 @@ export type TraceEventType =
   | 'transition_failed'
   | 'device_lost'
   | 'device_reconnected'
+  | 'device_scan'
   | 'recognizer_added'
   | 'node_added'
   | 'edge_added'

@@ -77,6 +77,43 @@ Rust 桥的调度规则：
 }
 ```
 
+### `device.list`
+
+扫描可用设备（adb 真机/模拟器 + Mock）。**第 1 块已实现**。
+
+- params：`{ "scan": true }`（`false` 时只返回 Mock，用于快速首屏）
+- result：
+
+```json
+{
+  "devices": [
+    {
+      "id": "android:3387980",
+      "uri": "Android:///?serial=3387980",
+      "name": "OPPO A57",
+      "kind": "android",
+      "status": "discovered",
+      "serial": "3387980",
+      "model": "OPPO_A57",
+      "product": "A57",
+      "resolution": [720, 1280],
+      "error": null,
+      "suggestedFix": null
+    }
+  ],
+  "errors": [{ "provider": "android", "message": "adb 列表获取失败: ..." }]
+}
+```
+
+约定：
+
+- `kind`：`android` / `emulator` / `windows` / `mock` / `remote`（模拟器按串口名与型号特征判定）
+- `status`：`discovered` / `connected` / `failed`；**不可用设备也要返回**，
+  并带上 `error` + `suggestedFix`（UI 要显示"能照做"的修复建议）
+- `resolution` 可能为 `null`（未授权/离线设备读不到），UI 必须能显示 `—`
+- **绝不抛异常**：单个来源失败只进 `errors`，其它来源照常返回
+- `id` 只由平台 + serial 决定，跨扫描稳定（UI 靠它做选中与记忆）
+
 ### `engine.shutdown`
 
 优雅退出。返回后进程会结束；前端通常在 `engine_stop` 之前调用它。
@@ -102,7 +139,6 @@ Rust 桥的调度规则：
 
 | 方法 | 参数 | 说明 |
 |---|---|---|
-| `device.list` | `{ scan?: boolean }` | 返回可连接设备列表（adb 设备 + Windows 可见窗口 + Mock） |
 | `device.connect` | `{ uri: string }` | 连接并返回 `deviceId`；过程通过通知回报阶段 |
 | `device.disconnect` | `{ deviceId: string }` | 断开 |
 | `device.status` | `{ deviceId: string }` | 单台设备状态（含 error / suggestedFix） |
@@ -137,6 +173,7 @@ Rust 桥的调度规则：
 | PROTOCOL_VERSION | 日期 | 变更 |
 |---|---|---|
 | 1 | — | 初版：`engine.ping` / `engine.info` / `engine.shutdown` + `engine.ready` 通知；NDJSON 分帧 |
+| 1 | — | 新增 `device.list`（Android 发现 + Mock），未新增版本号：纯新增方法，向后兼容 |
 
 ## 7. 手工调试
 

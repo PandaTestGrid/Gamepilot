@@ -39,6 +39,15 @@ export function App(): ReactNode {
     };
   }, [init]);
 
+  // 引擎连上后自动扫描一次真实设备（第 1 块：device.list）
+  const engineStatus = useEngineStore((state) => state.status);
+  const scanDevices = useDeviceStore((state) => state.scan);
+  useEffect(() => {
+    if (engineStatus === 'ready') {
+      void scanDevices();
+    }
+  }, [engineStatus, scanDevices]);
+
   // 每台设备首次出现时补齐它的状态图与事件桶（M1 换成从引擎拉取）
   const devices = useDeviceStore((state) => state.devices);
   const ensureGraph = useGraphStore((state) => state.ensure);

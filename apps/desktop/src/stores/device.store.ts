@@ -1,23 +1,38 @@
 /**
- * 设备 store：多设备是**一等公民**（DESIGN.md §4.6）。
+ * 设备 store：多设备是一等公民（DESIGN.md §4.6）。
  *
- * 同时只允许一个「活动设备」驱动中央状态图与事件流，但允许多个设备保持连接
- * 并在多开网格 / 独立窗口里同时运行。
+ * 数据来源分两种，注意别混：
+ *   1. **扫描结果**（`scan()` → 引擎 `device.list`）——真实 adb 设备列表，
+ *      每次刷新整体替换掉"非连接中"的条目；
+ *   2. **连接态**（connect/disconnect/心跳）——由引擎 `device.*` 通知驱动，
+ *      第 2 块接入；现在用定时器模拟连接过程。
  *
- * M1 起 `connect` 会换成 `engine_rpc('device.connect', { uri })` + 订阅 `device.*` 通知；
- * 现在的延时是模拟连接过程，让人能看到状态机与阶段文案。
+ * 合并规则：**已连接/连接中的设备不被扫描结果覆盖**（它们有活的会话），
+ * 其余全量替换。这样刷新不会把正在跑的设备踢掉。
  */
 import { create } from 'zustand';
 
+import { type DeviceInfoPayload, listDevices } from '@/lib/rpc';
 import { MOCK_DEVICES } from '@/mock/seed';
-import type { DeviceRuntime } from '@/types';
+import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
 
 export const MAX_ACTIVE_DEVICES = 4;
+
+const KINDS: readonly DeviceKind[] = ['android', 'emulator', 'windows', 'mock', 'remote'];
+const STATUSES: readonly DeviceStatus[] = ['discovered', 'connecting', 'connected', 'failed'];
+
+export type ScanState = 'idle' | 'scanning' | 'error';
 
 interface DeviceState {
   readonly devices: readonly DeviceRuntime[];
   readonly activeId: string;
   readonly gridView: boolean;
+  readonly scanState: ScanState;
+  /** 各来源的扫描错误（例如 adb 不可用），UI 要显示出来而不是静默吞掉 */
+  readonly scanErrors: readonly string[];
+  readonly scanError: string | null;
+  readonly lastScanAt: number | null;
+  readonly scan: () => Promise<void>;
   readonly setActive: (id: string) => void;
   readonly connect: (id: string) => void;
   readonly markConnected: (id: string) => void;
@@ -27,24 +42,80 @@ interface DeviceState {
   readonly markWindowed: (id: string, windowed: boolean) => void;
 }
 
-function patch(
-  list: readonly DeviceRuntime[],
-  id: string,
-  patchValue: Partial<DeviceRuntime>,
-): DeviceRuntime[] {
-  return list.map((device) => (device.id === id ? { ...device, ...patchValue } : device));
+/** 引擎返回的 payload → 界面模型。未知枚举值一律降级，不抛异常。 */
+export function toRuntimeDevice(info: DeviceInfoPayload): DeviceRuntime {
+  const kind = (KINDS as readonly string[]).includes(info.kind) ? (info.kind as DeviceKind) : 'remote';
+  const status = (STATUSES as readonly string[]).includes(info.status)
+    ? (info.status as DeviceStatus)
+    : 'discovered';
+  return {
+    id: info.id,
+    name: info.name,
+    uri: info.uri,
+    kind,
+    status,
+    resolution: info.resolution ? [info.resolution[0], info.resolution[1]] : null,
+    fps: 0,
+    model: info.model ?? undefined,
+    error: info.error ?? undefined,
+    suggestedFix: info.suggestedFix ?? undefined,
+  };
+}
+
+/** 扫描结果与现有设备的合并（纯函数，单测直接覆盖）。 */
+export function mergeScan(
+  current: readonly DeviceRuntime[],
+  incoming: readonly DeviceRuntime[],
+  activeId: string,
+): { devices: DeviceRuntime[]; activeId: string } {
+  const live = current.filter((device) => device.status === 'connected' || device.status === 'connecting');
+  const liveIds = new Set(live.map((device) => device.id));
+  const devices = [...live, ...incoming.filter((device) => !liveIds.has(device.id))];
+  const stillThere = devices.some((device) => device.id === activeId);
+  const nextActive = stillThere
+    ? activeId
+    : (devices.find((device) => device.status === 'connected')?.id ?? devices[0]?.id ?? '');
+  return { devices, activeId: nextActive };
+}
+
+function patch(list: readonly DeviceRuntime[], id: string, value: Partial<DeviceRuntime>): DeviceRuntime[] {
+  return list.map((device) => (device.id === id ? { ...device, ...value } : device));
 }
 
 export const useDeviceStore = create<DeviceState>()((set, get) => ({
   devices: MOCK_DEVICES,
   activeId: MOCK_DEVICES[0]?.id ?? '',
   gridView: false,
+  scanState: 'idle',
+  scanErrors: [],
+  scanError: null,
+  lastScanAt: null,
+
+  scan: async () => {
+    set({ scanState: 'scanning', scanError: null });
+    try {
+      const result = await listDevices(true);
+      set((state) => {
+        const merged = mergeScan(state.devices, result.devices.map(toRuntimeDevice), state.activeId);
+        return {
+          devices: merged.devices,
+          activeId: merged.activeId,
+          scanState: 'idle',
+          scanErrors: result.errors.map((error) => `${error.provider}: ${error.message}`),
+          lastScanAt: Date.now(),
+        };
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ scanState: 'error', scanError: message });
+    }
+  },
 
   setActive: (id) => set({ activeId: id }),
 
   connect: (id) => {
     set((state) => ({ devices: patch(state.devices, id, { status: 'connecting', error: undefined }) }));
-    // M1：换成真实 RPC；这里模拟「adb 连接 → 读取分辨率 → 首帧截图」
+    // 第 2 块：换成 engine_rpc('device.connect') + 订阅 device.* 通知
     setTimeout(() => {
       const device = get().devices.find((item) => item.id === id);
       if (device?.status === 'connecting') {
@@ -54,16 +125,9 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
   },
 
   markConnected: (id) =>
-    set((state) => {
-      const current = state.devices.find((item) => item.id === id);
-      return {
-        devices: patch(state.devices, id, {
-          status: 'connected',
-          fps: current?.fps && current.fps > 0 ? current.fps : 10,
-          error: undefined,
-        }),
-      };
-    }),
+    set((state) => ({
+      devices: patch(state.devices, id, { status: 'connected', fps: 10, error: undefined }),
+    })),
 
   failConnect: (id, error) =>
     set((state) => ({
@@ -78,12 +142,13 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
   disconnect: (id) =>
     set((state) => {
       const remaining = patch(state.devices, id, { status: 'discovered', fps: 0, windowed: false });
-      const stillConnected = remaining.filter((item) => item.status === 'connected');
-      const needSwitch = state.activeId === id;
+      const stillConnected = remaining.filter(
+        (item) => item.status === 'connected' || item.status === 'connecting',
+      );
       return {
         devices: remaining,
         gridView: stillConnected.length >= 2 ? state.gridView : false,
-        activeId: needSwitch ? (stillConnected[0]?.id ?? id) : state.activeId,
+        activeId: state.activeId === id ? (stillConnected[0]?.id ?? id) : state.activeId,
       };
     }),
 

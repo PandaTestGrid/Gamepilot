@@ -30,3 +30,6 @@ NOTIFY_FRAME = "engine.frame"
 METHOD_PING = "engine.ping"
 METHOD_INFO = "engine.info"
 METHOD_SHUTDOWN = "engine.shutdown"
+
+# 设备（多设备：所有设备相关方法与通知都带 deviceId，见 docs/rpc.md）
+METHOD_DEVICE_LIST = "device.list"

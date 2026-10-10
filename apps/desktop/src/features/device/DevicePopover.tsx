@@ -8,9 +8,10 @@
  *   - iOS 只留一行灰字，不摆用不了的输入框
  */
 import { MoreHorizontal, RefreshCw, Search } from 'lucide-react';
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 
 import { StatusDot, type DotTone } from '@/layout/PanelShell';
+import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { useUiStore } from '@/stores/ui.store';
@@ -43,6 +44,11 @@ export function DevicePopover(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const connect = useDeviceStore((state) => state.connect);
   const disconnect = useDeviceStore((state) => state.disconnect);
+  const scan = useDeviceStore((state) => state.scan);
+  const scanState = useDeviceStore((state) => state.scanState);
+  const scanErrors = useDeviceStore((state) => state.scanErrors);
+  const scanError = useDeviceStore((state) => state.scanError);
+  const lastScanAt = useDeviceStore((state) => state.lastScanAt);
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<'all' | DeviceKind>('all');
   const [advanced, setAdvanced] = useState(false);
@@ -59,6 +65,13 @@ export function DevicePopover(): ReactNode {
 
   const connectedCount = devices.filter((device) => device.status === 'connected').length;
 
+  // 打开就扫一次：这是低频操作，不该让用户再点一次"刷新"（DESIGN.md §4.3.4）
+  useEffect(() => {
+    if (open) {
+      void scan();
+    }
+  }, [open, scan]);
+
   if (!open) {
     return null;
   }
@@ -72,7 +85,10 @@ export function DevicePopover(): ReactNode {
       >
         <div className="flex h-7 items-center gap-2 border-b border-line px-2">
           <span className="text-panel font-medium">设备</span>
-          <span className="text-badge text-faint">{connectedCount} 台已连接 · 上限 4</span>
+          <span className="text-badge text-faint">
+            {connectedCount} 台已连接 · 上限 4
+            {scanState === 'scanning' ? ' · 扫描中…' : lastScanAt ? ' · 已刷新' : ''}
+          </span>
           <div className="flex-1" />
           <button type="button" onClick={() => toggle(false)} className="px-1 text-dim hover:text-fg">
             ✕
@@ -121,11 +137,28 @@ export function DevicePopover(): ReactNode {
           {rows.length === 0 && (
             <div className="px-3 py-6 text-center text-badge text-faint">没有匹配的设备</div>
           )}
+
+          {(scanError || scanErrors.length > 0) && (
+            <div className="flex items-start gap-2 border-t border-line bg-raised/40 px-2 py-1.5">
+              <StatusDot tone="failed" className="mt-0.5" />
+              <span className="flex-1 text-badge text-failed">
+                {scanError ? `扫描失败：${scanError}` : scanErrors.join(' · ')}
+              </span>
+              <button type="button" onClick={() => void scan()} className="text-badge text-brand">
+                重试
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="relative flex h-8 items-center gap-3 border-t border-line px-2 text-badge text-dim">
-          <button type="button" className="flex items-center gap-1 hover:text-fg">
-            <RefreshCw className="size-3" /> 刷新
+          <button
+            type="button"
+            onClick={() => void scan()}
+            className="flex items-center gap-1 hover:text-fg"
+            title="重新扫描 adb 设备与可发现的窗口"
+          >
+            <RefreshCw className={cn('size-3', scanState === 'scanning' && 'animate-spin')} /> 刷新
           </button>
           <button
             type="button"
@@ -182,7 +215,7 @@ function DeviceRow({
           <span className="text-badge text-faint">{kindLabel(device.kind)}</span>
         </button>
         <span className="w-20 text-right text-badge text-dim">
-          {device.status === 'failed' ? '不可用' : device.resolution.join('×')}
+          {device.status === 'failed' ? '不可用' : formatResolution(device.resolution)}
         </span>
         {device.status === 'connected' ? (
           <button

@@ -48,7 +48,24 @@
 | 项目骨架 | ✅ 完成 | pnpm workspace + Tauri 2 壳 + React/TS/Tailwind/shadcn + Python 引擎（uv）+ 三路 CI；`React → Rust → Python` 链路自检可跑通 |
 | 项目规范 | ✅ 完成 | [`CONVENTIONS.md`](./CONVENTIONS.md)（依赖方向/命名/坐标铁律/契约版本/测试矩阵/DoD）+ [`rpc.md`](./rpc.md) 契约 |
 | 布局实现（多设备 / 多窗口） | ✅ 完成 | 三栏可拖拽 + 布局记忆、设备标签条与设备弹层、录制框选→草稿表单→原子写入状态图、React Flow 状态图、事件流/时间轴/识别器阈值滑块、多开网格、独立窗口（`?pane=`）；数据为 mock，M1 接引擎 |
-| M1 起的功能 | ⛔ 未开始 | 等你批 §4/§5 后再动 |
+| **实现分块 1**：真实设备发现 | ✅ 完成 | 引擎 `devices/`（发现层 + Controller 抽象）、RPC `device.list`、前端设备弹层/空态接真实数据；本机实测扫到 3 台真机（型号 + 分辨率） |
+| 实现分块 2~6 | ⛔ 未开始 | 见下方分块表 |
+
+**实现分块（每块都能在 App 里独立验收，不一口气做完）**
+
+| 块 | 内容 | 验收现象 |
+|---|---|---|
+| 1 ✅ | `device.list` 真实扫描（adb / Mock） | 打开设备选择器看到真机列表；未授权设备带修复建议 |
+| 2 | `device.connect` + 首帧 `engine.frame` | 画面栏出现真机截图 |
+| 3 | 连续投屏 + fps/延迟指标 | 画面动起来，底栏 fps 跳动；掉线自动重连 |
+| 4 | 模板匹配识别器上屏 | 画面上的识别框 + 识别器面板分数 |
+| 5 | 录制落盘（框选 → 真 PNG → graph.json） | 框一下生成识别器，实时出分，可保存/重载 |
+| 6 | 状态机运行 + 事件流 | 事件栏出真事件，recovery 边生效 |
+| 之后 | Android 精确触控（scrcpy 通道，参考 panda-agent `devices/android/control/`）、Windows 窗口、iOS（QuickTime 投屏）、多开调度 | — |
+
+参考实现：`~/GitHub/pandatest/panda-agent/src/pda/`（`devices/provider.py` 的 adbutils 发现、
+`devices/base.py` 的驱动抽象、`devices/ios/mirror/` 的 MJPEG 投屏服务器、`devices/ios/control/` 的 WDA/HID 控制）。
+我们的差异：对外坐标一律归一化、发现结果自带 `error/suggestedFix`、不做注入类操作。
 
 骨架阶段实际验证过的东西（不是"写完就算"）：
 - 引擎：`ruff check` / `ruff format --check` / `mypy --strict` 全绿，8 个 stdio 契约测试通过；

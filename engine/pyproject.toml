@@ -9,6 +9,8 @@ dependencies = [
   "numpy>=1.26",
   "opencv-python-headless>=4.9",
   "pillow>=10",
+  # 安卓连接与控制（发现 / 截图 / 输入）。MIT 许可，纯 Python 调用 adb
+  "adbutils>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -74,6 +76,11 @@ show_error_codes = true
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+# adbutils / av / rapidocr 都没有 py.typed：不为第三方缺失的类型信息买单
+[[tool.mypy.overrides]]
+module = ["adbutils", "adbutils.*", "av", "av.*", "rapidocr_onnxruntime", "rapidocr_onnxruntime.*"]
+ignore_missing_imports = true
 
 # --------------------------------------------------------------------------- #
 # pytest

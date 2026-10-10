@@ -2,6 +2,7 @@ import { Cable, ChevronDown, CirclePlay, LayoutGrid, Redo2, Square, Undo2, Video
 import { type ReactNode } from 'react';
 
 import { ToolbarButton, VDivider } from '@/layout/PanelShell';
+import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { activeDevice, useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
@@ -70,7 +71,7 @@ export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRu
       >
         <StatusDot tone={toneOf(device?.status ?? 'discovered')} />
         <span className="truncate text-body">
-          {device ? `${device.name} · ${device.resolution[0]}×${device.resolution[1]}` : '未连接设备'}
+          {device ? `${device.name} · ${formatResolution(device.resolution)}` : '未连接设备'}
         </span>
         <ChevronDown className="size-3.5 text-dim" />
       </button>

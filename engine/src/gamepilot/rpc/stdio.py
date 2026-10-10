@@ -47,6 +47,10 @@ class RpcServer:
         self._handlers: dict[str, Handler] = {}
         self._stopping = False
         self._register_builtin()
+        # 延迟导入：devices 方法模块需要 RpcServer 的类型，反过来运行时依赖 stdio
+        from . import devices as device_methods
+
+        device_methods.register(self)
 
     # ------------------------------------------------------------------ #
     # 注册与分发
