@@ -369,6 +369,20 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 同时界面必须用 `device.stream` 告诉引擎"这台设备我看多少帧"（0 = 停推）：
 单画面 10fps、多开每台 4~6fps、窗口不可见 0fps。不做这件事，多设备必然卡。
 
+## 12.6 布局陷阱（都真实踩过，改 UI 时注意）
+
+1. **`<button>` 有 `align-items: center` 的浏览器默认样式**。
+   如果按钮里是"只有绝对定位内容"的容器，它的内容宽度是 0，居中布局下会被压成 **0 宽**：
+   图片加载成功、`getBoundingClientRect()` 宽度却是 0，表现就是"看不见画面"。
+   → 显式写 `items-stretch`（或用 `<div role="button">`）。
+2. **`flex-1` 的内容区必须同时有确定的父高度**。
+   全绝对定位的内容撑不起高度，父级缺 `h-full` 时会被压成 0 高（表现为"只剩一条边框线"）。
+   → `PanelShell` 的 `<section>` 有 `h-full`，内容区是 `min-h-0 flex-1` + 内层 `h-full`。
+3. **网格的行高必须显式给 `minmax(0, 1fr)`**。
+   默认 `auto` 行同样会被绝对定位内容撑成 0 高。→ `gridAutoRows` / `gridTemplateRows`。
+4. 排查这类问题的办法：在组件里打一行 `devLog(... getBoundingClientRect())`，
+   直接看"元素有没有真的被渲染出尺寸"，比盯着代码猜快得多。
+
 ## 13. 已知环境坑
 
 | 坑 | 现象 | 解法 |

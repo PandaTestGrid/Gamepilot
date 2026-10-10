@@ -56,7 +56,15 @@ export function DeviceTabs(): ReactNode {
             >
               <StatusDot tone={TONE[device.status] ?? 'idle'} />
               <span className="text-body">{device.name}</span>
-              <span className="text-badge text-faint">{frames[device.id]?.fps.toFixed(0) ?? '0'}fps</span>
+              <span className="text-badge text-faint">
+                {device.status === 'connected'
+                  ? `${frames[device.id]?.fps.toFixed(0) ?? '0'}fps`
+                  : device.status === 'connecting'
+                    ? '连接中…'
+                    : device.status === 'failed'
+                      ? '连接失败'
+                      : '未连接'}
+              </span>
             </button>
             <button
               type="button"

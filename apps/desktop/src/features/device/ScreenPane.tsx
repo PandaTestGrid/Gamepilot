@@ -76,15 +76,20 @@ export function ScreenPane(): ReactNode {
           </GhostButton>
           <GhostButton
             active={gridView}
-            onClick={connected.length === 0 ? undefined : toggleGrid}
-            title={
-              connected.length === 0
-                ? '还没有已连接设备：先在设备面板连接一台'
-                : `多开网格（当前 ${connected.length} 台已连接）`
-            }
+            onClick={() => {
+              // 不用禁用：点了没反应才是最难排查的。这里直接把原因写在顶部错误条
+              if (connected.length === 0) {
+                useSessionStore.setState({
+                  error: `多开需要至少 1 台已连接设备（当前 ${devices.length} 台设备，0 台已连接）`,
+                });
+                return;
+              }
+              toggleGrid();
+            }}
+            title={`多开网格（当前 ${connected.length} 台已连接 / 共 ${devices.length} 台设备）`}
           >
             <Grid2x2 className="size-3" />
-            多开{connected.length > 1 ? ` ${connected.length}` : ''}
+            多开{connected.length > 0 ? ` ${connected.length}` : ''}
           </GhostButton>
           <GhostButton title="当前帧命中的识别器数量">读数 {confirmedCount}</GhostButton>
         </>
@@ -433,7 +438,10 @@ function ScreenGrid(): ReactNode {
             type="button"
             onClick={() => setActive(device.id)}
             className={cn(
-              'relative flex min-h-0 flex-col border bg-[#0b0d12] text-left',
+              // items-stretch 必须显式写：<button> 的浏览器默认样式里有 align-items:center，
+              // 而瓦片中间层只有绝对定位的 <img>（内容宽度 0），居中布局下会被压成 0 宽
+              // —— 图加载成功却完全看不见，这就是"多开看不到设备投屏"的真凶
+              'relative flex min-h-0 flex-col items-stretch border bg-[#0b0d12] text-left',
               device.id === activeId ? 'border-brand' : 'border-line hover:border-dim',
             )}
           >
@@ -443,18 +451,20 @@ function ScreenGrid(): ReactNode {
               <span className="flex-1" />
               <span className="text-badge text-faint">{frame ? `${frame.fps}fps` : '—'}</span>
             </span>
-            <span className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+            <span className="relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden">
               {frame ? (
                 <img
                   src={frame.imageUrl}
                   alt={`${device.name} 画面`}
                   className="absolute inset-0 h-full w-full object-contain"
                   draggable={false}
-                  onLoad={(event) =>
+                  onLoad={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect();
                     devLog(
-                      `多开瓦片 ${device.id} img 加载成功 ${event.currentTarget.naturalWidth}x${event.currentTarget.naturalHeight}`,
-                    )
-                  }
+                      `多开瓦片 ${device.id} img 加载成功 ${event.currentTarget.naturalWidth}x${event.currentTarget.naturalHeight}` +
+                        ` 渲染尺寸 ${Math.round(rect.width)}x${Math.round(rect.height)}`,
+                    );
+                  }}
                   onError={() => {
                     devLog(`多开瓦片 ${device.id} img 加载失败 url=${frame.imageUrl.slice(0, 24) || '(空)'}`);
                     void useSessionStore.getState().recoverImage(device.id);
