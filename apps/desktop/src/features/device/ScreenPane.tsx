@@ -21,6 +21,7 @@ import type { RecognizerView } from '@/types';
 
 /** 上一次记录的画面栏分支（只在变化时打日志） */
 let lastBranchKey = '';
+let imgLoadLogs = 0;
 
 export function ScreenPane(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
@@ -265,6 +266,15 @@ function SingleScreen({
           alt={`${deviceName} 实时画面`}
           className="pointer-events-none absolute inset-0 h-full w-full object-contain"
           draggable={false}
+          onLoad={(event) => {
+            // 最终确认：画面栏里这张图真的加载出来了（前几次打日志）
+            if (imgLoadLogs < 3) {
+              imgLoadLogs += 1;
+              devLog(
+                `画面栏 img 加载成功 ${event.currentTarget.naturalWidth}x${event.currentTarget.naturalHeight}`,
+              );
+            }
+          }}
           onError={() => void recoverImage(deviceId)}
         />
       ) : (
