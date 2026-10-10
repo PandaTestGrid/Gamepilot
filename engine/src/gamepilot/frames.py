@@ -14,6 +14,7 @@ RPC 响应会排在几万行帧后面 —— 表现出来就是界面"卡在 con
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import queue
@@ -66,10 +67,8 @@ class FrameSink:
     def close(self) -> None:
         self._stop.set()
         if self._socket is not None:
-            try:
+            with contextlib.suppress(OSError):
                 self._socket.close()
-            except OSError:
-                pass
 
     def _run(self) -> None:
         if not self._connect():

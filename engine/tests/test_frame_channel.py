@@ -101,16 +101,15 @@ def test_frames_use_unix_socket_not_stdout(tmp_path: Path) -> None:
         assert meta["resolution"] == [320, 180]
     finally:
         if proc.stdin is not None:
-            try:
+            with contextlib.suppress(Exception):
                 call("engine.shutdown")
-            except Exception:
-                pass
         if proc.poll() is None:
             proc.kill()
         proc.wait(timeout=5)
         # 资源要显式关：项目开了 filterwarnings=error，未关闭的 socket/管道会直接判失败
-        with contextlib.suppress(OSError):
-            connection.close()
+        if connection is not None:
+            with contextlib.suppress(OSError):
+                connection.close()
         with contextlib.suppress(OSError):
             listener.close()
         with contextlib.suppress(OSError):
