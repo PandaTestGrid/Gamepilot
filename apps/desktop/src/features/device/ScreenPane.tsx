@@ -272,11 +272,12 @@ function SingleScreen({
           className="pointer-events-none absolute inset-0 h-full w-full object-contain"
           draggable={false}
           onLoad={(event) => {
-            // 最终确认：画面栏里这张图真的加载出来了（前几次打日志）
             if (imgLoadLogs < 3) {
               imgLoadLogs += 1;
+              const rect = event.currentTarget.getBoundingClientRect();
               devLog(
-                `画面栏 img 加载成功 ${event.currentTarget.naturalWidth}x${event.currentTarget.naturalHeight}`,
+                `画面栏 img 加载成功 ${event.currentTarget.naturalWidth}x${event.currentTarget.naturalHeight}` +
+                  ` 渲染尺寸 ${Math.round(rect.width)}x${Math.round(rect.height)}`,
               );
             }
           }}
@@ -289,6 +290,13 @@ function SingleScreen({
           </span>
           <span className="text-badge">等待首帧…</span>
         </div>
+      )}
+
+      {/* 画面角标：一眼看出"有没有帧、多大、多少帧率"。排查"看不见画面"时这是最直接的证据 */}
+      {frame && (
+        <span className="pointer-events-none absolute bottom-1 left-1 rounded-sm bg-black/55 px-1.5 py-0.5 text-badge text-white/85">
+          帧 #{frame.index} · {frame.resolution[0]}×{frame.resolution[1]} · {frame.fps.toFixed(1)}fps
+        </span>
       )}
 
       {/* 识别框：绿=投票已确认 / 橙=待确认；坐标是引擎给的归一化值 */}
@@ -447,9 +455,10 @@ function ScreenGrid(): ReactNode {
                       `多开瓦片 ${device.id} img 加载成功 ${event.currentTarget.naturalWidth}x${event.currentTarget.naturalHeight}`,
                     )
                   }
-                  onError={() =>
-                    devLog(`多开瓦片 ${device.id} img 加载失败 url=${frame.imageUrl.slice(0, 24) || '(空)'}`)
-                  }
+                  onError={() => {
+                    devLog(`多开瓦片 ${device.id} img 加载失败 url=${frame.imageUrl.slice(0, 24) || '(空)'}`);
+                    void useSessionStore.getState().recoverImage(device.id);
+                  }}
                 />
               ) : (
                 <span className="flex flex-col items-center gap-1 text-badge text-faint">
@@ -460,7 +469,7 @@ function ScreenGrid(): ReactNode {
             </span>
             <span className="flex h-5 shrink-0 items-center justify-between border-t border-line px-2 text-badge text-faint">
               <span>{formatResolution(device.resolution)}</span>
-              <span>{frame?.node ?? '-'}</span>
+              <span>{frame ? `帧 #${frame.index} · ${frame.fps.toFixed(1)}fps` : '无帧'}</span>
             </span>
           </button>
         );
