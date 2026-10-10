@@ -104,7 +104,9 @@ def test_full_loop_over_stdio(engine: EngineProcess, tmp_path: Path) -> None:
     assert result["resolution"] == [640, 360]
     assert result["graph"]["nodes"] == []
 
-    # 2) 连接后引擎会自动推帧（前端画面栏就靠这个）
+    # 2) 界面告诉引擎要看多少帧，引擎才开始推（默认不推，免得灌满控制通道）
+    streamed = engine.call("device.stream", {"deviceId": DEVICE_ID, "fps": 15})
+    assert streamed == {"ok": True, "streamFps": 15.0}
     frame = engine.wait_for(lambda message: message.get("method") == "engine.frame")
     params = frame["params"]
     assert params["deviceId"] == DEVICE_ID

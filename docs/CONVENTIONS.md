@@ -358,6 +358,17 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 
 ---
 
+## 12.5 帧数据的传输约定
+
+大块二进制（画面帧）**不允许**塞进 JSON-RPC 消息或 Tauri 事件：
+
+- 引擎 → host：unix socket 原始字节（`GAMEPILOT_FRAME_SOCKET`，见 rpc.md §3.5）
+- host → 界面：`engine_frame` 命令返回 `ArrayBuffer`，前端造 blob URL 给 `<img>`
+- 控制通道（stdio / Tauri 事件）只承载**小消息**：元数据、事件、RPC
+
+同时界面必须用 `device.stream` 告诉引擎"这台设备我看多少帧"（0 = 停推）：
+单画面 10fps、多开每台 4~6fps、窗口不可见 0fps。不做这件事，多设备必然卡。
+
 ## 13. 已知环境坑
 
 | 坑 | 现象 | 解法 |

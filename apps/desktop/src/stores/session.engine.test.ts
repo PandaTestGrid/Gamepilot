@@ -33,6 +33,7 @@ class EngineBridge {
   /** 模拟 Rust 侧的帧缓存：engine_frame 命令从这里取原始字节 */
   private frames = new Map<string, Uint8Array>();
   frameRequests = 0;
+  streamRequests = 0;
 
   start(projectDir: string): void {
     const engineDir = path.resolve(process.cwd(), '..', '..', 'engine');
@@ -99,6 +100,9 @@ class EngineBridge {
       return Promise.reject(new Error(`未知命令: ${command}`));
     }
     const { method, params } = (args ?? {}) as { method: string; params: Record<string, unknown> };
+    if (method === 'device.stream') {
+      this.streamRequests += 1;
+    }
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -172,6 +176,8 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     expect(frame?.imageUrl.startsWith('blob:')).toBe(true);
     expect(frame?.resolution).toEqual([320, 180]);
     expect((bridge.current as unknown as { frameRequests: number }).frameRequests).toBeGreaterThan(0);
+    // 引擎默认不推帧：连接后前端应当主动告诉它"我要 10fps"，否则永远收不到画面
+    expect((bridge.current as unknown as { streamRequests: number }).streamRequests).toBeGreaterThan(0);
 
     // 首帧时 fps 还没算出来（引擎从第 2 帧起才有 fps），等它涨起来
     await waitFor(() => (useSessionStore.getState().frames[DEVICE_ID]?.fps ?? 0) > 0);

@@ -30,6 +30,7 @@ from .core.graph import Edge, Graph, Node
 from .core.state_machine import Engine
 from .core.trace import TraceBuffer
 from .devices.base import Controller
+from .frames import FrameSink
 from .project import Project
 
 logger = logging.getLogger("gamepilot.session")
@@ -74,10 +75,14 @@ class DeviceSession:
         self._last_emit_at: float | None = None
         # 推给界面的帧率（0 = 暂停推帧）。识别/状态机不受影响，仍按 fps_limit 跑，
         # 这样"界面不看这台设备"时不会白烧 CPU 与带宽（多设备时尤其明显）
-        self.stream_fps = 15.0
+        # 默认 0：界面明确要了才推。连接瞬间就按 15fps 推帧会把控制通道（同一根
+        # stdout）灌满，RPC 响应排在几万行帧后面 —— 表现就是"卡在 connecting、一帧都收不到"
+        self.stream_fps = 0.0
+        # 帧走独立 socket（见 frames.py）：不占控制通道，宿主也不做 base64
+        self.frames = FrameSink.from_env()
         self._last_push_at = 0.0
         self._last_seq: int | None = None
-        self._last_jpeg: str | None = None
+        self._last_jpeg: bytes | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -89,6 +94,8 @@ class DeviceSession:
         if self.started:
             return
         self._stop.clear()
+        if self.frames is not None:
+            self.frames.start()  # 帧通道：JPEG 走独立 socket，不占控制通道
         self._thread = threading.Thread(target=self._loop, name=f"capture-{self.device_id}", daemon=True)
         self._thread.start()
         self.started = True
@@ -99,6 +106,8 @@ class DeviceSession:
         if self._thread is not None:
             self._thread.join(timeout=3)
         self._thread = None
+        if self.frames is not None:
+            self.frames.close()
         self.started = False
         with self.lock:
             self.running = False
@@ -170,11 +179,18 @@ class DeviceSession:
         # 画面没变（scrcpy 静止时会重复同一帧）就复用上次的 JPEG，省掉一次编码
         seq = getattr(self.controller, "_frame_seq", None)
         if seq is not None and seq == self._last_seq and self._last_jpeg is not None:
-            jpeg = self._last_jpeg
+            jpeg_bytes = self._last_jpeg
         else:
-            jpeg = self._encode(frame.image)
+            jpeg_bytes = self._encode_jpeg(frame.image)
             self._last_seq = seq
-            self._last_jpeg = jpeg
+            self._last_jpeg = jpeg_bytes
+
+        # 帧走独立 socket（原始字节）；没有 socket 时退回 base64 塞在通知里（单测/非 unix）
+        send_raw = self.frames is not None
+        if send_raw:
+            assert self.frames is not None
+            self.frames.submit(self.device_id, jpeg_bytes)
+
         payload = {
             "deviceId": self.device_id,
             "index": frame.index,
@@ -186,17 +202,18 @@ class DeviceSession:
             "fps": round(self.fps, 1),
             "captureMs": round(self.capture_ms, 1),
             "detections": detections,
-            "jpeg": jpeg,
+            **({} if send_raw else {"jpeg": base64.b64encode(jpeg_bytes).decode("ascii")}),
         }
         self.emit("engine.frame", payload)
 
-    def _encode(self, image: np.ndarray) -> str:
+    def _encode_jpeg(self, image: np.ndarray) -> bytes:
+        """编码成 JPEG 原始字节（缩到 jpeg_width）。返回空 bytes 表示编码失败。"""
         height, width = image.shape[:2]
         if width > self.jpeg_width:
             scale = self.jpeg_width / float(width)
             image = cv2.resize(image, (self.jpeg_width, max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
         ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
-        return base64.b64encode(buffer.tobytes()).decode("ascii") if ok else ""
+        return buffer.tobytes() if ok else b""
 
     def _on_engine_event(self, event: Any) -> None:
         self.emit("engine.event", {"deviceId": self.device_id, **event.to_dict()})

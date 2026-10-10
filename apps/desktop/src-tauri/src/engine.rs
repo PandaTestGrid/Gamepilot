@@ -83,13 +83,27 @@ pub fn engine_start(app: AppHandle, bridge: State<'_, Bridge>) -> Result<String,
     }
 
     let (program, args, cwd) = resolve_engine_command()?;
-    let mut child = Command::new(&program)
+
+    // 帧走独立通道：引擎把 JPEG 以原始字节写进这个 unix socket。
+    // 走 stdout 的话，两台设备就是 2.4MB/s 的 base64 JSON 挤在控制通道上，
+    // RPC 响应排在几万行帧后面，界面会"卡在 connecting、一帧都收不到"。
+    let mut command = Command::new(&program);
+    command
         .args(&args)
         .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // 引擎日志走 stderr，直接继承到应用日志，不污染协议流
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let frame_socket = bind_frame_socket();
+    if let Some((path, listener)) = frame_socket {
+        command.env("GAMEPILOT_FRAME_SOCKET", &path);
+        let app_for_frames = app.clone();
+        std::thread::spawn(move || read_frames(app_for_frames, listener));
+        log::info!("帧通道: {}", path.display());
+    }
+
+    let mut child = command
         .spawn()
         .map_err(|e| format!("启动引擎失败 ({}): {e}", program.display()))?;
 
@@ -101,6 +115,73 @@ pub fn engine_start(app: AppHandle, bridge: State<'_, Bridge>) -> Result<String,
 
     *guard = Some(EngineProcess { child, stdin });
     Ok(format!("started: {}", program.display()))
+}
+
+/// 绑定帧通道的 unix socket。
+///
+/// 返回 `None` 时引擎会退回"base64 塞在通知里"的老路（单测/非 unix 平台用得上）。
+#[cfg(unix)]
+fn bind_frame_socket() -> Option<(std::path::PathBuf, std::os::unix::net::UnixListener)> {
+    // 必须用短路径：macOS 的 AF_UNIX 地址上限约 104 字节，
+    // std::env::temp_dir()（/var/folders/...）叠上文件名有超限风险
+    let path =
+        std::path::PathBuf::from(format!("/tmp/gamepilot-frames-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    match std::os::unix::net::UnixListener::bind(&path) {
+        Ok(listener) => Some((path, listener)),
+        Err(error) => {
+            log::warn!("帧通道 socket 创建失败（回退 base64 通道）: {error}");
+            None
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn bind_frame_socket() -> Option<(std::path::PathBuf, ())> {
+    None
+}
+
+/// 读帧通道：`[idLen u8][deviceId][jpegLen u32 BE][jpeg bytes]`，循环下去。
+#[cfg(unix)]
+fn read_frames(app: AppHandle, listener: std::os::unix::net::UnixListener) {
+    use std::io::{BufReader, Read};
+
+    let (stream, _) = match listener.accept() {
+        Ok(pair) => pair,
+        Err(error) => {
+            log::warn!("帧通道连接失败: {error}");
+            return;
+        }
+    };
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut id_len = [0u8; 1];
+        if reader.read_exact(&mut id_len).is_err() {
+            break;
+        }
+        let mut id_buf = vec![0u8; id_len[0] as usize];
+        if reader.read_exact(&mut id_buf).is_err() {
+            break;
+        }
+        let mut size_buf = [0u8; 4];
+        if reader.read_exact(&mut size_buf).is_err() {
+            break;
+        }
+        let size = u32::from_be_bytes(size_buf) as usize;
+        if size == 0 || size > 8 * 1024 * 1024 {
+            log::warn!("帧通道收到非法长度 {size}，断开");
+            break;
+        }
+        let mut jpeg = vec![0u8; size];
+        if reader.read_exact(&mut jpeg).is_err() {
+            break;
+        }
+        let device_id = String::from_utf8_lossy(&id_buf).to_string();
+        if let Ok(mut frames) = app.state::<Bridge>().frames.lock() {
+            frames.insert(device_id, jpeg);
+        }
+    }
+    log::info!("帧通道已关闭");
 }
 
 /// 发一个 JSON-RPC 请求并等待对应响应。

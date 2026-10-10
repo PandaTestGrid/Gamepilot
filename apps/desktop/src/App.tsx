@@ -79,14 +79,23 @@ export function App(): ReactNode {
   // 平时不设置这个变量就没有任何影响；用它可以把"连接→出帧→渲染"整条链路无头验完
   const connectSession = useSessionStore((state) => state.connect);
   useEffect(() => {
-    const wanted = import.meta.env.VITE_GP_AUTOCONNECT;
-    if (!wanted || engineStatus !== 'ready' || devices.length === 0) {
+    const wanted = (import.meta.env.VITE_GP_AUTOCONNECT ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (wanted.length === 0 || engineStatus !== 'ready' || devices.length === 0) {
       return;
     }
-    const target = devices.find((item) => item.id.includes(wanted) || item.uri.includes(wanted));
-    if (target && !useSessionStore.getState().isReady(target.id)) {
-      devLog(`开发钩子：自动连接 ${target.id}`);
-      void connectSession(target.id, target.uri);
+    for (const key of wanted) {
+      const target = devices.find((item) => item.id.includes(key) || item.uri.includes(key));
+      if (target && !useSessionStore.getState().isReady(target.id)) {
+        devLog(`开发钩子：自动连接 ${target.id}`);
+        void connectSession(target.id, target.uri);
+      }
+    }
+    // VITE_GP_GRID=1 直接开多开网格（验证多画面用）
+    if (import.meta.env.VITE_GP_GRID === '1') {
+      useDeviceStore.setState({ gridView: true });
     }
   }, [engineStatus, devices, connectSession]);
 

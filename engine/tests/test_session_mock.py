@@ -44,6 +44,7 @@ def session(tmp_path: Path) -> Any:
         jpeg_width=320,
     )
     instance.notifications = notifications  # type: ignore[attr-defined]
+    instance.set_stream_fps(20.0)  # 引擎默认不推帧：界面要了才推
     instance.start()
     assert _wait(lambda: instance.index >= 2), "截图循环没跑起来"
     yield instance

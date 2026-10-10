@@ -259,7 +259,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         if (payload.graph) {
           applyGraph(payload.deviceId, payload.graph, get().frames[payload.deviceId]);
         }
-        startFramePolling(payload.deviceId);
+        applyStreamPolicy(payload.deviceId, 10);
         useEventStore.getState().append(payload.deviceId, 'device_reconnected', {
           message:
             `已连接 ${payload.uri ?? ''} ${payload.resolution ? payload.resolution.join('×') : ''}`.trim(),
@@ -298,7 +298,9 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       }));
       applyGraph(result.deviceId, result.graph, get().frames[result.deviceId]);
       set((current) => ({ ready: { ...current.ready, [result.deviceId]: true } }));
-      startFramePolling(result.deviceId);
+      // 连接即要 10fps：引擎默认不推帧（避免灌满控制通道），
+      // 独立窗口（?pane=screen）里没有 App 的策略 effect，靠这一步也能出画面
+      applyStreamPolicy(result.deviceId, 10);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

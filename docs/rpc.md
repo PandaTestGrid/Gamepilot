@@ -121,6 +121,27 @@ Rust 桥的调度规则：
 - params：`{}`
 - result：`{ "ok": true }`
 
+## 3.5 帧通道（不走 stdio）
+
+`engine.frame` 的 **JPEG 不在 JSON 里**：引擎把它以原始字节写进一个 unix socket
+（环境变量 `GAMEPILOT_FRAME_SOCKET`，由 Rust 桥创建并传入），host 侧读取后缓存，
+前端用命令 `engine_frame` 按需取原始字节。
+
+为什么这么做：两台设备按 15fps 推 60~143KB 的 JPEG，base64 后是 **2.4MB/s 的 JSON 行**。
+和控制消息共用 stdout 时，RPC 响应会排在几万行帧后面 —— 实测表现为
+"界面卡在 connecting、一帧都收不到"，应用整体卡顿。
+
+改造后实测：控制通道流量 2400KB/s → **17KB/5s**，RPC 往返 0ms。
+
+帧格式（unix socket，循环）：
+
+```
+[idLen u8][deviceId][jpegLen u32 BE][jpeg bytes]
+```
+
+- 引擎侧队列满时**丢帧**而不是阻塞截图/识别循环（状态机不能因为界面慢而停）
+- 没有这条通道时（单测、非 unix）自动退回"base64 塞在 `engine.frame` 通知里"
+
 ## 4. 通知表（引擎 → 前端）
 
 | 方法 | 状态 | 说明 |
