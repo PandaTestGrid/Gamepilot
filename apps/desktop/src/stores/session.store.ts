@@ -12,14 +12,18 @@ import { create } from 'zustand';
 
 import {
   connectDevice,
+  graphGet,
   deviceKey,
   deviceSwipe,
   deviceTap,
   deviceTouch,
   devLog,
+  projectGet,
+  projectSet,
   fetchFrame,
   fetchFrameDataUrl,
   setStreamFps,
+  type ProjectInfo,
   disconnectDevice,
   type EngineEventPayload,
   type FramePayload,
@@ -56,6 +60,8 @@ interface SessionState {
   readonly ready: Readonly<Record<string, boolean>>;
   /** 投屏通道（scrcpy / screencap）与说明，底栏显示 */
   readonly links: Readonly<Record<string, { channel: string; note: string }>>;
+  /** 当前脚本（工程）目录 */
+  readonly project: ProjectInfo | null;
   readonly connectingPhase: Readonly<Record<string, string>>;
   readonly error: string | null;
   readonly init: () => Promise<() => void>;
@@ -85,6 +91,10 @@ interface SessionState {
   readonly pressKey: (deviceId: string, key: string) => Promise<void>;
   /** 实时触控事件（down/move/up）；move 是高频的，不等待响应 */
   readonly touch: (deviceId: string, phase: 'down' | 'move' | 'up', x: number, y: number) => void;
+  /** 刷新脚本目录信息（顶栏显示） */
+  readonly refreshProject: () => Promise<void>;
+  /** 切换脚本目录：引擎会热重载所有设备的状态图 */
+  readonly switchProject: (dir: string) => Promise<void>;
 }
 
 function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState): void {
@@ -204,11 +214,13 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   running: {},
   ready: {},
   links: {},
+  project: null,
   connectingPhase: {},
   error: null,
 
   init: async () => {
     devLog('session: 开始订阅 engine://event');
+    void get().refreshProject();
     let seen = 0;
     const unlisten = await onEngineMessage((method, params) => {
       seen += 1;
@@ -263,6 +275,13 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         set((current) => ({
           connectingPhase: { ...current.connectingPhase, [payload.deviceId]: payload.phase ?? '' },
         }));
+        return;
+      }
+
+      if (method === 'project.changed') {
+        const info = params as unknown as ProjectInfo;
+        set({ project: info });
+        devLog(`脚本目录已切换: ${info.root}`);
         return;
       }
 
@@ -394,6 +413,31 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   clearError: () => set({ error: null }),
 
   setStreamPolicy: (deviceId, fps) => applyStreamPolicy(deviceId, fps),
+
+  refreshProject: async () => {
+    try {
+      set({ project: await projectGet() });
+    } catch (error) {
+      devLog(`project.get 失败: ${String(error)}`);
+    }
+  },
+
+  switchProject: async (dir) => {
+    try {
+      const info = await projectSet(dir);
+      set({ project: info, error: null });
+      // 换目录后每台设备的状态图都变了：重新拉一遍（引擎侧已热重载）
+      for (const deviceId of Object.keys(get().ready)) {
+        if (!get().ready[deviceId]) {
+          continue;
+        }
+        const graph = await graphGet(deviceId);
+        applyGraph(deviceId, graph, get().frames[deviceId]);
+      }
+    } catch (error) {
+      set({ error: `切换脚本目录失败: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  },
 
   touch: (deviceId, phase, x, y) => {
     if (!get().ready[deviceId]) {

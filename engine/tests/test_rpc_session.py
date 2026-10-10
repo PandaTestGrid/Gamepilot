@@ -248,3 +248,55 @@ def test_realtime_touch_stream(engine: EngineProcess, tmp_path: Path) -> None:
     request_id = engine.send("device.touch", {"deviceId": DEVICE_ID, "phase": "fly", "x": 0.5, "y": 0.5})
     error = engine.wait_for(lambda item: item.get("id") == request_id)
     assert "error" in error
+
+
+def test_project_directory_switch_and_template_image(engine: EngineProcess, tmp_path: Path) -> None:
+    """脚本目录可以运行时切换；模板截图能取回来给界面显示。"""
+    engine.call("device.connect", {"uri": DEVICE_URI})
+
+    # 录一个模板 → 它会落到当前工程目录
+    recorded = engine.call(
+        "record.template",
+        {
+            "deviceId": DEVICE_ID,
+            "rect": [0.60, 0.30, 0.16, 0.12],
+            "label": "logo",
+            "threshold": 0.8,
+            "nodeId": "main",
+            "nodeName": "主界面",
+        },
+    )
+    assert recorded["mode"] == "template"
+
+    # 模板截图（彩色 + 黑白）都能取到，尺寸和录的时候一致
+    color = engine.call("template.image", {"label": "logo"})
+    assert color["width"] > 0 and color["height"] > 0
+    assert color["png"], "应该有 base64 PNG"
+
+    gray = engine.call("template.image", {"label": "logo", "grayscale": True})
+    assert gray["png"] and gray["png"] != color["png"], "黑白版应该是另一张图"
+
+    before = engine.call("project.get")
+    assert before["recognizers"] == 1
+    assert before["templates"] >= 1
+
+    # 换一个脚本目录：图与模板都要跟着到新目录
+    target = tmp_path / "my-script"
+    switched = engine.call("project.set", {"dir": str(target)})
+    assert switched["root"] == str(target)
+    assert switched["nodes"] == 0 and switched["edges"] == 0, "新目录是空的"
+    assert (target / "templates").is_dir()
+
+    # 切回去：原来的工程内容还在
+    back = engine.call("project.set", {"dir": before["root"]})
+    assert back["recognizers"] == 1
+
+    # 列目录：能看到这个工程
+    listing = engine.call("project.list", {"base": str(Path(before["root"]).parent)})
+    names = [item["name"] for item in listing["items"]]
+    assert Path(before["root"]).name in names
+
+    # 不存在的识别器要报错
+    request_id = engine.send("template.image", {"label": "不存在"})
+    error = engine.wait_for(lambda item: item.get("id") == request_id)
+    assert "error" in error

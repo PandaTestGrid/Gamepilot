@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from .actions import Action
+from .conditions import Condition
 from .geometry import Rect
 from .recognizer import Recognizer, build_recognizer
 
@@ -53,7 +55,16 @@ class Edge:
     min_score: float = 0.0
     cooldown_ms: int = 0
     retries: int = 1
-    action: dict[str, object] = field(default_factory=dict)
+    action: dict[str, Any] = field(default_factory=dict)
+    # 判断条件（all_of / any_of / none_of / min_score / within_ms）。
+    # 没写 condition 时，用 when 当 all_of —— 完全兼容老的 graph.json
+    condition: Condition = field(default_factory=Condition)
+
+    def __post_init__(self) -> None:
+        # 直接构造 Edge（测试、脚本）时：没给条件就用 when 当 all_of，保持老语义。
+        # 否则空条件会被当成"永远成立"，恢复边会在第一帧就误触发。
+        if not self.condition.labels and self.when:
+            self.condition = Condition(all_of=(self.when,))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Edge:
@@ -68,11 +79,20 @@ class Edge:
             min_score=float(data.get("min_score", 0.0)),
             cooldown_ms=int(data.get("cooldown_ms", 0)),
             retries=int(data.get("retries", 1)),
-            action=dict(data.get("action") or {"type": "click", "target": when}),
+            action=Action.parse(
+                data.get("action") or {"type": "click", "target": when}, fallback_target=when
+            ).to_dict(),
+            condition=Condition.parse(data.get("condition"), fallback=when),
         )
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"id": self.id, "when": self.when, "action": dict(self.action)}
+        if (
+            (self.condition.labels and set(self.condition.labels) != {self.when})
+            or self.condition.within_ms
+            or self.condition.min_score
+        ):
+            out["condition"] = self.condition.to_dict()
         if self.src:
             out["from"] = self.src
         if self.dst:
@@ -185,11 +205,13 @@ class Graph:
                 raise ValueError(f"边 {edge.id} 的 from 节点不存在: {edge.src}")
             if edge.dst and edge.dst not in self.nodes:
                 raise ValueError(f"边 {edge.id} 的 to 节点不存在: {edge.dst}")
-            if edge.when not in self.recognizers:
-                raise ValueError(f"边 {edge.id} 引用了未定义的识别器: {edge.when}")
-            target = edge.action.get("target")
-            if isinstance(target, str) and target and target not in self.recognizers:
-                raise ValueError(f"边 {edge.id} 的动作引用了未定义的识别器: {target}")
+            for condition_label in edge.condition.labels or (edge.when,):
+                if condition_label not in self.recognizers:
+                    raise ValueError(f"边 {edge.id} 的条件引用了未定义的识别器: {condition_label}")
+            action = Action.parse(edge.action, fallback_target=edge.when)
+            for action_label in (action.target, action.to_target):
+                if action_label and action_label not in self.recognizers:
+                    raise ValueError(f"边 {edge.id} 的动作引用了未定义的识别器: {action_label}")
         for node in self.nodes.values():
             for label in node.enter:
                 if label not in self.recognizers:

@@ -24,6 +24,8 @@ INTERNAL_ERROR = -32603
 NOTIFY_READY = "engine.ready"
 NOTIFY_DEVICE_CONNECTING = "device.connecting"
 NOTIFY_DEVICE_CONNECTED = "device.connected"
+# 脚本目录切换（界面顶栏跟着变）
+NOTIFY_PROJECT_CHANGED = "project.changed"
 NOTIFY_DEVICE_DISCONNECTED = "device.disconnected"
 NOTIFY_DEVICE_FAILED = "device.failed"
 NOTIFY_LOG = "engine.log"
@@ -49,6 +51,11 @@ METHOD_DEVICE_SWIPE = "device.swipe"
 METHOD_DEVICE_KEY = "device.key"
 
 # 状态图
+# 工程（脚本目录）与素材
+METHOD_PROJECT_GET = "project.get"
+METHOD_PROJECT_SET = "project.set"
+METHOD_PROJECT_LIST = "project.list"
+METHOD_TEMPLATE_IMAGE = "template.image"
 METHOD_GRAPH_GET = "graph.get"
 METHOD_GRAPH_SAVE = "graph.save"
 

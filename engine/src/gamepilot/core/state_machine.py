@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..devices.base import Controller
+from .actions import Action
+from .conditions import ConditionTimer
 from .frame import Detection, Frame
 from .graph import Edge, Graph
 from .recognizer import VoteFilter, perceive
@@ -57,11 +59,17 @@ class Engine:
             else _as_int(graph.default("transition_timeout_ms", 4000), 4000)
         )
         self.vote = VoteFilter(vote_window)
+        # 限时等待（condition.within_ms）的计时状态
+        self.condition_timer = ConditionTimer()
         self.transition_timeout_ms = timeout
         self.current: str | None = start_node
         self.pending: Pending | None = None
         self.detections: dict[str, Detection] = {}
         self.stats = {"ticks": 0, "actions": 0, "transitions": 0, "failed": 0, "recoveries": 0}
+        self._timeout_reported: set[str] = set()
+        # 本次"进入节点"期间已经触发过的边（dst 为空的边默认只触发一次，
+        # 否则 14fps 下会每帧点一次 —— 实测会连点 5 次）
+        self._fired_in_node: set[str] = set()
         self.seq = 0
         self._outbox: list[TraceEvent] = []
         self._last_fire: dict[str, float] = {}
@@ -97,6 +105,7 @@ class Engine:
                 self._emit("recovery_matched", node=self.current, edge=edge, message=f"中断: {edge.when}")
                 self._execute(edge)
                 self._last_fire[edge.id] = time.time()
+                self._fired_in_node.add(edge.id)
                 # 关掉弹窗后要确认它真的消失了，再重新定位所处界面
                 self.pending = Pending(
                     kind="settle",
@@ -119,6 +128,7 @@ class Engine:
                 self._emit("edge_matched", node=self.current, edge=edge, message=f"{edge.when} → {edge.dst or '原地'}")
                 self._execute(edge)
                 self._last_fire[edge.id] = time.time()
+                self._fired_in_node.add(edge.id)
                 if edge.dst:
                     self.pending = Pending(
                         kind="transition",
@@ -149,13 +159,46 @@ class Engine:
         )
 
     def _guard_ok(self, edge: Edge) -> bool:
-        detection = self.detections.get(edge.when)
-        if detection is None or detection.state != "confirmed" or detection.score < edge.min_score:
+        """条件是否成立（可带限时等待）。
+
+        返回 False 的原因有三种：条件没成立、冷却中、限时等待超时。
+        超时会发一条 `edge_timeout` 事件（每条边每次进入节点只报一次），
+        这样"等界面出现最多 10 秒"这种意图在事件栏能看见，而不是静默什么都不做。
+        """
+        if edge.id in self._fired_in_node and (edge.dst is None or edge.cooldown_ms <= 0):
+            # 这次访问已经做过了：不再考虑它，也**不该再报"等待超时"**
+            # （真机跑脚本时踩到过：边执行完 1.5 秒后又多报一条 edge_timeout）
             return False
+        condition = edge.condition
+        status = self.condition_timer.check(self.current, edge.id, condition.within_ms, time.time())
+        if status == "timeout":
+            key = f"{self.current}:{edge.id}"
+            if key not in self._timeout_reported:
+                self._timeout_reported.add(key)
+                self._emit(
+                    "edge_timeout",
+                    node=self.current,
+                    edge=edge,
+                    message=f"等待超时（{condition.within_ms}ms 内未满足: {condition.describe()}）",
+                )
+            return False
+        if status == "wait" and not condition.matches(self.detections):
+            # 在限时窗口内：条件成立就立刻走，不成立就继续等
+            return False
+        if not condition.matches(self.detections):
+            return False
+        if edge.min_score and edge.min_score > condition.min_score:
+            # 兼容老字段：边上的 min_score 仍然生效
+            primary = self.detections.get(edge.when)
+            if primary is None or primary.score < edge.min_score:
+                return False
         cooldown = edge.cooldown_ms / 1000
         if cooldown <= 0:
             return True
         return time.time() - self._last_fire.get(edge.id, 0.0) >= cooldown
+
+    def _timeout_key(self, node_id: str | None, edge_id: str) -> str:
+        return f"{node_id}:{edge_id}"
 
     def _resolve(self) -> tuple[str | None, float]:
         best: tuple[str | None, float] = (None, 0.0)
@@ -175,6 +218,10 @@ class Engine:
         return best
 
     def _enter(self, node_id: str, score: float) -> None:
+        # 进入新节点：限时等待重新计时
+        self.condition_timer.arm(node_id, time.time())
+        self._timeout_reported = {item for item in self._timeout_reported if not item.startswith(f"{node_id}:")}
+        self._fired_in_node = set()  # 新的一次访问：动作可以再做一遍
         changed = node_id != self.current
         self.current = node_id
         self._entered_at = time.time()
@@ -226,41 +273,120 @@ class Engine:
             )
 
     def _execute(self, edge: Edge) -> None:
-        action = edge.action or {}
-        kind = str(action.get("type", "click"))
+        """执行一条边上的动作。
+
+        除了 `wait`，动作都是"发出去就返回"：是否真的切了界面，由后续帧的条件确认
+        （低帧率 + 高延迟下这样才不会把时序搞乱）。
+        """
         try:
-            if kind == "click":
-                target = action.get("target")
-                point = None
-                if isinstance(target, str) and target:
-                    detection = self.detections.get(target)
-                    if detection is not None:
-                        point = detection.rect.center
-                else:
-                    rect_value = action.get("rect")
-                    if isinstance(rect_value, list):
-                        point = _rect_center(rect_value)
-                    elif action.get("x") is not None:
-                        point = (_as_float(action.get("x"), 0.0), _as_float(action.get("y"), 0.0))
-                if point is None:
-                    raise ValueError(f"click 缺少可定位的目标: {action}")
-                self.controller.click(point[0], point[1])
+            action = Action.parse(edge.action, fallback_target=edge.when)
+        except ValueError as exc:
+            self.stats["failed"] += 1
+            self._emit("action_failed", node=self.current, edge=edge, message=str(exc))
+            return
+
+        try:
+            if action.type == "wait":
+                time.sleep(action.seconds)
+                self._emit("action_executed", node=self.current, edge=edge, message=action.describe())
+                return
+
+            if action.type == "key":
+                self._press(action.value)
+                self.stats["actions"] += 1
+                self._emit("action_executed", node=self.current, edge=edge, message=action.describe())
+                return
+
+            if action.type == "text":
+                self.controller.text(action.value)
+                self.stats["actions"] += 1
+                self._emit("action_executed", node=self.current, edge=edge, message=action.describe())
+                return
+
+            start_point = self._resolve_point(action, action.target, action.x, action.y)
+            if action.type == "click":
+                self.controller.click(start_point[0], start_point[1])
                 self.stats["actions"] += 1
                 self._emit(
-                    "action_executed", node=self.current, edge=edge, message=f"click({point[0]:.3f},{point[1]:.3f})"
+                    "action_executed",
+                    node=self.current,
+                    edge=edge,
+                    message=f"click({start_point[0]:.3f},{start_point[1]:.3f})",
                 )
-            elif kind == "wait":
-                time.sleep(_as_float(action.get("seconds"), 0.5))
-                self._emit("action_executed", node=self.current, edge=edge, message="wait")
-            elif kind == "key":
-                self.controller.key(str(action.get("value", "")))
+            elif action.type == "long_press":
+                self._long_press(start_point[0], start_point[1], action.duration_ms)
                 self.stats["actions"] += 1
-                self._emit("action_executed", node=self.current, edge=edge, message=f"key({action.get('value')})")
-            else:
-                raise ValueError(f"未支持的动作类型: {kind}")
+                self._emit(
+                    "action_executed",
+                    node=self.current,
+                    edge=edge,
+                    message=f"long_press({start_point[0]:.3f},{start_point[1]:.3f},{action.duration_ms}ms)",
+                )
+            elif action.type == "swipe":
+                end_point = self._resolve_point(action, action.to_target, action.to_x, action.to_y, allow_auto=True)
+                self.controller.swipe(
+                    start_point[0], start_point[1], end_point[0], end_point[1], duration=action.duration_ms / 1000.0
+                )
+                self.stats["actions"] += 1
+                self._emit(
+                    "action_executed",
+                    node=self.current,
+                    edge=edge,
+                    message=(
+                        f"swipe({start_point[0]:.2f},{start_point[1]:.2f} → "
+                        f"{end_point[0]:.2f},{end_point[1]:.2f}, {action.duration_ms}ms)"
+                    ),
+                )
         except Exception as exc:
             self.stats["failed"] += 1
-            self._emit("action_failed", node=self.current, edge=edge, message=f"{kind} 失败: {exc}")
+            self._emit("action_failed", node=self.current, edge=edge, message=f"{action.type} 失败: {exc}")
+
+    def _resolve_point(
+        self,
+        action: Action,
+        target: str | None,
+        x: float | None,
+        y: float | None,
+        *,
+        allow_auto: bool = False,
+    ) -> tuple[float, float]:
+        """把"目标标签 / 矩形 / 坐标"统一解析成归一化点。
+
+        `allow_auto=True`（滑动终点用）：标签没命中、也没给坐标时，
+        退化成"沿同一条线的反向滑动"，总比什么都不做强。
+        """
+        if target:
+            detection = self.detections.get(target)
+            if detection is not None:
+                return detection.rect.center
+            if not allow_auto:
+                raise ValueError(f"目标 {target} 当前没有命中，无法定位")
+        if action.rect is not None:
+            rect = action.rect
+            return (rect[0] + rect[2] / 2, rect[1] + rect[3] / 2)
+        if x is not None and y is not None:
+            return (x, y)
+        if allow_auto:
+            return (0.5, 0.5)
+        raise ValueError(f"{action.type} 缺少可定位的目标: {action.to_dict()}")
+
+    def _press(self, name: str) -> None:
+        """功能键：优先用控制器的 press（scrcpy 控制通道），否则回退 key。"""
+        controller = self.controller
+        if hasattr(controller, "press"):
+            controller.press(name)
+        else:
+            controller.key(name)
+
+    def _long_press(self, x: float, y: float, duration_ms: int) -> None:
+        """长按：有实时触控能力就按下-等待-抬起，否则退化成一次点击。"""
+        controller = self.controller
+        if hasattr(controller, "touch"):
+            controller.touch("down", x, y)
+            time.sleep(max(0.05, duration_ms / 1000.0))
+            controller.touch("up", x, y)
+        else:
+            controller.click(x, y)
 
     def _emit(
         self,

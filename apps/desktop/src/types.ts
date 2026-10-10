@@ -30,6 +30,30 @@ export interface GraphNodeView {
 
 export type EdgeKind = 'normal' | 'recovery';
 
+/** 判断条件（和引擎 core/conditions.py 一一对应） */
+export interface EdgeCondition {
+  readonly allOf: readonly string[];
+  readonly anyOf: readonly string[];
+  readonly noneOf: readonly string[];
+  readonly minScore: number;
+  /** 限时等待：进入源节点后最多等这么久，超时这条边就不走了 */
+  readonly withinMs: number;
+}
+
+/** 基础操作（和引擎 core/actions.py 一一对应） */
+export interface EdgeAction {
+  readonly type: 'click' | 'long_press' | 'swipe' | 'wait' | 'key' | 'text';
+  readonly target?: string;
+  readonly toTarget?: string;
+  readonly x?: number;
+  readonly y?: number;
+  readonly toX?: number;
+  readonly toY?: number;
+  readonly durationMs?: number;
+  readonly seconds?: number;
+  readonly value?: string;
+}
+
 export interface GraphEdgeView {
   readonly id: string;
   readonly from: string | null;
@@ -40,7 +64,10 @@ export interface GraphEdgeView {
   readonly minScore: number;
   readonly cooldownMs: number;
   readonly retries: number;
+  /** 显示用的一行摘要，例如 "点击 start" */
   readonly action: string;
+  readonly condition: EdgeCondition;
+  readonly actionSpec: EdgeAction;
 }
 
 export type RecognizerType = 'template' | 'color' | 'ocr';
@@ -48,6 +75,8 @@ export type RecognizerType = 'template' | 'color' | 'ocr';
 export interface RecognizerView {
   readonly label: string;
   readonly type: RecognizerType;
+  /** 模板文件名（template 识别器才有），界面用它去取模板截图 */
+  readonly template?: string;
   readonly score: number;
   readonly threshold: number;
   /** 归一化 ROI [x, y, w, h] */

@@ -22,11 +22,12 @@ import {
 import '@xyflow/react/dist/style.css';
 import { type ReactNode, useCallback, useMemo } from 'react';
 
+import { EdgeEditor } from '@/features/graph/EdgeEditor';
+
 import { GhostButton, PanelShell } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { useGraphStore } from '@/stores/graph.store';
-import type { GraphData, GraphEdgeView } from '@/types';
 
 interface StateNodeData extends Record<string, unknown> {
   label: string;
@@ -130,7 +131,11 @@ export function GraphPane(): ReactNode {
           <GhostButton>JSON</GhostButton>
         </>
       }
-      footer={selected ? <EdgeInspector edge={selected} graph={graph} /> : undefined}
+      footer={
+        selected ? (
+          <EdgeEditor key={selected.id} deviceId={activeId} edge={selected} graph={graph} />
+        ) : undefined
+      }
     >
       <div className="relative h-full bg-canvas">
         {nodes.length === 0 ? (
@@ -172,37 +177,5 @@ export function GraphPane(): ReactNode {
         )}
       </div>
     </PanelShell>
-  );
-}
-
-function EdgeInspector({ edge, graph }: { edge: GraphEdgeView; graph: GraphData | undefined }): ReactNode {
-  return (
-    <div className="shrink-0 border-t border-line bg-panel px-2 py-1.5">
-      <div className="mb-1 flex items-center gap-2">
-        <span className={cn('text-body', edge.kind === 'recovery' ? 'text-recovery' : 'text-confirmed')}>
-          {edge.kind === 'recovery' ? '⚡ ' : ''}
-          {edge.id}
-        </span>
-        <span className="text-badge text-faint">
-          {edge.from ?? '（全局）'} → {edge.to ?? '（原地）'} · when = {edge.when} · action = {edge.action}
-        </span>
-        <div className="flex-1" />
-        <span className="text-badge text-faint">共 {graph?.edges.length ?? 0} 条边</span>
-      </div>
-      <div className="grid grid-cols-4 gap-2 text-badge text-dim">
-        <span>
-          priority <span className="text-fg">{edge.priority}</span>
-        </span>
-        <span>
-          min_score <span className="text-fg">{edge.minScore.toFixed(2)}</span>
-        </span>
-        <span>
-          cooldown <span className="text-fg">{edge.cooldownMs}ms</span>
-        </span>
-        <span>
-          retries <span className="text-fg">{edge.retries}</span>
-        </span>
-      </div>
-    </div>
   );
 }

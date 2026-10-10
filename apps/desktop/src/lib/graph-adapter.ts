@@ -6,7 +6,15 @@
  *   2. 引擎的边是扁平 dict → 这里收敛成强类型 GraphEdgeView。
  */
 import type { GraphPayload } from '@/lib/rpc';
-import type { EdgeKind, GraphData, GraphEdgeView, GraphNodeView, RecognizerView } from '@/types';
+import type {
+  EdgeAction,
+  EdgeCondition,
+  EdgeKind,
+  GraphData,
+  GraphEdgeView,
+  GraphNodeView,
+  RecognizerView,
+} from '@/types';
 
 const COLUMNS = 3;
 
@@ -54,6 +62,8 @@ export function toGraphData(
     cooldownMs: num(edge.cooldown_ms, 0),
     retries: num(edge.retries, 1),
     action: str((edge.action as Record<string, unknown> | undefined)?.type, 'click'),
+    condition: toCondition(edge),
+    actionSpec: toAction(edge.action, str(edge.when)),
   }));
 
   const liveScores = new Map((live?.detections ?? []).map((item) => [item.label, item] as const));
@@ -64,6 +74,7 @@ export function toGraphData(
     return {
       label,
       type: type === 'color' ? 'color' : type === 'ocr' ? 'ocr' : 'template',
+      template: typeof spec.template === 'string' ? spec.template : undefined,
       score: live1?.score ?? 0,
       threshold: num(spec.threshold, 0.82),
       roi: [roi[0] ?? 0, roi[1] ?? 0, roi[2] ?? 0, roi[3] ?? 0],
@@ -80,4 +91,107 @@ export function toGraphData(
     activeNodeId: live?.node ?? null,
     pendingNodeId: live?.pending ?? null,
   };
+}
+
+function labels(value: unknown): string[] {
+  if (typeof value === 'string') {
+    return value ? [value] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.filter((item: unknown): item is string => typeof item === 'string' && item.length > 0);
+  }
+  return [];
+}
+
+/** graph.json 的 condition → 界面模型（没写 condition 时等价于 all_of=[when]） */
+function toCondition(edge: Record<string, unknown>): EdgeCondition {
+  const spec = (edge.condition ?? {}) as Record<string, unknown>;
+  const allOf = labels(spec.all_of);
+  const anyOf = labels(spec.any_of);
+  const noneOf = labels(spec.none_of);
+  const when = str(edge.when);
+  return {
+    allOf: allOf.length > 0 || anyOf.length > 0 || noneOf.length > 0 ? allOf : [when],
+    anyOf,
+    noneOf,
+    minScore: num(spec.min_score, num(edge.min_score, 0)),
+    withinMs: num(spec.within_ms, 0),
+  };
+}
+
+/** graph.json 的 action → 界面模型 */
+function toAction(value: unknown, fallbackTarget: string): EdgeAction {
+  const spec = (value ?? {}) as Record<string, unknown>;
+  const type = str(spec.type, 'click');
+  const known = ['click', 'long_press', 'swipe', 'wait', 'key', 'text'];
+  return {
+    type: (known.includes(type) ? type : 'click') as EdgeAction['type'],
+    target: typeof spec.target === 'string' ? spec.target : fallbackTarget,
+    toTarget: typeof spec.to_target === 'string' ? spec.to_target : undefined,
+    x: typeof spec.x === 'number' ? spec.x : undefined,
+    y: typeof spec.y === 'number' ? spec.y : undefined,
+    toX: typeof spec.to_x === 'number' ? spec.to_x : undefined,
+    toY: typeof spec.to_y === 'number' ? spec.to_y : undefined,
+    durationMs: num(spec.duration_ms, 300),
+    seconds: num(spec.seconds, 0.5),
+    value: typeof spec.value === 'string' ? spec.value : '',
+  };
+}
+
+/** 界面模型 → graph.json 的 condition（默认形态就省略，保持文件干净） */
+export function toConditionPayload(
+  condition: EdgeCondition,
+  when: string,
+): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  const allOf = condition.allOf.filter((item) => item !== when);
+  if (allOf.length > 0) {
+    out.all_of = [...allOf];
+  }
+  if (condition.anyOf.length > 0) {
+    out.any_of = [...condition.anyOf];
+  }
+  if (condition.noneOf.length > 0) {
+    out.none_of = [...condition.noneOf];
+  }
+  if (condition.minScore > 0) {
+    out.min_score = condition.minScore;
+  }
+  if (condition.withinMs > 0) {
+    out.within_ms = condition.withinMs;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** 界面模型 → graph.json 的 action */
+export function toActionPayload(action: EdgeAction): Record<string, unknown> {
+  const out: Record<string, unknown> = { type: action.type };
+  if (action.type === 'wait') {
+    out.seconds = action.seconds ?? 0.5;
+    return out;
+  }
+  if (action.type === 'key' || action.type === 'text') {
+    out.value = action.value ?? '';
+    return out;
+  }
+  if (action.target) {
+    out.target = action.target;
+  } else {
+    if (action.x !== undefined) {
+      out.x = action.x;
+    }
+    if (action.y !== undefined) {
+      out.y = action.y;
+    }
+  }
+  if (action.type === 'swipe') {
+    if (action.toTarget) {
+      out.to_target = action.toTarget;
+    } else {
+      out.to_x = action.toX ?? 0.5;
+      out.to_y = action.toY ?? 0.5;
+    }
+  }
+  out.duration_ms = action.durationMs ?? 300;
+  return out;
 }

@@ -1,6 +1,7 @@
 import { Cable, ChevronDown, CirclePlay, LayoutGrid, Redo2, Square, Undo2, Video } from 'lucide-react';
 import { type ReactNode } from 'react';
 
+import { ProjectMenu } from '@/layout/ProjectMenu';
 import { ToolbarButton, VDivider } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -49,6 +50,8 @@ export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRu
   return (
     <header className="flex h-9 shrink-0 items-center bg-panel pr-2">
       <span className="px-3 text-[15px] font-medium tracking-wide">GamePilot</span>
+      <VDivider />
+      <ProjectMenu />
       <VDivider />
 
       <ToolbarButton

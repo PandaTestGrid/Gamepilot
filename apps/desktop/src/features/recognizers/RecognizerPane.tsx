@@ -6,6 +6,7 @@
  */
 import { type ReactNode, useRef } from 'react';
 
+import { TemplateThumb } from '@/features/recognizers/TemplateThumb';
 import { PanelShell, StatusDot } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
@@ -33,7 +34,15 @@ export function RecognizerPane(): ReactNode {
           const pass = item.score >= item.threshold;
           return (
             <div key={item.label} className="border-b border-line/60 px-2 py-1 hover:bg-raised">
-              <div className="flex h-[22px] items-center gap-2">
+              <div className="flex h-[30px] items-center gap-2">
+                {item.type === 'template' && item.template ? (
+                  <TemplateThumb label={item.label} />
+                ) : (
+                  <span
+                    className="size-[26px] shrink-0 rounded-sm border border-line bg-raised"
+                    title={item.type === 'color' ? '颜色识别器（纯色区域自动降级）' : 'OCR 识别器'}
+                  />
+                )}
                 <StatusDot
                   tone={
                     item.state === 'confirmed' ? 'confirmed' : item.state === 'pending' ? 'pending' : 'idle'

@@ -6,17 +6,22 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import os
 import re
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
+import cv2
+
 from ..core.geometry import Rect
+from ..core.graph import Graph
 from ..devices.base import Controller, controller_for_scheme
 from ..devices.mock import MOCK_DEVICE_ID
-from ..project import resolve_project
+from ..project import Project, resolve_project
 from ..protocol import (
     METHOD_DEVICE_CONNECT,
     METHOD_DEVICE_DISCONNECT,
@@ -28,15 +33,20 @@ from ..protocol import (
     METHOD_DEVICE_TOUCH,
     METHOD_GRAPH_GET,
     METHOD_GRAPH_SAVE,
+    METHOD_PROJECT_GET,
+    METHOD_PROJECT_LIST,
+    METHOD_PROJECT_SET,
     METHOD_RECOGNIZER_THRESHOLD,
     METHOD_RECORD_TEMPLATE,
     METHOD_RUN_START,
     METHOD_RUN_STOP,
+    METHOD_TEMPLATE_IMAGE,
     METHOD_TIMELINE,
     NOTIFY_DEVICE_CONNECTED,
     NOTIFY_DEVICE_CONNECTING,
     NOTIFY_DEVICE_DISCONNECTED,
     NOTIFY_DEVICE_FAILED,
+    NOTIFY_PROJECT_CHANGED,
 )
 from ..session import DeviceSession
 
@@ -112,6 +122,88 @@ class SessionManager:
 
     # ---------- 连接 ----------
 
+    # ------------------------------------------------------------------ #
+    # 工程（脚本目录）与素材
+    # ------------------------------------------------------------------ #
+
+    def project_info(self) -> dict[str, Any]:
+        """当前脚本目录的内容概览（界面顶栏显示、切换后回显）。"""
+        project = self.project
+        graph = Graph.load(project.graph_path) if os.path.isfile(project.graph_path) else Graph.empty(project.root)
+        templates = (
+            sorted(name for name in os.listdir(project.templates_dir)) if os.path.isdir(project.templates_dir) else []
+        )
+        return {
+            "root": project.root,
+            "graphPath": project.graph_path,
+            "nodes": len(graph.nodes),
+            "edges": len(graph.edges),
+            "recognizers": len(graph.recognizers),
+            "templates": len(templates),
+        }
+
+    def use_project(self, target: str) -> None:
+        """切换脚本目录：重载所有已连接设备的状态图（保留它们的运行态）。"""
+        path = os.path.abspath(os.path.expanduser(target))
+        self.project = Project(root=path).ensure()
+        logger.info("切换脚本目录: %s", self.project.root)
+        for session in list(self.sessions.values()):
+            session.project = self.project
+            session.reload_graph()
+        self.emit(NOTIFY_PROJECT_CHANGED, self.project_info())
+
+    def list_projects(self, base: str | None = None) -> list[dict[str, Any]]:
+        """列出一个目录下所有"像工程"的子目录（含 graph.json 的）。"""
+        root = os.path.abspath(os.path.expanduser(base)) if base else os.path.dirname(self.project.root)
+        if not os.path.isdir(root):
+            return []
+        items: list[dict[str, Any]] = []
+        for name in sorted(os.listdir(root)):
+            child = os.path.join(root, name)
+            if not os.path.isdir(child):
+                continue
+            graph_path = os.path.join(child, "graph.json")
+            if not os.path.isfile(graph_path):
+                continue
+            graph = Graph.load(graph_path)
+            items.append(
+                {
+                    "name": name,
+                    "root": child,
+                    "nodes": len(graph.nodes),
+                    "edges": len(graph.edges),
+                    "recognizers": len(graph.recognizers),
+                }
+            )
+        return items
+
+    def template_image(self, label: str, *, grayscale: bool = False) -> dict[str, Any]:
+        """取模板截图（PNG，base64）。黑白模式返回灰度图，方便界面直接看匹配用的样子。"""
+        graph = Graph.load(self.project.graph_path) if os.path.isfile(self.project.graph_path) else None
+        spec = graph.specs.get(label) if graph is not None else None
+        if spec is None:
+            raise ValueError(f"没有这个识别器: {label}")
+        template = spec.get("template")
+        if not isinstance(template, str):
+            # 颜色识别器没有模板图，返回它的目标色
+            return {"label": label, "mode": str(spec.get("mode", spec.get("type", "color"))), "png": "", "colors": spec}
+        path = template if os.path.isabs(template) else os.path.join(self.project.root, template)
+        image = cv2.imread(path, cv2.IMREAD_GRAYSCALE if grayscale else cv2.IMREAD_COLOR)
+        if image is None:
+            raise FileNotFoundError(f"模板文件不存在: {path}")
+        ok, buffer = cv2.imencode(".png", image)
+        if not ok:
+            raise RuntimeError("模板编码失败")
+        height, width = image.shape[:2]
+        return {
+            "label": label,
+            "mode": "template",
+            "width": int(width),
+            "height": int(height),
+            "png": base64.b64encode(buffer.tobytes()).decode("ascii"),
+            "spec": {key: value for key, value in spec.items() if key != "template"},
+        }
+
     def connect(self, uri: str) -> DeviceSession:
         scheme, options = parse_device_uri(uri)
         serial = str(options.get("serial", "")) if options.get("serial") else ""
@@ -172,6 +264,29 @@ class SessionManager:
 
 def register(server: RpcServer) -> SessionManager:
     manager = SessionManager(server.notify)
+
+    @server.method(METHOD_PROJECT_GET)
+    def _project_get(params: dict[str, Any]) -> dict[str, Any]:
+        return manager.project_info()
+
+    @server.method(METHOD_PROJECT_SET)
+    def _project_set(params: dict[str, Any]) -> dict[str, Any]:
+        """切换脚本目录：新建目录、热重载所有已连接设备的状态图。"""
+        target = _require_str(params, "dir")
+        manager.use_project(target)
+        return manager.project_info()
+
+    @server.method(METHOD_PROJECT_LIST)
+    def _project_list(params: dict[str, Any]) -> dict[str, Any]:
+        base = params.get("base")
+        return {"items": manager.list_projects(str(base) if base else None)}
+
+    @server.method(METHOD_TEMPLATE_IMAGE)
+    def _template_image(params: dict[str, Any]) -> dict[str, Any]:
+        """取识别器用的模板截图（界面里显示"我录的是什么"）。"""
+        label = _require_str(params, "label")
+        grayscale = bool(params.get("grayscale", False))
+        return manager.template_image(label, grayscale=grayscale)
 
     @server.method(METHOD_DEVICE_CONNECT)
     def _connect(params: dict[str, Any]) -> dict[str, Any]:

@@ -90,6 +90,20 @@ export function listDevices(scan = true): Promise<DeviceListResult> {
  * 契约见 docs/rpc.md
  * ------------------------------------------------------------------ */
 
+export interface GraphEdgePayload {
+  id: string;
+  when?: string;
+  from?: string | null;
+  to?: string | null;
+  kind?: string;
+  priority?: number;
+  min_score?: number;
+  cooldown_ms?: number;
+  retries?: number;
+  condition?: Record<string, unknown> | null;
+  action?: Record<string, unknown> | null;
+}
+
 export interface GraphPayload {
   readonly version: number;
   readonly defaults: Record<string, unknown>;
@@ -267,6 +281,49 @@ export async function disconnectDevice(deviceId: string): Promise<void> {
 
 export function graphGet(deviceId: string): Promise<GraphPayload> {
   return rpc<GraphPayload>('graph.get', { deviceId });
+}
+
+/** 模板截图（识别器录的是什么，界面要显示出来） */
+export interface TemplateImage {
+  readonly label: string;
+  readonly mode: string;
+  readonly width?: number;
+  readonly height?: number;
+  readonly png: string;
+}
+
+export function templateImage(label: string, grayscale = false): Promise<TemplateImage> {
+  return rpc<TemplateImage>('template.image', { label, grayscale });
+}
+
+/** 脚本（工程）目录：当前在哪、有哪些、切换过去 */
+export interface ProjectInfo {
+  readonly root: string;
+  readonly graphPath: string;
+  readonly nodes: number;
+  readonly edges: number;
+  readonly recognizers: number;
+  readonly templates: number;
+}
+
+export interface ProjectSummary {
+  readonly name: string;
+  readonly root: string;
+  readonly nodes: number;
+  readonly edges: number;
+  readonly recognizers: number;
+}
+
+export function projectGet(): Promise<ProjectInfo> {
+  return rpc<ProjectInfo>('project.get', {});
+}
+
+export function projectSet(dir: string): Promise<ProjectInfo> {
+  return rpc<ProjectInfo>('project.set', { dir });
+}
+
+export function projectList(base?: string): Promise<{ items: ProjectSummary[] }> {
+  return rpc<{ items: ProjectSummary[] }>('project.list', base ? { base } : {});
 }
 
 export function graphSave(deviceId: string, graph: GraphPayload): Promise<GraphPayload> {

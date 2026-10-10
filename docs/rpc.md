@@ -226,6 +226,52 @@ Rust 桥的调度规则：
 `{ deviceId }` → `{ ok: true, running: boolean }`。
 `run.start` 要求状态图里至少有一个节点，否则报「状态图还没有节点：先在画面上框选录制一个界面」。
 
+### `project.get` / `project.set` / `project.list`（脚本目录）
+
+一个目录 = 一个脚本：`graph.json`（状态图真源）+ `templates/`（录制的模板截图）。
+
+- `project.get` → `{ root, graphPath, nodes, edges, recognizers, templates }`
+- `project.set { dir }` → 切到该目录（不存在就创建），**热重载所有已连接设备的状态图**
+  （保留各自当前节点与运行态），并广播 `project.changed`
+- `project.list { base? }` → 列出该目录下所有像工程的子目录（含 `graph.json` 的）
+
+### `template.image`
+
+`{ label, grayscale? }` → `{ label, mode, width, height, png }`（base64 PNG）。
+
+界面用它显示"我录的模板长什么样"；`grayscale=true` 返回黑白版 ——
+模板匹配本身就是按灰度算的（引擎 `TemplateRecognizer` 用 `IMREAD_GRAYSCALE`），
+所以黑白版就是它在算法里真正的样子。
+
+### 判断条件（边的 `condition`）
+
+```json
+{ "all_of": ["a"], "any_of": ["b", "c"], "none_of": ["popup"],
+  "min_score": 0.85, "within_ms": 5000 }
+```
+
+- `all_of` 全命中 / `any_of` 任一命中 / `none_of` 都不得出现（没写 `condition` 时等价于 `all_of=[when]`）
+- `min_score`：分数门槛
+- `within_ms`：**限时等待** —— 进入源节点后最多等这么久；超时这条边不再走，
+  并上报一条 `edge_timeout`（每条边每次进入节点只报一次）
+- 已经执行过的边不会在超时后又报一次（真机跑脚本时踩到过，已修）
+
+### 基础操作（边的 `action`）
+
+| type | 必填 | 说明 |
+|---|---|---|
+| `click` | `target` / `rect` / `x`+`y` | 轻触（`target` 用识别器中心，跟随识别结果） |
+| `long_press` | 同 click，`duration_ms`（默认 800） | 长按（按下-等待-抬起） |
+| `swipe` | 起点 + `to_x`/`to_y`，`duration_ms` | 滑动 |
+| `wait` | `seconds` | 等待（阻塞该设备循环） |
+| `key` | `value` ∈ back/home/recents/power/volume_up/volume_down/enter/delete | 功能键 |
+| `text` | `value` | 输入文本 |
+
+写错的脚本在 **`graph.save` 时就会报错**（指出是哪条边、缺什么参数），不会跑起来才在手机上点空。
+
+**约定**：`dst` 为空的边（"就做这个动作"）默认**一次访问只做一次**；
+想重复做就显式写 `cooldown_ms`（例如 500 = 每 500ms 一次）。
+
 ### `device.touch`（实时触控，画面栏拖动就靠它）
 
 `{ deviceId, phase: "down" | "move" | "up", x, y }` → `{ ok }`，坐标归一化（相对**画面**，不是容器）。
