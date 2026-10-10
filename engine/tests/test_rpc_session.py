@@ -224,3 +224,27 @@ def test_manual_control_tap_swipe_key(engine: EngineProcess, tmp_path: Path) -> 
     error = engine.wait_for(lambda item: item.get("id") == request_id)
     assert "error" in error
     assert "不支持的按键" in str(error["error"])
+
+
+def test_realtime_touch_stream(engine: EngineProcess, tmp_path: Path) -> None:
+    """实时滑动：down → 若干 move → up 逐个发，不是松手后合成一次滑动。"""
+    engine.call("device.connect", {"uri": DEVICE_URI})
+
+    assert engine.call("device.touch", {"deviceId": DEVICE_ID, "phase": "down", "x": 0.2, "y": 0.8}) == {"ok": True}
+    for step in range(1, 6):
+        assert engine.call(
+            "device.touch",
+            {"deviceId": DEVICE_ID, "phase": "move", "x": 0.2 + step * 0.1, "y": 0.8 - step * 0.1},
+        ) == {"ok": True}
+    assert engine.call("device.touch", {"deviceId": DEVICE_ID, "phase": "up", "x": 0.7, "y": 0.3}) == {"ok": True}
+
+    # down / up 各留一条事件；中间的 move 不写事件（否则拖动一次刷上百条）
+    inputs = [item for item in engine.seen if item.get("method") == "engine.event"]
+    assert [item["params"]["type"] for item in inputs] == ["manual_input", "manual_input"]
+    assert "手动触控" in inputs[0]["params"]["message"]
+    assert "→" in inputs[1]["params"]["message"]
+
+    # 非法 phase 要报错
+    request_id = engine.send("device.touch", {"deviceId": DEVICE_ID, "phase": "fly", "x": 0.5, "y": 0.5})
+    error = engine.wait_for(lambda item: item.get("id") == request_id)
+    assert "error" in error

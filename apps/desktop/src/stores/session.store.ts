@@ -15,6 +15,7 @@ import {
   deviceKey,
   deviceSwipe,
   deviceTap,
+  deviceTouch,
   devLog,
   fetchFrame,
   fetchFrameDataUrl,
@@ -82,6 +83,8 @@ interface SessionState {
     durationMs: number,
   ) => Promise<void>;
   readonly pressKey: (deviceId: string, key: string) => Promise<void>;
+  /** 实时触控事件（down/move/up）；move 是高频的，不等待响应 */
+  readonly touch: (deviceId: string, phase: 'down' | 'move' | 'up', x: number, y: number) => void;
 }
 
 function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState): void {
@@ -391,6 +394,21 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   clearError: () => set({ error: null }),
 
   setStreamPolicy: (deviceId, fps) => applyStreamPolicy(deviceId, fps),
+
+  touch: (deviceId, phase, x, y) => {
+    if (!get().ready[deviceId]) {
+      if (phase === 'down') {
+        set({ error: '设备未连接：先在设备面板连接一台，再操作画面' });
+      }
+      return;
+    }
+    // 拖动时 move 是高频事件：不 await，也不因为个别失败就弹错误条（否则会刷屏）
+    void deviceTouch(deviceId, phase, x, y).catch((error: unknown) => {
+      if (phase !== 'move') {
+        set({ error: `触控失败: ${error instanceof Error ? error.message : String(error)}` });
+      }
+    });
+  },
 
   tap: async (deviceId, x, y) => {
     if (!get().ready[deviceId]) {

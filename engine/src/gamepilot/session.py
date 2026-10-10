@@ -74,6 +74,7 @@ class DeviceSession:
         self.last_frame: np.ndarray | None = None
         self._last_emit_at: float | None = None
         self._input_seq = 0  # 手动控制事件的序号（事件栏按 seq 排序）
+        self._touch_from: tuple[float, float] | None = None
         # 推给界面的帧率（0 = 暂停推帧）。识别/状态机不受影响，仍按 fps_limit 跑，
         # 这样"界面不看这台设备"时不会白烧 CPU 与带宽（多设备时尤其明显）
         # 默认 0：界面明确要了才推。连接瞬间就按 15fps 推帧会把控制通道（同一根
@@ -226,6 +227,56 @@ class DeviceSession:
     # ------------------------------------------------------------------ #
     # 手动控制（画面栏直接操作设备）
     # ------------------------------------------------------------------ #
+
+    def touch(self, phase: str, x: float, y: float) -> None:
+        """实时触控（画面栏拖动时逐事件转发）。
+
+        move 不写事件（拖动一次会来上百个），只在 down/up 留痕。
+        """
+        if phase not in ("down", "move", "up"):
+            # 在会话层统一校验：各控制器（真机/Mock）行为保持一致
+            raise ValueError(f"phase 必须是 down/move/up，收到: {phase}")
+        with self.lock:
+            controller = self.controller
+            if hasattr(controller, "touch"):
+                controller.touch(phase, x, y)
+            elif phase == "down" or phase == "up":
+                controller.click(x, y)
+            else:
+                return
+        if phase == "down":
+            self._touch_from = (x, y)
+            self._input_seq += 1
+            self.emit(
+                "engine.event",
+                {
+                    "deviceId": self.device_id,
+                    "seq": self._input_seq,
+                    "ts": time.time(),
+                    "type": "manual_input",
+                    "node": self.engine.current,
+                    "edge": None,
+                    "message": f"手动触控 按下 ({x:.3f}, {y:.3f})",
+                },
+            )
+        elif phase == "up":
+            start = getattr(self, "_touch_from", None)
+            detail = (
+                f"({x:.3f}, {y:.3f})" if start is None else f"({start[0]:.3f}, {start[1]:.3f}) → ({x:.3f}, {y:.3f})"
+            )
+            self._input_seq += 1
+            self.emit(
+                "engine.event",
+                {
+                    "deviceId": self.device_id,
+                    "seq": self._input_seq,
+                    "ts": time.time(),
+                    "type": "manual_input",
+                    "node": self.engine.current,
+                    "edge": None,
+                    "message": f"手动触控 {detail}",
+                },
+            )
 
     def tap(self, x: float, y: float) -> None:
         """归一化坐标轻触。"""

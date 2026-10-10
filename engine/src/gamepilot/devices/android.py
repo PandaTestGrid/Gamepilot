@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, ClassVar
 
 import cv2
@@ -173,6 +174,7 @@ class AndroidController(Controller):
         self.channel = "screencap"
         self.link_note = ""
         self._last_frame: Any = None
+        self._touch_start: tuple[float, float, float] | None = None
         self._frame_seq = 0  # scrcpy 解码帧号：画面没变时用来复用 JPEG 编码
 
     def connect(self) -> None:
@@ -320,6 +322,32 @@ class AndroidController(Controller):
     def _to_pixels(self, x: float, y: float) -> tuple[int, int]:
         width, height = self.resolution
         return round(x * width), round(y * height)
+
+    def touch(self, phase: str, x: float, y: float) -> None:
+        """实时触控事件（down/move/up）。
+
+        scrcpy 通道：逐个报文实时注入；回退通道（adb）没有实时能力，
+        只在抬手时合成一次 tap/swipe（并记一条日志说明降级）。
+        """
+        if self._scrcpy is not None:
+            self._scrcpy.touch(phase, x, y)
+            return
+        if phase == "down":
+            self._touch_start = (x, y, time.perf_counter())
+            return
+        if phase == "move":
+            return
+        start = self._touch_start
+        self._touch_start = None
+        if start is None:
+            self.click(x, y)
+            return
+        x1, y1, at = start
+        duration = max(0.05, time.perf_counter() - at)
+        if abs(x - x1) < 0.01 and abs(y - y1) < 0.01:
+            self.click(x, y)
+        else:
+            self.swipe(x1, y1, x, y, duration=duration)
 
     def click(self, x: float, y: float) -> None:
         if self._scrcpy is not None:

@@ -25,6 +25,7 @@ from ..protocol import (
     METHOD_DEVICE_STREAM,
     METHOD_DEVICE_SWIPE,
     METHOD_DEVICE_TAP,
+    METHOD_DEVICE_TOUCH,
     METHOD_GRAPH_GET,
     METHOD_GRAPH_SAVE,
     METHOD_RECOGNIZER_THRESHOLD,
@@ -198,6 +199,13 @@ def register(server: RpcServer) -> SessionManager:
     @server.method(METHOD_DEVICE_STATUS)
     def _status(params: dict[str, Any]) -> dict[str, Any]:
         return manager.get(_require_str(params, "deviceId")).status()
+
+    @server.method(METHOD_DEVICE_TOUCH)
+    def _touch(params: dict[str, Any]) -> dict[str, Any]:
+        """实时触控：phase=down/move/up，坐标归一化。画面栏拖动就是靠它。"""
+        session = manager.get(_require_str(params, "deviceId"))
+        session.touch(_require_str(params, "phase"), _require_float(params, "x"), _require_float(params, "y"))
+        return {"ok": True}
 
     @server.method(METHOD_DEVICE_TAP)
     def _tap(params: dict[str, Any]) -> dict[str, Any]:

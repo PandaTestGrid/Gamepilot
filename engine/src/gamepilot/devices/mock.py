@@ -55,12 +55,14 @@ class MockController(Controller):
         self.hits = 0
         self.keys: list[str] = []
         self.swipes: list[tuple[float, float, float, float, float]] = []
+        self.touches: list[tuple[str, float, float]] = []
 
     def connect(self) -> None:
         self.frames = 0
         self.hits = 0
         self.keys = []
         self.swipes = []
+        self.touches = []
         self._connected = True
 
     @property
@@ -84,6 +86,9 @@ class MockController(Controller):
         if name not in SUPPORTED_KEYS:
             raise ValueError(f"不支持的按键: {name}")
         self.keys.append(name)
+
+    def touch(self, phase: str, x: float, y: float) -> None:
+        self.touches.append((phase, round(x, 4), round(y, 4)))
 
     def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
         self.swipes.append((x1, y1, x2, y2, duration))

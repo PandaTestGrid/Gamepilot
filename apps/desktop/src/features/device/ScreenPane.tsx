@@ -20,6 +20,7 @@ import { type ReactNode, useEffect, useCallback, useMemo, useRef, useState } fro
 import { RecordOverlay } from '@/features/device/RecordOverlay';
 import { GhostButton, PanelShell, StatusDot } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
+import { type Box, containBox, pointToCanvas } from '@/lib/canvas';
 import { devLog } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { activeDevice, connectedDevices, useDeviceStore } from '@/stores/device.store';
@@ -31,6 +32,7 @@ import type { RecognizerView } from '@/types';
 /** 上一次记录的画面栏分支（只在变化时打日志） */
 let lastBranchKey = '';
 let lastGridSummary = '';
+let lastImageBoxKey = '';
 let imgLoadLogs = 0;
 
 export function ScreenPane(): ReactNode {
@@ -221,25 +223,57 @@ function SingleScreen({
 }): ReactNode {
   const recordMode = useUiStore((state) => state.recordMode);
   const controlMode = useUiStore((state) => state.controlMode);
-  const tapDevice = useSessionStore((state) => state.tap);
-  const swipeDevice = useSessionStore((state) => state.swipe);
+  const touchDevice = useSessionStore((state) => state.touch);
   const draft = useUiStore((state) => state.draft);
   const beginDraft = useUiStore((state) => state.beginDraft);
   const viewport = useRef<HTMLDivElement>(null);
   // 控制模式下的鼠标操作：按下→抬起是轻触，拖拽是滑动
   const controlStart = useRef<{ x: number; y: number; at: number; moved: boolean } | null>(null);
+  const lastMoveAt = useRef(0);
   const [ripple, setRipple] = useState<{ x: number; y: number; id: number } | null>(null);
 
-  const normalize = (event: {
-    clientX: number;
-    clientY: number;
-    currentTarget: HTMLDivElement;
-  }): [number, number] => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return [
-      Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width))),
-      Math.min(1, Math.max(0, (event.clientY - rect.top) / Math.max(1, rect.height))),
-    ];
+  // 画面的实际显示矩形（容器相对坐标）：object-contain 会有黑边，控制坐标只按画面算
+  const [imageBox, setImageBox] = useState<Box | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    const container = viewport.current;
+    if (!container) {
+      return;
+    }
+    const measure = (): void => {
+      const image = imgRef.current;
+      if (!image || image.naturalWidth === 0) {
+        return;
+      }
+      const box = containBox(
+        { width: container.clientWidth, height: container.clientHeight },
+        { width: image.naturalWidth, height: image.naturalHeight },
+      );
+      setImageBox(box);
+      // 记录一次：确认控制坐标用的确实是"画出来的那块区域"，而不是整个容器
+      if (box) {
+        const key = `画面区域 ${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}x${Math.round(box.height)}`;
+        if (key !== lastImageBoxKey) {
+          lastImageBoxKey = key;
+          devLog(`${key}（容器 ${container.clientWidth}x${container.clientHeight}，黑边不参与控制）`);
+        }
+      }
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [frame?.index, frame?.resolution]);
+
+  /** 鼠标位置 → 画面归一化坐标（clamp=false 时落在黑边上返回 null：背景不算） */
+  const toCanvas = (clientX: number, clientY: number, clamp: boolean): [number, number] | null => {
+    const container = viewport.current;
+    if (!container || !imageBox) {
+      return null;
+    }
+    const rect = container.getBoundingClientRect();
+    return pointToCanvas(imageBox, { x: clientX - rect.left, y: clientY - rect.top }, clamp);
   };
 
   const flashRipple = (x: number, y: number): void => {
@@ -333,22 +367,35 @@ function SingleScreen({
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
       onPointerDown={(event) => {
-        controlStart.current = null;
         if (!controlMode || recordMode !== 'off') {
           return;
         }
-        const [x, y] = normalize(event);
-        controlStart.current = { x, y, at: performance.now(), moved: false };
+        const point = toCanvas(event.clientX, event.clientY, false);
+        if (!point) {
+          return; // 落在黑边上：背景区域不算
+        }
+        event.currentTarget.setPointerCapture(event.pointerId);
+        controlStart.current = { x: point[0], y: point[1], at: performance.now(), moved: false };
+        lastMoveAt.current = 0;
+        flashRipple(point[0], point[1]);
+        touchDevice(deviceId, 'down', point[0], point[1]);
       }}
       onPointerMove={(event) => {
-        const start = controlStart.current;
-        if (!start) {
+        if (!controlStart.current) {
           return;
         }
-        const [x, y] = normalize(event);
-        if (Math.hypot(x - start.x, y - start.y) > 0.012) {
-          start.moved = true;
+        const point = toCanvas(event.clientX, event.clientY, true);
+        if (!point) {
+          return;
         }
+        // 实时滑动：拖动过程中直接转发 move（约 60Hz 限频），不是松手后合成一次滑动
+        const now = performance.now();
+        if (now - lastMoveAt.current < 16) {
+          return;
+        }
+        lastMoveAt.current = now;
+        controlStart.current.moved = true;
+        touchDevice(deviceId, 'move', point[0], point[1]);
       }}
       onPointerUp={(event) => {
         const start = controlStart.current;
@@ -356,13 +403,15 @@ function SingleScreen({
         if (!start || !controlMode || recordMode !== 'off') {
           return;
         }
-        const [x, y] = normalize(event);
-        const durationMs = Math.round(performance.now() - start.at);
-        flashRipple(x, y);
-        if (!start.moved && durationMs < 600) {
-          void tapDevice(deviceId, x, y);
-        } else {
-          void swipeDevice(deviceId, start.x, start.y, x, y, Math.min(1500, Math.max(60, durationMs)));
+        const point = toCanvas(event.clientX, event.clientY, true) ?? [start.x, start.y];
+        flashRipple(point[0], point[1]);
+        touchDevice(deviceId, 'up', point[0], point[1]);
+      }}
+      onPointerCancel={() => {
+        const start = controlStart.current;
+        controlStart.current = null;
+        if (start) {
+          touchDevice(deviceId, 'up', start.x, start.y);
         }
       }}
       className={cn(
@@ -372,6 +421,7 @@ function SingleScreen({
     >
       {frame ? (
         <img
+          ref={imgRef}
           src={frame.imageUrl}
           alt={`${deviceName} 实时画面`}
           className="pointer-events-none absolute inset-0 h-full w-full object-contain"
@@ -395,6 +445,14 @@ function SingleScreen({
           </span>
           <span className="text-badge">等待首帧…</span>
         </div>
+      )}
+
+      {/* 画面实际显示区域：黑边之外不响应控制，画条线让可点范围一目了然 */}
+      {imageBox && controlMode && recordMode === 'off' && (
+        <span
+          className="pointer-events-none absolute border border-brand/30"
+          style={{ left: imageBox.left, top: imageBox.top, width: imageBox.width, height: imageBox.height }}
+        />
       )}
 
       {/* 触控反馈：点下去在画面上闪一下，能直观确认"点到了哪里" */}

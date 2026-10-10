@@ -213,6 +213,21 @@ export async function fetchFrameDataUrl(deviceId: string): Promise<string | null
  * 引擎的截图、识别、状态机照常跑，只是不再编码 JPEG 推给界面：
  * 多设备同时投屏时，这是最大的一笔开销（每帧 60~143KB，14fps 就是 1~2MB/s）。
  */
+/**
+ * 实时触控：一次一个事件（down/move/up），坐标是**相对画面**的归一化值。
+ *
+ * 拖动时前端会连续发 move，而不是松手后合成一次滑动 —— 这样手机上的滑动才是
+ * 跟手的（合成滑动看起来是"延迟一下跳过去"）。
+ */
+export function deviceTouch(
+  deviceId: string,
+  phase: 'down' | 'move' | 'up',
+  x: number,
+  y: number,
+): Promise<unknown> {
+  return invoke('engine_rpc', { method: 'device.touch', params: { deviceId, phase, x, y } });
+}
+
 /** 手动控制：归一化坐标轻触（走 scrcpy 控制通道，实测 0.1ms） */
 export function deviceTap(deviceId: string, x: number, y: number): Promise<unknown> {
   return invoke('engine_rpc', { method: 'device.tap', params: { deviceId, x, y } });

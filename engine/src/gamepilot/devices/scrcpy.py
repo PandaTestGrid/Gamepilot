@@ -43,7 +43,8 @@ MSG_INJECT_KEYCODE = 0
 MSG_INJECT_TOUCH = 2
 ACTION_DOWN = 0
 ACTION_UP = 1
-POINTER_ID_FINGER = 0xFFFFFFFFFFFFFFFF  # scrcpy 的 GENERIC_FINGER
+POINTER_ID_MOUSE = 1  # 与参考实现一致（scrcpy 客户端里鼠标事件用固定 pointer id）
+BUTTON_PRIMARY = 1  # AMOTION_EVENT_BUTTON_PRIMARY
 
 PACKET_FLAG_CONFIG = 1 << 63
 PACKET_FLAG_KEY_FRAME = 1 << 62
@@ -204,6 +205,22 @@ class ScrcpyChannel:
     # 控制
     # ------------------------------------------------------------------ #
 
+    def touch(self, phase: str, x_norm: float, y_norm: float) -> None:
+        """实时触控：一次只发一个事件（down / move / up）。
+
+        这是"实时滑动"的关键 —— 拖动过程中每次 move 都单独发一个 32 字节报文，
+        而不是等松手后合成一条滑动（合成滑动看起来是"延迟一下就跳过去"）。
+        """
+        if self._control is None:
+            raise RuntimeError("控制通道未就绪")
+        action = {"down": ACTION_DOWN, "move": ACTION_MOVE, "up": ACTION_UP}.get(phase)
+        if action is None:
+            raise ValueError(f"phase 必须是 down/move/up，收到: {phase}")
+        width, height = self.video_size
+        x = round(min(max(x_norm, 0.0), 1.0) * (width - 1))
+        y = round(min(max(y_norm, 0.0), 1.0) * (height - 1))
+        self._send_touch(action, x, y)
+
     def click(self, x_norm: float, y_norm: float) -> None:
         """归一化坐标点击（相对视频画布）。"""
         if self._control is None:
@@ -242,18 +259,22 @@ class ScrcpyChannel:
 
     def _send_touch(self, action: int, x: int, y: int) -> None:
         width, height = self.video_size
+        # 参数对齐参考实现 panda-agent/devices/android/control/touch_controller.py：
+        # pointer_id=1、pressure=1、action_button/buttons=PRIMARY。
+        # 之前用"手指式"（pointer_id=-1、buttons=0）时，桌面拖动只跟手一点点然后回弹，
+        # 手势没被系统识别成有效拖动（实测翻页失败）。
         payload = struct.pack(
             ">BBQIIHHHII",  # type,action,pointerId,x,y,w,h,pressure,actionButton,buttons = 32B
             MSG_INJECT_TOUCH,
             action,
-            POINTER_ID_FINGER,
+            POINTER_ID_MOUSE,
             x,
             y,
             width,
             height,
-            0xFFFF,  # pressure: u16 fixed-point 1.0
-            0,  # action button
-            0,  # buttons
+            1,  # pressure
+            BUTTON_PRIMARY,  # action button: AMOTION_EVENT_BUTTON_PRIMARY
+            BUTTON_PRIMARY,  # buttons: 按住主键 = 拖动
         )
         assert len(payload) == 32, len(payload)
         assert self._control is not None

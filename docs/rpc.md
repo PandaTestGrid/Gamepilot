@@ -226,7 +226,20 @@ Rust 桥的调度规则：
 `{ deviceId }` → `{ ok: true, running: boolean }`。
 `run.start` 要求状态图里至少有一个节点，否则报「状态图还没有节点：先在画面上框选录制一个界面」。
 
-### `device.tap` / `device.swipe` / `device.key`（手动控制）
+### `device.touch`（实时触控，画面栏拖动就靠它）
+
+`{ deviceId, phase: "down" | "move" | "up", x, y }` → `{ ok }`，坐标归一化（相对**画面**，不是容器）。
+
+- **逐事件实时注入**：拖动过程中每个 move 单独发一个 32 字节 scrcpy 报文，
+  不是松手后合成一次滑动 —— 合成滑动在手机上表现为"延迟一下跳过去"，不跟手
+- 坐标必须落在真正画出画面的区域上（`object-contain` 的黑边不算），
+  否则竖屏画面在横容器里点边缘会偏出一大截（前端 `lib/canvas.ts` 负责换算，有单测）
+- 报文参数对齐参考实现 `panda-agent/.../touch_controller.py`：
+  `pointer_id=1, pressure=1, action_button/buttons=PRIMARY`。
+  实测用"手指式"（`pointer_id=-1, buttons=0`）时，桌面拖动只跟手一点点然后回弹，系统不认
+- `down` / `up` 各发一条 `engine.event`（`manual_input`）；`move` 不发事件（一次拖动上百个）
+
+### `device.tap` / `device.swipe` / `device.key`（脚本/状态机用的合成操作）
 
 画面栏直接操作设备时用这三个，走 scrcpy 控制通道（实测点击 **0.1ms**，比
 `adb shell input tap` 的 ~1030ms 快四个数量级）：
