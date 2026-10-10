@@ -24,3 +24,12 @@ if (!('matchMedia' in window)) {
     }),
   });
 }
+
+// jsdom 没有实现 blob URL（前端拉帧后用它喂给 <img>），测试环境补一个
+if (typeof URL.createObjectURL !== 'function') {
+  Object.defineProperty(URL, 'createObjectURL', {
+    writable: true,
+    value: () => `blob:gamepilot/${Math.random().toString(36).slice(2)}`,
+  });
+  Object.defineProperty(URL, 'revokeObjectURL', { writable: true, value: () => undefined });
+}

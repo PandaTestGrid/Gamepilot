@@ -30,6 +30,9 @@ class EngineBridge {
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private listeners = new Set<NotificationHandler>();
+  /** 模拟 Rust 侧的帧缓存：engine_frame 命令从这里取原始字节 */
+  private frames = new Map<string, Uint8Array>();
+  frameRequests = 0;
 
   start(projectDir: string): void {
     const engineDir = path.resolve(process.cwd(), '..', '..', 'engine');
@@ -54,10 +57,18 @@ class EngineBridge {
         }
         return;
       }
-      const payload = {
-        method: String(message.method),
-        params: (message.params ?? {}) as Record<string, unknown>,
-      };
+      const method = String(message.method);
+      const params = (message.params ?? {}) as Record<string, unknown>;
+      // 和 Rust 桥一致：帧存进本地缓存，并从事件里剥掉 jpeg（前端按需拉原始字节）
+      if (method === 'engine.frame') {
+        const jpeg = typeof params.jpeg === 'string' ? params.jpeg : null;
+        const deviceId = typeof params.deviceId === 'string' ? params.deviceId : null;
+        if (jpeg && deviceId) {
+          this.frames.set(deviceId, Uint8Array.from(Buffer.from(jpeg, 'base64')));
+        }
+        delete params.jpeg;
+      }
+      const payload = { method, params };
       for (const listener of this.listeners) {
         listener({ payload });
       }
@@ -76,6 +87,13 @@ class EngineBridge {
     if (command === 'engine_stop') {
       this.stop();
       return Promise.resolve(undefined);
+    }
+    if (command === 'engine_frame') {
+      this.frameRequests += 1;
+      const rawId = (args ?? {}).deviceId;
+      const deviceId = typeof rawId === 'string' ? rawId : '';
+      const bytes = this.frames.get(deviceId);
+      return Promise.resolve(bytes ? bytes.slice().buffer : new ArrayBuffer(0));
     }
     if (command !== 'engine_rpc') {
       return Promise.reject(new Error(`未知命令: ${command}`));
@@ -136,7 +154,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     bridge.current?.stop();
   });
 
-  it('连接设备后：设备状态、状态图、实时帧都进了 store', async () => {
+  it('连接设备后：设备状态、状态图、实时帧都进了 store', { timeout: 20000 }, async () => {
     await useSessionStore.getState().connect(DEVICE_ID, DEVICE_URI);
 
     const device = useDeviceStore.getState().devices.find((item) => item.id === DEVICE_ID);
@@ -145,9 +163,15 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     expect(useSessionStore.getState().isReady(DEVICE_ID)).toBe(true);
 
     await waitFor(() => Boolean(useSessionStore.getState().frames[DEVICE_ID]));
+    // 画面走"前端按需拉取原始字节"：拿到的是 blob URL（不再是 base64 塞在事件里）
+    await waitFor(
+      () => (useSessionStore.getState().frames[DEVICE_ID]?.imageUrl ?? '').startsWith('blob:'),
+      8000,
+    );
     const frame = useSessionStore.getState().frames[DEVICE_ID];
-    expect(frame?.imageUrl.startsWith('data:image/jpeg;base64,')).toBe(true);
+    expect(frame?.imageUrl.startsWith('blob:')).toBe(true);
     expect(frame?.resolution).toEqual([320, 180]);
+    expect((bridge.current as unknown as { frameRequests: number }).frameRequests).toBeGreaterThan(0);
 
     // 首帧时 fps 还没算出来（引擎从第 2 帧起才有 fps），等它涨起来
     await waitFor(() => (useSessionStore.getState().frames[DEVICE_ID]?.fps ?? 0) > 0);

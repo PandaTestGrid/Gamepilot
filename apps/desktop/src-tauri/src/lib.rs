@@ -20,6 +20,7 @@ pub fn run() {
             engine::engine_start,
             engine::engine_rpc,
             engine::engine_stop,
+            engine::engine_frame,
             window::open_pane_window
         ])
         .setup(|app| {

@@ -34,6 +34,12 @@ struct EngineProcess {
 pub struct Bridge {
     process: Mutex<Option<EngineProcess>>,
     pending: Mutex<HashMap<u64, Sender<Value>>>,
+    /// 每台设备的最新一帧 JPEG。
+    ///
+    /// 为什么不直接把这帧塞进事件发给前端：一帧 base64 有 80KB+，14fps 就是 1MB/s 的
+    /// WebView IPC 流量，实测前端收不到画面。改成"事件只发元数据（识别框/节点/序号），
+    /// 帧由前端按需用 `engine_frame` 拉原始字节"。
+    frames: Mutex<HashMap<String, Vec<u8>>>,
     next_id: AtomicU64,
 }
 
@@ -42,6 +48,7 @@ impl Bridge {
         Self {
             process: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
+            frames: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
         }
     }
@@ -139,6 +146,25 @@ pub fn engine_rpc(
     }
 }
 
+/// 取某台设备的最新一帧 JPEG（原始字节）。
+///
+/// 前端拿到的是 ArrayBuffer，可以直接 `new Blob([buf])` 造 URL 给 `<img>`，
+/// 不用 base64 解码，也没有大 JSON 的 IPC 开销。
+#[tauri::command]
+pub fn engine_frame(
+    bridge: State<'_, Bridge>,
+    device_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = bridge
+        .frames
+        .lock()
+        .map_err(|error| error.to_string())?
+        .get(&device_id)
+        .cloned()
+        .unwrap_or_default();
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// 停止引擎。会先尝试优雅退出（发 engine.shutdown 由前端负责），这里直接终止进程。
 #[tauri::command]
 pub fn engine_stop(bridge: State<'_, Bridge>) -> Result<(), String> {
@@ -184,8 +210,27 @@ fn read_loop(app: AppHandle, stdout: impl std::io::Read) {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
-        let params = payload.get("params").cloned().unwrap_or(Value::Null);
-        let _ = app.emit(EVENT_ENGINE, Notification { method, params });
+        let mut params = payload.get("params").cloned().unwrap_or(Value::Null);
+
+        // engine.frame：JPEG 留在本地缓存，事件里只留元数据（去掉 jpeg 字段）
+        if method == "engine.frame" {
+            if let Some(frame) = params.get("jpeg").and_then(Value::as_str)
+                && let (Some(device_id), Some(bytes)) = (
+                    params.get("deviceId").and_then(Value::as_str),
+                    base64_decode(frame),
+                )
+                && let Ok(mut frames) = bridge.frames.lock()
+            {
+                frames.insert(device_id.to_string(), bytes);
+            }
+            if let Some(object) = params.as_object_mut() {
+                object.remove("jpeg");
+            }
+        }
+
+        if let Err(error) = app.emit(EVENT_ENGINE, Notification { method, params }) {
+            log::warn!("转发引擎通知失败: {error}");
+        }
     }
     log::info!("引擎 stdout 已关闭（进程退出？）");
 }
@@ -298,5 +343,49 @@ mod tests {
                 program.display()
             );
         }
+    }
+}
+
+/// 标准 base64 解码（忽略换行与 `=` 填充）。引擎只发 JPEG，字符集固定，够用。
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some((byte - b'A') as u32),
+            b'a'..=b'z' => Some((byte - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((byte - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let mut buffer: u32 = 0;
+    let mut bits = 0u32;
+    for byte in input.bytes() {
+        if byte == b'=' || byte == b'\n' || byte == b'\r' {
+            continue;
+        }
+        let digit = value(byte)?;
+        buffer = (buffer << 6) | digit;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::base64_decode;
+
+    #[test]
+    fn decodes_padding_and_newlines() {
+        assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(base64_decode("aGVs\nbG8=").unwrap(), b"hello");
+        assert_eq!(base64_decode("").unwrap(), Vec::<u8>::new());
+        assert!(base64_decode("!!!").is_none());
     }
 }

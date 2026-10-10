@@ -133,7 +133,8 @@ export interface FramePayload {
     source: string;
     state: 'confirmed' | 'pending' | 'idle';
   }>;
-  readonly jpeg: string;
+  /** 只有老引擎会塞在事件里；新引擎的帧走 `fetchFrame`（原始字节） */
+  readonly jpeg?: string;
 }
 
 /** 引擎推送的状态机事件（engine.event 通知）。 */
@@ -156,6 +157,23 @@ export interface DeviceNotificationPayload {
   readonly linkNote?: string;
   readonly error?: string;
   readonly graph?: GraphPayload;
+}
+
+/**
+ * 拉取某台设备的最新一帧 JPEG（原始字节）。
+ *
+ * 画面**不走事件**：一帧 base64 有 80KB+，14fps 就是 1MB/s 的 WebView IPC 流量，
+ * 实测前端收不到画面。改成事件只发元数据（识别框/节点/序号），帧按需拉。
+ */
+export async function fetchFrame(deviceId: string): Promise<ArrayBuffer | null> {
+  const data = await invoke<ArrayBuffer | Uint8Array | number[]>('engine_frame', { deviceId });
+  if (data instanceof ArrayBuffer) {
+    return data.byteLength > 0 ? data : null;
+  }
+  if (data instanceof Uint8Array) {
+    return data.byteLength > 0 ? data.slice().buffer : null;
+  }
+  return null;
 }
 
 export function connectDevice(uri: string): Promise<ConnectResult> {

@@ -12,6 +12,7 @@ import { create } from 'zustand';
 
 import {
   connectDevice,
+  fetchFrame,
   disconnectDevice,
   type EngineEventPayload,
   type FramePayload,
@@ -66,6 +67,59 @@ function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState):
   useGraphStore.getState().setGraph(deviceId, toGraphData(deviceId, payload, live));
 }
 
+/** 每台设备一个拉帧定时器；framePollTick 是"当前已拉到的帧号"，避免重复拉取 */
+const framePollers = new Map<string, ReturnType<typeof setInterval>>();
+const framePollTick = new Map<string, number>();
+
+function stopFramePolling(deviceId: string): void {
+  const timer = framePollers.get(deviceId);
+  if (timer) {
+    clearInterval(timer);
+    framePollers.delete(deviceId);
+  }
+  framePollTick.delete(deviceId);
+}
+
+/** 按需拉帧：只有引擎报了新帧号才去取字节，避免无谓的 IPC */
+async function pullFrame(deviceId: string): Promise<void> {
+  const state = useSessionStore.getState();
+  const meta = state.frames[deviceId];
+  if (!meta || framePollTick.get(deviceId) === meta.index) {
+    return;
+  }
+  try {
+    const buffer = await fetchFrame(deviceId);
+    if (!buffer) {
+      return;
+    }
+    framePollTick.set(deviceId, meta.index);
+    const url = URL.createObjectURL(new Blob([buffer], { type: 'image/jpeg' }));
+    useSessionStore.setState((current) => {
+      const previous = current.frames[deviceId];
+      if (previous?.imageUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(previous.imageUrl);
+      }
+      return { frames: { ...current.frames, [deviceId]: { ...previous, imageUrl: url } as FrameState } };
+    });
+  } catch (error) {
+    // 拉帧失败（引擎挂了/设备断开）不刷屏：停掉轮询，把原因交给错误条
+    stopFramePolling(deviceId);
+    useSessionStore.setState({
+      error: `拉取画面失败: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+}
+
+function startFramePolling(deviceId: string): void {
+  if (framePollers.has(deviceId)) {
+    return;
+  }
+  framePollers.set(
+    deviceId,
+    setInterval(() => void pullFrame(deviceId), 70),
+  );
+}
+
 export const useSessionStore = create<SessionState>()((set, get) => ({
   frames: {},
   running: {},
@@ -78,8 +132,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     const unlisten = await onEngineMessage((method, params) => {
       if (method === 'engine.frame') {
         const frame = params as unknown as FramePayload;
+        const previous = get().frames[frame.deviceId];
         const state: FrameState = {
-          imageUrl: `data:image/jpeg;base64,${frame.jpeg}`,
+          // 画面优先用轮询拉到的 blob；事件里的 base64 只是老引擎的兜底
+          imageUrl: previous?.imageUrl?.startsWith('blob:')
+            ? previous.imageUrl
+            : frame.jpeg
+              ? `data:image/jpeg;base64,${frame.jpeg}`
+              : (previous?.imageUrl ?? ''),
           index: frame.index,
           resolution: frame.resolution,
           node: frame.node,
@@ -124,6 +184,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         if (payload.graph) {
           applyGraph(payload.deviceId, payload.graph, get().frames[payload.deviceId]);
         }
+        startFramePolling(payload.deviceId);
         useEventStore.getState().append(payload.deviceId, 'device_reconnected', {
           message:
             `已连接 ${payload.uri ?? ''} ${payload.resolution ? payload.resolution.join('×') : ''}`.trim(),
@@ -158,6 +219,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       }));
       applyGraph(result.deviceId, result.graph, get().frames[result.deviceId]);
       set((current) => ({ ready: { ...current.ready, [result.deviceId]: true } }));
+      startFramePolling(result.deviceId);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -175,6 +237,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       // 引擎侧已经断开时不算错误
       set({ error: error instanceof Error ? error.message : String(error) });
     }
+    stopFramePolling(deviceId);
     useDeviceStore.getState().disconnect(deviceId);
     set((current) => ({ ready: { ...current.ready, [deviceId]: false } }));
   },
