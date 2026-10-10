@@ -11,6 +11,7 @@ import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
 import { RecordOverlay } from '@/features/device/RecordOverlay';
 import { GhostButton, PanelShell, StatusDot } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
+import { devLog } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { activeDevice, connectedDevices, useDeviceStore } from '@/stores/device.store';
 import { useGraphStore } from '@/stores/graph.store';
@@ -67,7 +68,7 @@ export function ScreenPane(): ReactNode {
       }
       footer={<RecognizerReadout recognizers={recognizers} onConnect={() => toggleDevicePopover(true)} />}
     >
-      <div className="h-full bg-canvas p-2">
+      <div className="flex h-full min-h-0 flex-col bg-canvas p-2">
         {gridView && connected.length >= 2 ? (
           <ScreenGrid />
         ) : device?.status === 'connected' ? (
@@ -213,7 +214,7 @@ function SingleScreen({
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
       className={cn(
-        'relative h-full w-full border border-line bg-[#0b0d12]',
+        'relative min-h-0 w-full flex-1 border border-line bg-[#0b0d12]',
         recordMode !== 'off' && 'cursor-crosshair',
       )}
     >
@@ -223,6 +224,7 @@ function SingleScreen({
           alt={`${deviceName} 实时画面`}
           className="pointer-events-none absolute inset-0 h-full w-full object-contain"
           draggable={false}
+          onError={() => devLog('画面栏：图片加载失败（字节坏了或 blob 失效）')}
         />
       ) : (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-faint">

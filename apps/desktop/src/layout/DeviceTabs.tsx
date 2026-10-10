@@ -27,6 +27,8 @@ export function DeviceTabs(): ReactNode {
   const activeId = useDeviceStore((state) => state.activeId);
   const setActive = useDeviceStore((state) => state.setActive);
   const disconnect = useSessionStore((state) => state.disconnect);
+  // fps 必须读会话里的实时帧：device.fps 没人更新，之前标签永远显示 0fps
+  const frames = useSessionStore((state) => state.frames);
   const markWindowed = useDeviceStore((state) => state.markWindowed);
   const toggleDevicePopover = useUiStore((state) => state.toggleDevicePopover);
   const connected = devices.filter(
@@ -54,7 +56,7 @@ export function DeviceTabs(): ReactNode {
             >
               <StatusDot tone={TONE[device.status] ?? 'idle'} />
               <span className="text-body">{device.name}</span>
-              <span className="text-badge text-faint">{device.fps}fps</span>
+              <span className="text-badge text-faint">{frames[device.id]?.fps.toFixed(0) ?? '0'}fps</span>
             </button>
             <button
               type="button"

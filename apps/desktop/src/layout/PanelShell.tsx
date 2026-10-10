@@ -23,7 +23,14 @@ export function PanelShell({
         <div className="flex-1" />
         {actions}
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      {/*
+        内容区必须同时有 flex-1 + min-h-0：画面栏里全是绝对定位元素（img absolute inset-0），
+        它的"内容最小高度"是 0，只给 flex-1 会被 flex 压缩到 0 高度——用户看到的就是一条边框线。
+        再套一层 h-full，保证子元素的 h-full 有确定的参照高度。
+      */}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <div className="h-full min-h-0">{children}</div>
+      </div>
       {footer}
     </section>
   );

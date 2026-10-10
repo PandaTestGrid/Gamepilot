@@ -2,6 +2,8 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { App } from '@/App';
+import { useDeviceStore } from '@/stores/device.store';
+import { useSessionStore } from '@/stores/session.store';
 
 // 渲染测试不启动 Tauri：只验证主壳真的能挂载，且空态有明确引导
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve({})) }));
@@ -35,5 +37,50 @@ describe('主壳渲染', () => {
     expect(screen.getByText(/点下面的「连接设备」/)).toBeInTheDocument();
     expect(screen.queryByText('SM-G9980')).not.toBeInTheDocument();
     expect(screen.queryByText('MuMu Player 12')).not.toBeInTheDocument();
+  });
+});
+
+describe('画面栏渲染（回归：曾经连上了也不出图）', () => {
+  it('设备已连接且收到帧时，画面栏一定渲染出 img', () => {
+    useDeviceStore.setState({
+      devices: [
+        {
+          id: 'android:3387980',
+          name: 'OPPO A57',
+          uri: 'Android:///?serial=3387980',
+          kind: 'android',
+          status: 'connected',
+          resolution: [720, 1280],
+          fps: 14,
+        },
+      ],
+      activeId: 'android:3387980',
+      gridView: false,
+    });
+    useSessionStore.setState({
+      frames: {
+        'android:3387980': {
+          imageUrl: 'blob:gamepilot/frame',
+          index: 42,
+          resolution: [720, 1280],
+          node: 'home',
+          pending: null,
+          tick: 42,
+          fps: 14,
+          captureMs: 0.3,
+          detections: [],
+          ts: Date.now(),
+        },
+      },
+      links: { 'android:3387980': { channel: 'scrcpy', note: 'scrcpy 720×1280' } },
+    });
+
+    render(<App />);
+
+    const image = screen.getByAltText('OPPO A57 实时画面');
+    expect(image).toBeInTheDocument();
+    expect(image).toHaveAttribute('src', 'blob:gamepilot/frame');
+    // 底栏要显示通道，方便一眼看出走的哪条路
+    expect(screen.getByText('scrcpy')).toBeInTheDocument();
   });
 });

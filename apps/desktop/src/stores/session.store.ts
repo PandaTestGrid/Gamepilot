@@ -12,6 +12,7 @@ import { create } from 'zustand';
 
 import {
   connectDevice,
+  devLog,
   fetchFrame,
   disconnectDevice,
   type EngineEventPayload,
@@ -90,10 +91,15 @@ async function pullFrame(deviceId: string): Promise<void> {
   try {
     const buffer = await fetchFrame(deviceId);
     if (!buffer) {
+      devLog(`pull: 第 ${meta.index} 帧没拿到字节（引擎缓存为空？）`);
       return;
+    }
+    if (framePollTick.get(deviceId) === undefined) {
+      devLog(`pull: 首次拉到第 ${meta.index} 帧 ${buffer.byteLength} 字节`);
     }
     framePollTick.set(deviceId, meta.index);
     const url = URL.createObjectURL(new Blob([buffer], { type: 'image/jpeg' }));
+    verifyImage(url, meta.index);
     useSessionStore.setState((current) => {
       const previous = current.frames[deviceId];
       if (previous?.imageUrl.startsWith('blob:')) {
@@ -110,10 +116,28 @@ async function pullFrame(deviceId: string): Promise<void> {
   }
 }
 
+/**
+ * 用浏览器自己的解码器验一遍刚拉到的字节。
+ *
+ * 排查"字节到了但画面不出来"时，这一步能区分是**字节/解码问题**还是**渲染/布局问题**：
+ * 能 onload 说明 <img> 一定能显示，问题就在布局或 store 选择器上。
+ */
+function verifyImage(url: string, index: number): void {
+  const probe = new Image();
+  probe.onload = () => {
+    if (index % 300 < 20) {
+      devLog(`pull: 第 ${index} 帧解码成功 ${probe.naturalWidth}x${probe.naturalHeight}`);
+    }
+  };
+  probe.onerror = () => devLog(`pull: 第 ${index} 帧解码失败（字节可能坏了）`);
+  probe.src = url;
+}
+
 function startFramePolling(deviceId: string): void {
   if (framePollers.has(deviceId)) {
     return;
   }
+  devLog(`pull: 开始为 ${deviceId} 拉帧`);
   framePollers.set(
     deviceId,
     setInterval(() => void pullFrame(deviceId), 70),
@@ -129,9 +153,22 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   error: null,
 
   init: async () => {
+    devLog('session: 开始订阅 engine://event');
+    let seen = 0;
     const unlisten = await onEngineMessage((method, params) => {
+      seen += 1;
+      if (seen <= 3) {
+        devLog(`session: 收到通知 #${seen} ${method}`);
+      }
       if (method === 'engine.frame') {
         const frame = params as unknown as FramePayload;
+        // 有两处订阅（引擎状态 + 会话），同一条通知会进来两次：索引没变就直接跳过
+        if (get().frames[frame.deviceId]?.index === frame.index) {
+          return;
+        }
+        if (frame.index % 60 === 1) {
+          devLog(`frame #${frame.index} ${String(frame.deviceId)} capture=${String(frame.captureMs)}ms`);
+        }
         const previous = get().frames[frame.deviceId];
         const state: FrameState = {
           // 画面优先用轮询拉到的 blob；事件里的 base64 只是老引擎的兜底

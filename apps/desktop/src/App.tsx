@@ -10,6 +10,7 @@ import { DeviceTabs } from '@/layout/DeviceTabs';
 import { ErrorBanner } from '@/layout/ErrorBanner';
 import { StatusBar } from '@/layout/StatusBar';
 import { Toolbar } from '@/layout/Toolbar';
+import { devLog } from '@/lib/rpc';
 import { readPaneQuery, type PaneKind } from '@/lib/windows';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
@@ -50,6 +51,7 @@ export function App(): ReactNode {
 
   // 启动即拉起引擎（不再要求用户先点某个按钮），失败时由错误条提示并可重试
   useEffect(() => {
+    devLog('界面已挂载，开始启动引擎');
     void selfCheck();
   }, [selfCheck]);
 
@@ -72,6 +74,21 @@ export function App(): ReactNode {
       ensureEvents(device.id);
     }
   }, [devices, ensureGraph, ensureEvents]);
+
+  // 开发用自动连接：VITE_GP_AUTOCONNECT=<serial 或 设备 id> 时，扫描后自动连上它。
+  // 平时不设置这个变量就没有任何影响；用它可以把"连接→出帧→渲染"整条链路无头验完
+  const connectSession = useSessionStore((state) => state.connect);
+  useEffect(() => {
+    const wanted = import.meta.env.VITE_GP_AUTOCONNECT;
+    if (!wanted || engineStatus !== 'ready' || devices.length === 0) {
+      return;
+    }
+    const target = devices.find((item) => item.id.includes(wanted) || item.uri.includes(wanted));
+    if (target && !useSessionStore.getState().isReady(target.id)) {
+      devLog(`开发钩子：自动连接 ${target.id}`);
+      void connectSession(target.id, target.uri);
+    }
+  }, [engineStatus, devices, connectSession]);
 
   if (pane) {
     return <StandalonePane pane={pane} deviceId={deviceId} />;

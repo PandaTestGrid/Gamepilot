@@ -239,6 +239,15 @@ export function timelineGet(deviceId: string, limit = 60): Promise<{ frames: unk
 }
 
 /** 统一的引擎通知订阅：按 method 分发，返回取消订阅函数。 */
+/**
+ * 前端诊断日志 → 应用终端（`pnpm tauri dev` 的输出里带 `[ui]` 前缀）。
+ *
+ * 排查"引擎在推、界面没反应"这类问题时，这是唯一能从终端看到前端状态的手段。
+ */
+export function devLog(message: string): void {
+  void invoke('dev_log', { message }).catch(() => undefined);
+}
+
 export async function onEngineMessage(
   handler: (method: string, params: Record<string, unknown>) => void,
 ): Promise<UnlistenFn> {
