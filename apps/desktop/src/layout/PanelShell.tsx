@@ -17,7 +17,9 @@ export function PanelShell({
   className?: string;
 }): ReactNode {
   return (
-    <section className={cn('flex min-h-0 flex-col bg-panel', className)}>
+    // h-full 是关键：没有确定高度时，flex-1 的内容区在自动高度容器里会塌成 0
+    // （内容区全是绝对定位元素，撑不起高度）——画面栏"只剩一条边框线"就是这么来的
+    <section className={cn('flex h-full min-h-0 flex-col bg-panel', className)}>
       <div className="flex h-7 shrink-0 items-center gap-1 border-b border-line px-2">
         <span className="text-panel font-medium">{title}</span>
         <div className="flex-1" />

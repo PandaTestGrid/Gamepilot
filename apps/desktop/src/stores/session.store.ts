@@ -14,6 +14,7 @@ import {
   connectDevice,
   devLog,
   fetchFrame,
+  fetchFrameDataUrl,
   disconnectDevice,
   type EngineEventPayload,
   type FramePayload,
@@ -62,6 +63,8 @@ interface SessionState {
   readonly setThreshold: (deviceId: string, label: string, threshold: number) => Promise<void>;
   readonly isReady: (deviceId: string) => boolean;
   readonly clearError: () => void;
+  /** blob 渲染失败时改用 data URL（保证画面一定显示得出来） */
+  readonly recoverImage: (deviceId: string) => Promise<void>;
 }
 
 function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState): void {
@@ -103,7 +106,10 @@ async function pullFrame(deviceId: string): Promise<void> {
     useSessionStore.setState((current) => {
       const previous = current.frames[deviceId];
       if (previous?.imageUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(previous.imageUrl);
+        // 延迟回收：<img> 可能还没来得及加载完就换 src，
+        // 立刻 revoke 会让浏览器拿不到数据 → 画面一直空白（14fps 下必然会撞上）
+        const stale = previous.imageUrl;
+        setTimeout(() => URL.revokeObjectURL(stale), 3000);
       }
       return { frames: { ...current.frames, [deviceId]: { ...previous, imageUrl: url } as FrameState } };
     });
@@ -125,7 +131,8 @@ async function pullFrame(deviceId: string): Promise<void> {
 function verifyImage(url: string, index: number): void {
   const probe = new Image();
   probe.onload = () => {
-    if (index % 300 < 20) {
+    // 只在前几帧与偶尔抽样时打日志：探针本身也要解码一次，别每帧都来
+    if (index <= 3 || index % 300 === 0) {
       devLog(`pull: 第 ${index} 帧解码成功 ${probe.naturalWidth}x${probe.naturalHeight}`);
     }
   };
@@ -248,9 +255,13 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   connect: async (deviceId, uri) => {
     set({ error: null });
     useDeviceStore.getState().connect(deviceId);
+    // 连接的设备必须同时成为"活动设备"：否则画面栏渲染的还是原来那台（多半没连上），
+    // 用户点了连接、设备也连上了，画面栏却一直是空态——"看不到画面"就是这么来的
+    useDeviceStore.getState().setActive(deviceId);
     try {
       const result = await connectDevice(uri);
       useDeviceStore.getState().markConnectedWith(result.deviceId, result.resolution, uri);
+      useDeviceStore.getState().setActive(result.deviceId);
       set((current) => ({
         links: { ...current.links, [result.deviceId]: { channel: result.channel, note: result.linkNote } },
       }));
@@ -330,4 +341,26 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   isReady: (deviceId) => Boolean(get().ready[deviceId]),
 
   clearError: () => set({ error: null }),
+
+  recoverImage: async (deviceId) => {
+    devLog(`画面栏: blob 加载失败，改用 base64 兜底 (${deviceId})`);
+    try {
+      const dataUrl = await fetchFrameDataUrl(deviceId);
+      if (!dataUrl) {
+        set({ error: '画面渲染失败，且兜底数据为空（引擎可能已断开）' });
+        return;
+      }
+      set((current) => {
+        const previous = current.frames[deviceId];
+        return {
+          frames: {
+            ...current.frames,
+            [deviceId]: { ...previous, imageUrl: dataUrl } as FrameState,
+          },
+        };
+      });
+    } catch (error) {
+      set({ error: `画面渲染失败: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  },
 }));

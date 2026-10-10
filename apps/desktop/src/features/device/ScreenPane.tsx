@@ -6,7 +6,7 @@
  * （而且坐标本来就是归一化的，连换算都不需要）。
  */
 import { Grid2x2, MousePointerSquareDashed, ScanLine } from 'lucide-react';
-import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
 
 import { RecordOverlay } from '@/features/device/RecordOverlay';
 import { GhostButton, PanelShell, StatusDot } from '@/layout/PanelShell';
@@ -18,6 +18,9 @@ import { useGraphStore } from '@/stores/graph.store';
 import { useSessionStore, type FrameState } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
 import type { RecognizerView } from '@/types';
+
+/** 上一次记录的画面栏分支（只在变化时打日志） */
+let lastBranchKey = '';
 
 export function ScreenPane(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
@@ -31,6 +34,20 @@ export function ScreenPane(): ReactNode {
 
   const device = activeDevice(devices, activeId);
   const connected = useMemo(() => connectedDevices(devices), [devices]);
+
+  // 画面栏到底渲染了哪一支？"连上了却没画面"第一时间要看的就是这个。
+  // 只在分支真正变化时打一条，避免 14fps 下刷屏。
+  useEffect(() => {
+    const key =
+      `${activeId}|${device?.name ?? '-'}|${device?.status ?? '-'}|${String(gridView)}|` +
+      `${connected.length}|${String(Boolean(frame))}`;
+    if (lastBranchKey !== key) {
+      lastBranchKey = key;
+      devLog(
+        `画面栏分支: activeId=${activeId || '(空)'} 设备=${device?.name ?? '(无)'} 状态=${device?.status ?? '-'} 多开=${String(gridView)} 已连接=${connected.length} 有帧=${String(Boolean(frame))}`,
+      );
+    }
+  }, [activeId, device?.name, device?.status, gridView, connected.length, frame]);
   const recognizers = graph?.recognizers ?? [];
   const confirmedCount = recognizers.filter((item) => item.state !== 'idle').length;
 
@@ -205,6 +222,30 @@ function SingleScreen({
   };
 
   const detections = frame?.detections ?? [];
+  const recoverImage = useSessionStore((state) => state.recoverImage);
+
+  // 画面容器尺寸诊断：只在前几秒打几次，用来确认"容器真的被压成 0 高度"这类布局问题
+  useEffect(() => {
+    const node = viewport.current;
+    if (!node) {
+      return;
+    }
+    let ticks = 0;
+    const report = (): void => {
+      ticks += 1;
+      if (ticks <= 3) {
+        devLog(`画面容器 ${node.clientWidth}x${node.clientHeight}`);
+      }
+    };
+    report();
+    const timer = setInterval(report, 1500);
+    const observer = new ResizeObserver(report);
+    observer.observe(node);
+    return () => {
+      clearInterval(timer);
+      observer.disconnect();
+    };
+  }, []);
 
   return (
     <div
@@ -224,7 +265,7 @@ function SingleScreen({
           alt={`${deviceName} 实时画面`}
           className="pointer-events-none absolute inset-0 h-full w-full object-contain"
           draggable={false}
-          onError={() => devLog('画面栏：图片加载失败（字节坏了或 blob 失效）')}
+          onError={() => void recoverImage(deviceId)}
         />
       ) : (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-faint">

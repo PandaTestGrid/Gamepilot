@@ -193,6 +193,20 @@ export async function fetchFrame(deviceId: string): Promise<ArrayBuffer | null> 
   return buffer.buffer;
 }
 
+/**
+ * 取最新帧的 base64 版本（兜底路径）。
+ *
+ * 正常走 `fetchFrame` 的原始字节；只有在 blob URL 渲染失败时才用这条，
+ * 换来的是"一定能显示"（data URL 不涉及对象 URL 生命周期）。
+ */
+export async function fetchFrameDataUrl(deviceId: string): Promise<string | null> {
+  const text = await invoke<string>('engine_frame_base64', { deviceId });
+  if (typeof text !== 'string' || text.length === 0) {
+    return null;
+  }
+  return `data:image/jpeg;base64,${text}`;
+}
+
 export function connectDevice(uri: string): Promise<ConnectResult> {
   return rpc<ConnectResult>('device.connect', { uri });
 }
