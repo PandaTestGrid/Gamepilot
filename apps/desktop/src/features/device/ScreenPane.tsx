@@ -21,6 +21,7 @@ import type { RecognizerView } from '@/types';
 
 /** 上一次记录的画面栏分支（只在变化时打日志） */
 let lastBranchKey = '';
+let lastGridSummary = '';
 let imgLoadLogs = 0;
 
 export function ScreenPane(): ReactNode {
@@ -75,11 +76,15 @@ export function ScreenPane(): ReactNode {
           </GhostButton>
           <GhostButton
             active={gridView}
-            onClick={toggleGrid}
-            title={connected.length < 2 ? '至少 2 台已连接设备才能多开' : '多开网格'}
+            onClick={connected.length === 0 ? undefined : toggleGrid}
+            title={
+              connected.length === 0
+                ? '还没有已连接设备：先在设备面板连接一台'
+                : `多开网格（当前 ${connected.length} 台已连接）`
+            }
           >
             <Grid2x2 className="size-3" />
-            多开
+            多开{connected.length > 1 ? ` ${connected.length}` : ''}
           </GhostButton>
           <GhostButton title="当前帧命中的识别器数量">读数 {confirmedCount}</GhostButton>
         </>
@@ -87,7 +92,7 @@ export function ScreenPane(): ReactNode {
       footer={<RecognizerReadout recognizers={recognizers} onConnect={() => toggleDevicePopover(true)} />}
     >
       <div className="flex h-full min-h-0 flex-col bg-canvas p-2">
-        {gridView && connected.length >= 2 ? (
+        {gridView ? (
           <ScreenGrid />
         ) : device?.status === 'connected' ? (
           <SingleScreen
@@ -358,9 +363,25 @@ function ScreenGrid(): ReactNode {
   const activeId = useDeviceStore((state) => state.activeId);
   const setActive = useDeviceStore((state) => state.setActive);
   const frames = useSessionStore((state) => state.frames);
+  const links = useSessionStore((state) => state.links);
   const connected = useMemo(() => connectedDevices(devices), [devices]);
   const columns = connected.length >= 4 ? 2 : 1;
   const gridRef = useRef<HTMLDivElement>(null);
+
+  // 每块瓦片的帧状态：多开看不到画面时，先分清是"没帧"还是"有帧但没渲染"
+  useEffect(() => {
+    const summary = connected
+      .map((device) => {
+        const frame = frames[device.id];
+        const urlKind = !frame?.imageUrl ? '空' : frame.imageUrl.startsWith('blob:') ? 'blob' : 'data';
+        return `${device.name}=#${frame?.index ?? '-'}/${urlKind}/${frame ? frame.fps.toFixed(0) : '0'}fps`;
+      })
+      .join(' ');
+    if (summary && summary !== lastGridSummary) {
+      lastGridSummary = summary;
+      devLog(`多开瓦片状态: ${summary}`);
+    }
+  });
 
   // 网格尺寸诊断：多开"看不到画面"时，先看容器和瓦片有没有高度（曾经塌成 0）
   useEffect(() => {
@@ -373,6 +394,15 @@ function ScreenGrid(): ReactNode {
       `多开网格: ${connected.length} 台 容器 ${node.clientWidth}x${node.clientHeight} 首瓦片 ${tile?.clientWidth ?? 0}x${tile?.clientHeight ?? 0}`,
     );
   }, [connected.length, columns]);
+
+  if (connected.length === 0) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-1 text-badge text-faint">
+        <span>多开网格里还没有设备</span>
+        <span>先在设备面板连接一台（0 台设备时没有画面可显示）</span>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -388,6 +418,7 @@ function ScreenGrid(): ReactNode {
     >
       {connected.map((device) => {
         const frame = frames[device.id];
+        const link = links[device.id];
         return (
           <button
             key={device.id}
@@ -411,9 +442,20 @@ function ScreenGrid(): ReactNode {
                   alt={`${device.name} 画面`}
                   className="absolute inset-0 h-full w-full object-contain"
                   draggable={false}
+                  onLoad={(event) =>
+                    devLog(
+                      `多开瓦片 ${device.id} img 加载成功 ${event.currentTarget.naturalWidth}x${event.currentTarget.naturalHeight}`,
+                    )
+                  }
+                  onError={() =>
+                    devLog(`多开瓦片 ${device.id} img 加载失败 url=${frame.imageUrl.slice(0, 24) || '(空)'}`)
+                  }
                 />
               ) : (
-                <span className="text-badge text-faint">等待首帧…</span>
+                <span className="flex flex-col items-center gap-1 text-badge text-faint">
+                  <span>{device.name} · 等待首帧…</span>
+                  <span>通道 {link ? link.channel : '-'} · 若一直如此看顶部红条</span>
+                </span>
               )}
             </span>
             <span className="flex h-5 shrink-0 items-center justify-between border-t border-line px-2 text-badge text-faint">
