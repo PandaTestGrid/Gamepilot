@@ -21,6 +21,7 @@ pub fn run() {
             engine::engine_rpc,
             engine::engine_stop,
             engine::engine_frame,
+            engine::engine_frame_base64,
             window::open_pane_window
         ])
         .setup(|app| {

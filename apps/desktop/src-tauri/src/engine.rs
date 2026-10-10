@@ -165,6 +165,16 @@ pub fn engine_frame(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// 同上的 base64 版本：万一某些平台把二进制 IPC 序列化成别的形状，前端可以退回这条。
+#[tauri::command]
+pub fn engine_frame_base64(bridge: State<'_, Bridge>, device_id: String) -> Result<String, String> {
+    let frames = bridge.frames.lock().map_err(|error| error.to_string())?;
+    Ok(frames
+        .get(&device_id)
+        .map(|bytes| base64_encode(bytes))
+        .unwrap_or_default())
+}
+
 /// 停止引擎。会先尝试优雅退出（发 engine.shutdown 由前端负责），这里直接终止进程。
 #[tauri::command]
 pub fn engine_stop(bridge: State<'_, Bridge>) -> Result<(), String> {
@@ -382,10 +392,56 @@ mod frame_tests {
     use super::base64_decode;
 
     #[test]
+    fn encodes_round_trip() {
+        for sample in [
+            &b""[..],
+            b"a",
+            b"ab",
+            b"abc",
+            b"hello world",
+            &[0u8, 255, 128, 7][..],
+        ] {
+            let encoded = super::base64_encode(sample);
+            assert_eq!(
+                super::base64_decode(&encoded).unwrap(),
+                sample,
+                "样本: {sample:?}"
+            );
+        }
+    }
+
+    #[test]
     fn decodes_padding_and_newlines() {
         assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(base64_decode("aGVs\nbG8=").unwrap(), b"hello");
         assert_eq!(base64_decode("").unwrap(), Vec::<u8>::new());
         assert!(base64_decode("!!!").is_none());
     }
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// 标准 base64 编码（带 `=` 填充）。只用于帧数据的兜底通道。
+fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(BASE64_ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(BASE64_ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[((triple >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[(triple & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }

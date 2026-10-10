@@ -166,14 +166,31 @@ export interface DeviceNotificationPayload {
  * 实测前端收不到画面。改成事件只发元数据（识别框/节点/序号），帧按需拉。
  */
 export async function fetchFrame(deviceId: string): Promise<ArrayBuffer | null> {
-  const data = await invoke<ArrayBuffer | Uint8Array | number[]>('engine_frame', { deviceId });
-  if (data instanceof ArrayBuffer) {
-    return data.byteLength > 0 ? data : null;
+  // 首选：原始字节（Tauri binary IPC → ArrayBuffer）
+  try {
+    const data = await invoke<ArrayBuffer | Uint8Array | number[]>('engine_frame', { deviceId });
+    if (data instanceof ArrayBuffer && data.byteLength > 0) {
+      return data;
+    }
+    if (data instanceof Uint8Array && data.byteLength > 0) {
+      return data.slice().buffer;
+    }
+    if (Array.isArray(data) && data.length > 0) {
+      return new Uint8Array(data).buffer;
+    }
+  } catch {
+    // 某些平台把二进制响应序列化成别的形状：落到 base64 兜底
   }
-  if (data instanceof Uint8Array) {
-    return data.byteLength > 0 ? data.slice().buffer : null;
+  const text = await invoke<string>('engine_frame_base64', { deviceId });
+  if (typeof text !== 'string' || text.length === 0) {
+    return null;
   }
-  return null;
+  const binary = atob(text);
+  const buffer = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    buffer[index] = binary.charCodeAt(index);
+  }
+  return buffer.buffer;
 }
 
 export function connectDevice(uri: string): Promise<ConnectResult> {
