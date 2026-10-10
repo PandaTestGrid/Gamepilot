@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { DevicePopover } from '@/features/device/DevicePopover';
@@ -78,6 +78,9 @@ export function App(): ReactNode {
   // 开发用自动连接：VITE_GP_AUTOCONNECT=<serial 或 设备 id> 时，扫描后自动连上它。
   // 平时不设置这个变量就没有任何影响；用它可以把"连接→出帧→渲染"整条链路无头验完
   const connectSession = useSessionStore((state) => state.connect);
+  // 每台设备只自动连一次：这个 effect 依赖 devices，而 connect() 会改 devices，
+  // 不记录"试过了"就会无限重试（实测能刷到 10 万次，把引擎的 RPC 派发线程占死）
+  const autoTried = useRef(new Set<string>());
   useEffect(() => {
     const wanted = (import.meta.env.VITE_GP_AUTOCONNECT ?? '')
       .split(',')
@@ -88,7 +91,8 @@ export function App(): ReactNode {
     }
     for (const key of wanted) {
       const target = devices.find((item) => item.id.includes(key) || item.uri.includes(key));
-      if (target && !useSessionStore.getState().isReady(target.id)) {
+      if (target && !autoTried.current.has(target.id)) {
+        autoTried.current.add(target.id);
         devLog(`开发钩子：自动连接 ${target.id}`);
         void connectSession(target.id, target.uri);
       }

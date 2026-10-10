@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import IO, Any
 
 from .. import __version__
@@ -168,12 +169,32 @@ class RpcServer:
                 "methods": sorted(self._handlers),
             },
         )
-        for line in self._stdin:
-            self.handle_line(line)
-            if self._stopping:
-                break
+        # 并发派发：单个慢 handler（比如 device.connect 要等首帧）不能堵死整个控制面。
+        # 之前是串行处理，前端一个重试循环就能让引擎几十分钟不响应。
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="rpc") as pool:
+            for line in self._stdin:
+                pool.submit(self.handle_line, line)
+                if self._stopping:
+                    break
         logger.info("引擎退出")
         return 0
+
+
+def _install_stack_dump() -> None:
+    """GAMEPILOT_STACK_DUMP=<秒> 时，定时把所有线程的 Python 栈打到 stderr。
+
+    排查"引擎不响应/不推帧"这类卡死问题时，这是唯一能直接看到卡在哪一行的手段
+    （py-spy 在 macOS 上要 root）。平时不设置这个变量就完全不生效。
+    """
+    import faulthandler
+
+    seconds = os.environ.get("GAMEPILOT_STACK_DUMP")
+    if not seconds:
+        return
+    try:
+        faulthandler.dump_traceback_later(float(seconds), repeat=True, file=sys.stderr)
+    except ValueError:
+        logger.warning("GAMEPILOT_STACK_DUMP 需要是秒数，收到: %s", seconds)
 
 
 def main() -> int:
@@ -183,6 +204,7 @@ def main() -> int:
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    _install_stack_dump()
     server = RpcServer(sys.stdin, sys.stdout)
     return server.serve_forever()
 

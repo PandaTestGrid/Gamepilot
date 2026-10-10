@@ -360,9 +360,23 @@ function ScreenGrid(): ReactNode {
   const frames = useSessionStore((state) => state.frames);
   const connected = useMemo(() => connectedDevices(devices), [devices]);
   const columns = connected.length >= 4 ? 2 : 1;
+  const gridRef = useRef<HTMLDivElement>(null);
+
+  // 网格尺寸诊断：多开"看不到画面"时，先看容器和瓦片有没有高度（曾经塌成 0）
+  useEffect(() => {
+    const node = gridRef.current;
+    if (!node) {
+      return;
+    }
+    const tile = node.firstElementChild as HTMLElement | null;
+    devLog(
+      `多开网格: ${connected.length} 台 容器 ${node.clientWidth}x${node.clientHeight} 首瓦片 ${tile?.clientWidth ?? 0}x${tile?.clientHeight ?? 0}`,
+    );
+  }, [connected.length, columns]);
 
   return (
     <div
+      ref={gridRef}
       className="grid h-full min-h-0 gap-1"
       style={{
         gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,

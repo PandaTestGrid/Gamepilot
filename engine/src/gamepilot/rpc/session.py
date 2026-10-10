@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
@@ -93,6 +94,10 @@ class SessionManager:
         self.emit = emit
         self.project = resolve_project()
         self.sessions: dict[str, DeviceSession] = {}
+        # 每台设备一把连接锁：并发/重试的 connect 只会有一次真正建会话，
+        # 否则前端一个重试循环能叠加出几十个 scrcpy 会话
+        self._connect_locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
     # ---------- 连接 ----------
 
@@ -100,7 +105,12 @@ class SessionManager:
         scheme, options = parse_device_uri(uri)
         serial = str(options.get("serial", "")) if options.get("serial") else ""
         device_id = MOCK_DEVICE_ID if scheme.lower() == "mock" else f"{scheme.lower()}:{serial or 'default'}"
+        with self._locks_guard:
+            lock = self._connect_locks.setdefault(device_id, threading.Lock())
+        with lock:
+            return self._connect_locked(device_id, uri, scheme, options)
 
+    def _connect_locked(self, device_id: str, uri: str, scheme: str, options: dict[str, Any]) -> DeviceSession:
         existing = self.sessions.get(device_id)
         if existing is not None and existing.started:
             return existing

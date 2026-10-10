@@ -144,15 +144,26 @@ fn bind_frame_socket() -> Option<(std::path::PathBuf, ())> {
 /// 读帧通道：`[idLen u8][deviceId][jpegLen u32 BE][jpeg bytes]`，循环下去。
 #[cfg(unix)]
 fn read_frames(app: AppHandle, listener: std::os::unix::net::UnixListener) {
+    // 一台设备一条连接（每个 DeviceSession 各连一次）：循环 accept，
+    // 每条连接开一个读取线程 —— 只 accept 一次的话，第二台设备的帧会堵在 backlog 里
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(stream) => {
+                let app = app.clone();
+                std::thread::spawn(move || read_one_frame_stream(app, stream));
+            }
+            Err(error) => {
+                log::warn!("帧通道连接失败: {error}");
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_one_frame_stream(app: AppHandle, stream: std::os::unix::net::UnixStream) {
     use std::io::{BufReader, Read};
 
-    let (stream, _) = match listener.accept() {
-        Ok(pair) => pair,
-        Err(error) => {
-            log::warn!("帧通道连接失败: {error}");
-            return;
-        }
-    };
     let mut reader = BufReader::new(stream);
     loop {
         let mut id_len = [0u8; 1];
@@ -181,12 +192,12 @@ fn read_frames(app: AppHandle, listener: std::os::unix::net::UnixListener) {
             frames.insert(device_id, jpeg);
         }
     }
-    log::info!("帧通道已关闭");
+    log::debug!("帧通道连接已关闭");
 }
 
 /// 发一个 JSON-RPC 请求并等待对应响应。
 #[tauri::command]
-pub fn engine_rpc(
+pub async fn engine_rpc(
     bridge: State<'_, Bridge>,
     method: String,
     params: Option<Value>,
@@ -213,7 +224,14 @@ pub fn engine_rpc(
         process.stdin.flush().map_err(|e| e.to_string())?;
     }
 
-    match receiver.recv_timeout(RPC_TIMEOUT) {
+    // 关键：**不能**在主线程上等。
+    // Tauri 的同步命令跑在主线程，而读线程收到通知后会调 `app.emit`（需要主线程）。
+    // 主线程等 RPC 响应 + 读线程等主线程 = 死锁：界面卡在 connecting、一帧都收不到。
+    // 所以把等待丢进阻塞线程池（`engine_rpc` 声明为 async，命令本身跑在异步运行时上）。
+    let waiting = tauri::async_runtime::spawn_blocking(move || receiver.recv_timeout(RPC_TIMEOUT));
+    let received = waiting.await.map_err(|e| e.to_string())?;
+
+    match received {
         Ok(payload) => {
             if let Some(error) = payload.get("error") {
                 return Err(format!("引擎返回错误: {error}"));
