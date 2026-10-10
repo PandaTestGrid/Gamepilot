@@ -6,7 +6,6 @@
  */
 import { create } from 'zustand';
 
-import { mockEvents } from '@/mock/seed';
 import type { TraceEventType, TraceEventView } from '@/types';
 
 export type EventFilter = 'all' | 'failed' | 'recovery' | 'device';
@@ -59,14 +58,8 @@ export const useEventStore = create<EventState>()((set, get) => ({
       if (state.events[deviceId]) {
         return state;
       }
-      const seeded = mockEvents(deviceId);
-      return {
-        events: { ...state.events, [deviceId]: seeded },
-        seq: Math.max(
-          state.seq,
-          seeded.reduce((max, item) => Math.max(max, item.seq), 0),
-        ),
-      };
+      // 事件全部来自引擎推送；没连接时就是空的，不塞演示数据
+      return { events: { ...state.events, [deviceId]: [] } };
     }),
 
   append: (deviceId, type, detail) => {

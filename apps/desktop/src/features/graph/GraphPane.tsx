@@ -134,8 +134,9 @@ export function GraphPane(): ReactNode {
     >
       <div className="relative h-full bg-canvas">
         {nodes.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-badge text-faint">
-            该设备还没有状态图 · 打开「录制」在画面上框选即可开始
+          <div className="flex h-full flex-col items-center justify-center gap-1 text-badge text-faint">
+            <span>这台设备还没有状态图</span>
+            <span>先连接设备，然后在画面栏点「框选」，在画面上拖一个矩形即生成第一个节点</span>
           </div>
         ) : (
           <ReactFlow

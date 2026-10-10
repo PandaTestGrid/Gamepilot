@@ -5,6 +5,7 @@ import { ToolbarButton, VDivider } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { activeDevice, useDeviceStore } from '@/stores/device.store';
+import { useGraphStore } from '@/stores/graph.store';
 import { useEngineStore } from '@/stores/engine.store';
 import { useUiStore } from '@/stores/ui.store';
 import type { DotTone } from '@/layout/PanelShell';
@@ -35,13 +36,27 @@ export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRu
   const selfCheck = useEngineStore((state) => state.selfCheck);
 
   const device = activeDevice(devices, activeId);
+  // 运行按钮要说清"为什么现在不能跑"，而不是点了没反应
+  const nodes = useGraphStore((state) => state.graphs[activeId]?.nodes.length ?? 0);
+  const runBlocker = !device
+    ? '先在设备面板里选择并连接一台设备'
+    : device.status !== 'connected'
+      ? '设备还没连上（点顶栏设备名 → 连接）'
+      : nodes === 0
+        ? '状态图里还没有节点：先在画面栏点「框选」录一个界面元素'
+        : null;
 
   return (
     <header className="flex h-9 shrink-0 items-center bg-panel pr-2">
       <span className="px-3 text-[15px] font-medium tracking-wide">GamePilot</span>
       <VDivider />
 
-      <ToolbarButton onClick={onToggleRun} active={running}>
+      <ToolbarButton
+        onClick={runBlocker ? undefined : onToggleRun}
+        active={running}
+        disabled={Boolean(runBlocker)}
+        title={runBlocker ?? '开始按状态图跑（需要先连接设备并录好节点）'}
+      >
         {running ? <Square className="size-3.5" /> : <CirclePlay className="size-3.5" />}
         {running ? '停止' : '运行'}
       </ToolbarButton>
@@ -87,21 +102,36 @@ export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRu
             'size-3.5',
             engineStatus === 'ready' && 'text-confirmed',
             engineStatus === 'error' && 'text-failed',
+            engineStatus === 'connecting' && 'text-pending',
           )}
         />
         <span
           className={cn(
             engineStatus === 'error' && 'text-failed',
             engineStatus === 'ready' && 'text-confirmed',
+            engineStatus === 'idle' && 'text-dim',
           )}
         >
-          骨架自检
+          {engineLabel(engineStatus)}
         </span>
       </ToolbarButton>
       <VDivider />
       <span className="px-2 text-badge text-faint">─ □ ✕</span>
     </header>
   );
+}
+
+function engineLabel(status: 'idle' | 'connecting' | 'ready' | 'error'): string {
+  switch (status) {
+    case 'ready':
+      return '引擎已就绪';
+    case 'connecting':
+      return '引擎启动中…';
+    case 'error':
+      return '引擎启动失败 · 重试';
+    default:
+      return '引擎未连接 · 点击启动';
+  }
 }
 
 function GridToggle(): ReactNode {

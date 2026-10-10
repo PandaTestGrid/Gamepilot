@@ -9,9 +9,8 @@ import { create } from 'zustand';
 
 import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
-import { useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
-import type { GraphEdgeView, GraphNodeView, RecognizerView, RecordDraft, RecordMode } from '@/types';
+import type { RecordDraft, RecordMode } from '@/types';
 
 const DEFAULT_THRESHOLD = 0.82;
 
@@ -71,89 +70,17 @@ export const useUiStore = create<UiState>()((set, get) => ({
   commitDraft: () => {
     const { draft } = get();
     const deviceId = useDeviceStore.getState().activeId;
-    const graphStore = useGraphStore.getState();
-    const eventStore = useEventStore.getState();
     if (!draft || !deviceId) {
       return;
     }
-    // 已连接真设备：交给引擎裁剪落盘（引擎是唯一真源）
-    if (useSessionStore.getState().isReady(deviceId)) {
-      void useSessionStore.getState().record(deviceId, draft);
-      set({ draft: null });
-      return;
-    }
-
-    graphStore.ensure(deviceId);
-    const graph = useGraphStore.getState().graphs[deviceId];
-    if (!graph) {
-      return;
-    }
-
-    const label = draft.label.trim() || `region_${graph.recognizers.length + 1}`;
-    const recognizer: RecognizerView = {
-      label,
-      type: 'template',
-      score: draft.score,
-      threshold: draft.threshold,
-      roi: draft.rect,
-      samples: 1,
-      state: draft.score >= draft.threshold ? 'confirmed' : 'pending',
-    };
-    graphStore.addRecognizer(deviceId, recognizer);
-    eventStore.append(deviceId, 'recognizer_added', {
-      message: `+recognizer ${label} (阈值 ${draft.threshold})`,
-    });
-
-    const activeNodeId = graph.activeNodeId;
-    let targetId: string | null = null;
-
-    if (draft.asEnter) {
-      if (draft.targetMode === 'new') {
-        const node: GraphNodeView = {
-          id: draft.newNodeId,
-          name: draft.newNodeName,
-          enter: [label],
-          x: 90 + (graph.nodes.length % 3) * 200,
-          y: 300 + Math.floor(graph.nodes.length / 3) * 120,
-          visits: 0,
-        };
-        graphStore.addNode(deviceId, node);
-        targetId = node.id;
-        eventStore.append(deviceId, 'node_added', {
-          node: node.id,
-          message: `+node ${node.id} (enter=[${label}])`,
-        });
-      } else if (draft.targetNodeId) {
-        graphStore.updateNodeEnter(deviceId, draft.targetNodeId, label);
-        targetId = draft.targetNodeId;
-        eventStore.append(deviceId, 'node_added', {
-          node: targetId,
-          message: `${targetId}.enter += ${label}`,
-        });
-      }
-    }
-
-    if (draft.asActionTarget && activeNodeId && targetId && targetId !== activeNodeId) {
-      const edge: GraphEdgeView = {
-        id: `e_${label}`,
-        from: activeNodeId,
-        to: targetId,
-        when: label,
-        kind: 'normal',
-        priority: 5,
-        minScore: draft.threshold,
-        cooldownMs: 0,
-        retries: 1,
-        action: 'click',
-      };
-      graphStore.addEdge(deviceId, edge);
-      eventStore.append(deviceId, 'edge_added', {
-        node: activeNodeId,
-        edge: edge.id,
-        message: `+edge ${edge.id}: ${activeNodeId} --${label}--> ${targetId}`,
+    // 录制需要真实画面：没连设备就明确告诉用户，而不是偷偷改本地假数据
+    if (!useSessionStore.getState().isReady(deviceId)) {
+      useEventStore.getState().append(deviceId, 'error', {
+        message: '录制需要先连接设备：顶栏「未连接设备」→ 选择设备 → 连接',
       });
+      return;
     }
-
+    void useSessionStore.getState().record(deviceId, draft);
     set({ draft: null });
   },
 }));

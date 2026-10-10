@@ -128,9 +128,12 @@ export function DevicePopover(): ReactNode {
               key={device.id}
               device={device}
               onConnect={() => {
-                void connectSession(device.id, device.uri);
-                // 连接是低频操作：成功后自动收起弹层（M1 改成订阅 device.connected 通知）
-                setTimeout(() => toggle(false), 900);
+                // 连上了才收起弹层；失败时保持打开，原因会显示在行内与顶部红条
+                void connectSession(device.id, device.uri).then((ok) => {
+                  if (ok) {
+                    toggle(false);
+                  }
+                });
               }}
               onDisconnect={() => void disconnectSession(device.id)}
             />

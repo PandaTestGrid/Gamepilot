@@ -127,9 +127,9 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     instance.start(projectDir);
 
     await useSessionStore.getState().init();
-    await waitFor(() => useDeviceStore.getState().devices.length > 0);
-    await useDeviceStore.getState().scan(); // UI 打开设备面板时会扫描
-    await waitFor(() => useDeviceStore.getState().devices.some((item) => item.id === DEVICE_ID));
+    // 设备列表启动时是空的（界面空态引导用户去扫描），这里模拟"打开设备面板"触发扫描
+    await useDeviceStore.getState().scan();
+    await waitFor(() => useDeviceStore.getState().devices.some((item) => item.id === DEVICE_ID), 15000);
   });
 
   afterAll(() => {

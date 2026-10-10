@@ -7,6 +7,7 @@ import { EventPane } from '@/features/events/EventPane';
 import { GraphPane } from '@/features/graph/GraphPane';
 import { RecognizerPane } from '@/features/recognizers/RecognizerPane';
 import { DeviceTabs } from '@/layout/DeviceTabs';
+import { ErrorBanner } from '@/layout/ErrorBanner';
 import { StatusBar } from '@/layout/StatusBar';
 import { Toolbar } from '@/layout/Toolbar';
 import { readPaneQuery, type PaneKind } from '@/lib/windows';
@@ -26,6 +27,7 @@ import { useSessionStore } from '@/stores/session.store';
 export function App(): ReactNode {
   const { pane, deviceId } = readPaneQuery();
   const init = useEngineStore((state) => state.init);
+  const selfCheck = useEngineStore((state) => state.selfCheck);
   const initSession = useSessionStore((state) => state.init);
   const activeId = useDeviceStore((state) => state.activeId);
   const running = useSessionStore((state) => Boolean(state.running[activeId]));
@@ -46,7 +48,12 @@ export function App(): ReactNode {
     };
   }, [init, initSession]);
 
-  // 引擎连上后自动扫描一次真实设备（第 1 块：device.list）
+  // 启动即拉起引擎（不再要求用户先点某个按钮），失败时由错误条提示并可重试
+  useEffect(() => {
+    void selfCheck();
+  }, [selfCheck]);
+
+  // 引擎连上后自动扫描一次真实设备
   const engineStatus = useEngineStore((state) => state.status);
   const scanDevices = useDeviceStore((state) => state.scan);
   useEffect(() => {
@@ -83,6 +90,7 @@ export function App(): ReactNode {
         }}
       />
       <DeviceTabs />
+      <ErrorBanner />
 
       <main className="min-h-0 flex-1">
         {/* 三栏可拖拽 + 布局记忆（DESIGN.md 决策 P3） */}

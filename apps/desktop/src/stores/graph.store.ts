@@ -6,7 +6,6 @@
  */
 import { create } from 'zustand';
 
-import { mockGraph } from '@/mock/seed';
 import type { GraphData, GraphEdgeView, GraphNodeView, RecognizerView } from '@/types';
 
 interface GraphState {
@@ -42,14 +41,26 @@ export const useGraphStore = create<GraphState>()((set) => ({
   selectedEdgeId: null,
 
   ensure: (deviceId) =>
-    set((state) =>
-      state.graphs[deviceId] ? state : { graphs: { ...state.graphs, [deviceId]: mockGraph(deviceId) } },
-    ),
+    set((state) => {
+      if (state.graphs[deviceId]) {
+        return state;
+      }
+      // 只有连上真引擎读到 graph.json 才会有内容；这里先给一张空图，避免界面冒出假节点
+      const empty: GraphData = {
+        deviceId,
+        nodes: [],
+        edges: [],
+        recognizers: [],
+        activeNodeId: null,
+        pendingNodeId: null,
+      };
+      return { graphs: { ...state.graphs, [deviceId]: empty } };
+    }),
 
   addRecognizer: (deviceId, recognizer) =>
     set((state) => {
-      const graph = state.graphs[deviceId] ?? mockGraph(deviceId);
-      if (graph.recognizers.some((item) => item.label === recognizer.label)) {
+      const graph = state.graphs[deviceId];
+      if (!graph || graph.recognizers.some((item) => item.label === recognizer.label)) {
         return state;
       }
       return {
@@ -62,8 +73,8 @@ export const useGraphStore = create<GraphState>()((set) => ({
 
   addNode: (deviceId, node) =>
     set((state) => {
-      const graph = state.graphs[deviceId] ?? mockGraph(deviceId);
-      if (graph.nodes.some((item) => item.id === node.id)) {
+      const graph = state.graphs[deviceId];
+      if (!graph || graph.nodes.some((item) => item.id === node.id)) {
         return state;
       }
       return { graphs: { ...state.graphs, ...update(deviceId, graph, { nodes: [...graph.nodes, node] }) } };
@@ -71,7 +82,10 @@ export const useGraphStore = create<GraphState>()((set) => ({
 
   addEdge: (deviceId, edge) =>
     set((state) => {
-      const graph = state.graphs[deviceId] ?? mockGraph(deviceId);
+      const graph = state.graphs[deviceId];
+      if (!graph) {
+        return state;
+      }
       return { graphs: { ...state.graphs, ...update(deviceId, graph, { edges: [...graph.edges, edge] }) } };
     }),
 

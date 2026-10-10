@@ -97,8 +97,13 @@ function EmptyState({ onConnect }: { onConnect: () => void }): ReactNode {
   const discovered = devices.filter((device) => device.status !== 'connected').slice(0, 4);
 
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-4">
-      <span className="text-panel text-dim">未连接设备</span>
+    <div className="flex h-full flex-col items-center justify-center gap-3">
+      <span className="text-panel text-dim">还没有连接设备</span>
+      <ol className="w-[420px] space-y-1 text-badge text-faint">
+        <li>1. 点下面的「连接设备」，选一台手机（USB 调试已授权）或 Mock 设备</li>
+        <li>2. 连上后点画面栏的「框选」，在画面上拖一个矩形 → 生成识别器</li>
+        <li>3. 录好节点后点顶栏「运行」，状态机就会按你的状态图跑</li>
+      </ol>
       <button
         type="button"
         onClick={onConnect}
@@ -107,7 +112,7 @@ function EmptyState({ onConnect }: { onConnect: () => void }): ReactNode {
         连接设备
       </button>
       <div className="w-80 text-badge text-faint">
-        <div className="mb-1 text-dim">已发现（点「连接设备」查看/刷新）</div>
+        <div className="mb-1 text-dim">已发现（点「连接设备」刷新/连接）</div>
         {discovered.map((device) => (
           <button
             key={device.id}
@@ -121,7 +126,9 @@ function EmptyState({ onConnect }: { onConnect: () => void }): ReactNode {
             <span className="text-dim">→</span>
           </button>
         ))}
-        {discovered.length === 0 && <div className="px-1 py-2">还没有扫描到设备</div>}
+        {discovered.length === 0 && (
+          <div className="px-1 py-2">还没扫描到设备 · 确认手机已插好并允许 USB 调试</div>
+        )}
       </div>
     </div>
   );

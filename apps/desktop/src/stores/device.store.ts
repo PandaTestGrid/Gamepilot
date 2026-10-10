@@ -13,7 +13,6 @@
 import { create } from 'zustand';
 
 import { type DeviceInfoPayload, listDevices } from '@/lib/rpc';
-import { MOCK_DEVICES } from '@/mock/seed';
 import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
 
 export const MAX_ACTIVE_DEVICES = 4;
@@ -84,8 +83,8 @@ function patch(list: readonly DeviceRuntime[], id: string, value: Partial<Device
 }
 
 export const useDeviceStore = create<DeviceState>()((set) => ({
-  devices: MOCK_DEVICES,
-  activeId: MOCK_DEVICES[0]?.id ?? '',
+  devices: [],
+  activeId: '',
   gridView: false,
   scanState: 'idle',
   scanErrors: [],

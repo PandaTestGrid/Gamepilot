@@ -49,13 +49,15 @@ interface SessionState {
   readonly connectingPhase: Readonly<Record<string, string>>;
   readonly error: string | null;
   readonly init: () => Promise<() => void>;
-  readonly connect: (deviceId: string, uri: string) => Promise<void>;
+  /** 返回是否连接成功（组件据此决定是否收起设备弹层） */
+  readonly connect: (deviceId: string, uri: string) => Promise<boolean>;
   readonly disconnect: (deviceId: string) => Promise<void>;
   readonly startRun: (deviceId: string) => Promise<void>;
   readonly stopRun: (deviceId: string) => Promise<void>;
   readonly record: (deviceId: string, draft: RecordDraft) => Promise<void>;
   readonly setThreshold: (deviceId: string, label: string, threshold: number) => Promise<void>;
   readonly isReady: (deviceId: string) => boolean;
+  readonly clearError: () => void;
 }
 
 function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState): void {
@@ -150,11 +152,13 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       useDeviceStore.getState().markConnectedWith(result.deviceId, result.resolution, uri);
       applyGraph(result.deviceId, result.graph, get().frames[result.deviceId]);
       set((current) => ({ ready: { ...current.ready, [result.deviceId]: true } }));
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ error: message });
       useDeviceStore.getState().failConnect(deviceId, message);
       useEventStore.getState().append(deviceId, 'error', { message });
+      return false;
     }
   },
 
@@ -218,4 +222,6 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   isReady: (deviceId) => Boolean(get().ready[deviceId]),
+
+  clearError: () => set({ error: null }),
 }));

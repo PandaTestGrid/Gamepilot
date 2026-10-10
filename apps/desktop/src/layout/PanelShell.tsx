@@ -74,20 +74,24 @@ export function ToolbarButton({
   onClick,
   active,
   title,
+  disabled,
 }: {
   children: ReactNode;
   onClick?: () => void;
   active?: boolean;
   title?: string;
+  disabled?: boolean;
 }): ReactNode {
   return (
     <button
       type="button"
       onClick={onClick}
       title={title}
+      disabled={disabled}
       className={cn(
         'flex h-6 items-center gap-1.5 rounded-sm px-2 hover:bg-raised',
         active && 'bg-raised text-brand',
+        disabled && 'cursor-not-allowed opacity-40 hover:bg-transparent',
       )}
     >
       {children}

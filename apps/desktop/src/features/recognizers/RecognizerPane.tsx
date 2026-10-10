@@ -4,7 +4,7 @@
  * 阈值滑块直接写回本地图（M2 起同时通过 RPC 让引擎按新阈值重算当帧分数，
  * 画面上的框会跟着变）——这就是「现场调参」的体感来源。
  */
-import { type ReactNode } from 'react';
+import { type ReactNode, useRef } from 'react';
 
 import { PanelShell, StatusDot } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
@@ -19,6 +19,7 @@ export function RecognizerPane(): ReactNode {
   const updateThreshold = useGraphStore((state) => state.updateRecognizerThreshold);
   const pushThreshold = useSessionStore((state) => state.setThreshold);
   const sessionReady = useSessionStore((state) => Boolean(state.ready[activeId]));
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const recognizers = graph?.recognizers ?? [];
 
   return (
@@ -56,7 +57,15 @@ export function RecognizerPane(): ReactNode {
                     const value = Number(event.target.value);
                     updateThreshold(activeId, item.label, value); // 本地立即反馈
                     if (sessionReady) {
-                      void pushThreshold(activeId, item.label, value); // 写回引擎
+                      // 拖动时防抖：松手 300ms 后才写回引擎，避免刷爆 RPC
+                      const existing = timers.current.get(item.label);
+                      if (existing) {
+                        clearTimeout(existing);
+                      }
+                      timers.current.set(
+                        item.label,
+                        setTimeout(() => void pushThreshold(activeId, item.label, value), 300),
+                      );
                     }
                   }}
                   className="h-1 flex-1 accent-[var(--brand)]"
