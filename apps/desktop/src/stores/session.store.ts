@@ -147,7 +147,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     useDeviceStore.getState().connect(deviceId);
     try {
       const result = await connectDevice(uri);
-      useDeviceStore.getState().markConnectedWith(result.deviceId, result.resolution);
+      useDeviceStore.getState().markConnectedWith(result.deviceId, result.resolution, uri);
       applyGraph(result.deviceId, result.graph, get().frames[result.deviceId]);
       set((current) => ({ ready: { ...current.ready, [result.deviceId]: true } }));
     } catch (error) {
