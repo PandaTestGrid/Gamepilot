@@ -95,6 +95,30 @@ Rust 桥的调度规则：
 
 高频通知的约定（CONVENTIONS §11.4）：必须限频或聚合，禁止把每一帧原样推给 UI。
 
+### 计划中的方法（M1，多设备）
+
+> 约定：**所有与设备相关的方法与通知都带 `deviceId`**，这样一台设备的帧、
+> 事件、状态图不会串到另一台设备上（DESIGN.md §4.6）。
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `device.list` | `{ scan?: boolean }` | 返回可连接设备列表（adb 设备 + Windows 可见窗口 + Mock） |
+| `device.connect` | `{ uri: string }` | 连接并返回 `deviceId`；过程通过通知回报阶段 |
+| `device.disconnect` | `{ deviceId: string }` | 断开 |
+| `device.status` | `{ deviceId: string }` | 单台设备状态（含 error / suggestedFix） |
+| `graph.get` | `{ deviceId: string }` | 取该设备的状态图（DESIGN.md §7 的 JSON） |
+| `graph.save` | `{ deviceId: string, graph: object }` | 写回并校验 |
+
+计划通知：
+
+| 方法 | 说明 |
+|---|---|
+| `device.discovered` | 扫描到新设备 |
+| `device.connecting` | 连接阶段变化（`adb 连接中` / `读取分辨率` / `首帧截图`） |
+| `device.connected` / `device.lost` / `device.reconnected` | 连接状态变化与自愈 |
+| `engine.event` | 状态机事件，params 里带 `deviceId` |
+| `engine.frame` | 帧推送，params 带 `deviceId` + base64 JPEG + 当帧识别结果 |
+
 ## 5. 错误码
 
 | 码 | 含义 | 触发场景 |

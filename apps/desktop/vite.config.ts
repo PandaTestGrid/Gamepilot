@@ -20,6 +20,8 @@ export default defineConfig({
   build: {
     target: 'safari15',
     sourcemap: true,
+    // React Flow 让主 chunk 超过默认 500KB 阈值；M3 接入代码分割后再收紧
+    chunkSizeWarningLimit: 700,
   },
   test: {
     environment: 'jsdom',

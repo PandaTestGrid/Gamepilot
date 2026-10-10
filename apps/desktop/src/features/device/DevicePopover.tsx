@@ -1,0 +1,239 @@
+/**
+ * 设备弹层：统一列表 + 一步连接 + 行内错误（DESIGN.md §4.3）。
+ *
+ * 与 AirtestIDE 的差别都体现在这里：
+ *   - 四个折叠区 → 一个列表 + 来源徽标
+ *   - 「先选下拉再点连接」 → 点行任意位置即连
+ *   - 裸的「刷新/重启 ADB」 → 收进 ⋯ 高级
+ *   - iOS 只留一行灰字，不摆用不了的输入框
+ */
+import { MoreHorizontal, RefreshCw, Search } from 'lucide-react';
+import { type ReactNode, useMemo, useState } from 'react';
+
+import { StatusDot, type DotTone } from '@/layout/PanelShell';
+import { cn } from '@/lib/utils';
+import { useDeviceStore } from '@/stores/device.store';
+import { useUiStore } from '@/stores/ui.store';
+import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
+
+const TABS: Array<{ id: 'all' | DeviceKind; label: string }> = [
+  { id: 'all', label: '全部' },
+  { id: 'android', label: '安卓' },
+  { id: 'emulator', label: '模拟器' },
+  { id: 'windows', label: 'Windows' },
+  { id: 'mock', label: 'Mock' },
+];
+
+function toneOf(status: DeviceStatus): DotTone {
+  switch (status) {
+    case 'connected':
+      return 'confirmed';
+    case 'connecting':
+      return 'pending';
+    case 'failed':
+      return 'failed';
+    default:
+      return 'idle';
+  }
+}
+
+export function DevicePopover(): ReactNode {
+  const open = useUiStore((state) => state.devicePopoverOpen);
+  const toggle = useUiStore((state) => state.toggleDevicePopover);
+  const devices = useDeviceStore((state) => state.devices);
+  const connect = useDeviceStore((state) => state.connect);
+  const disconnect = useDeviceStore((state) => state.disconnect);
+  const [query, setQuery] = useState('');
+  const [tab, setTab] = useState<'all' | DeviceKind>('all');
+  const [advanced, setAdvanced] = useState(false);
+
+  const rows = useMemo(
+    () =>
+      devices.filter((device) => {
+        const matchTab = tab === 'all' || device.kind === tab;
+        const text = `${device.name} ${device.uri} ${device.kind}`.toLowerCase();
+        return matchTab && (query.trim() === '' || text.includes(query.trim().toLowerCase()));
+      }),
+    [devices, query, tab],
+  );
+
+  const connectedCount = devices.filter((device) => device.status === 'connected').length;
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="absolute inset-0 z-30 bg-canvas/60" onClick={() => toggle(false)} role="presentation">
+      <div
+        className="absolute top-16 left-3 w-[460px] rounded-sm border border-line bg-panel"
+        onClick={(event) => event.stopPropagation()}
+        role="presentation"
+      >
+        <div className="flex h-7 items-center gap-2 border-b border-line px-2">
+          <span className="text-panel font-medium">设备</span>
+          <span className="text-badge text-faint">{connectedCount} 台已连接 · 上限 4</span>
+          <div className="flex-1" />
+          <button type="button" onClick={() => toggle(false)} className="px-1 text-dim hover:text-fg">
+            ✕
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 border-b border-line px-2 py-2">
+          <Search className="size-3.5 text-faint" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索设备，或粘贴 URI（Android:///?serial=xxx）"
+            className="h-6 flex-1 bg-transparent text-body placeholder:text-faint focus:outline-none"
+          />
+        </div>
+
+        <div className="flex gap-1 border-b border-line px-2 py-1.5">
+          {TABS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setTab(item.id)}
+              className={cn(
+                'h-5 rounded-sm px-2 text-badge',
+                tab === item.id ? 'bg-active text-fg' : 'text-dim hover:bg-raised',
+              )}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="max-h-[340px] overflow-auto">
+          {rows.map((device) => (
+            <DeviceRow
+              key={device.id}
+              device={device}
+              onConnect={() => {
+                connect(device.id);
+                // 连接是低频操作：成功后自动收起弹层（M1 改成订阅 device.connected 通知）
+                setTimeout(() => toggle(false), 900);
+              }}
+              onDisconnect={() => disconnect(device.id)}
+            />
+          ))}
+          {rows.length === 0 && (
+            <div className="px-3 py-6 text-center text-badge text-faint">没有匹配的设备</div>
+          )}
+        </div>
+
+        <div className="relative flex h-8 items-center gap-3 border-t border-line px-2 text-badge text-dim">
+          <button type="button" className="flex items-center gap-1 hover:text-fg">
+            <RefreshCw className="size-3" /> 刷新
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdvanced((value) => !value)}
+            className={cn('flex items-center gap-1 hover:text-fg', advanced && 'text-fg')}
+          >
+            <MoreHorizontal className="size-3" /> 高级
+          </button>
+          <div className="flex-1" />
+          <span className="text-faint">iOS 支持：计划中（暂不提供）</span>
+
+          {advanced && (
+            <div className="absolute bottom-8 left-12 w-52 rounded-sm border border-line bg-raised py-1">
+              {['刷新设备列表', '重启 ADB（会断开所有设备）', '复制当前设备 URI', '手动输入 URI…'].map(
+                (item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    onClick={() => setAdvanced(false)}
+                    className="block w-full px-2 py-1 text-left text-badge text-dim hover:bg-active hover:text-fg"
+                  >
+                    {item}
+                  </button>
+                ),
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeviceRow({
+  device,
+  onConnect,
+  onDisconnect,
+}: {
+  device: DeviceRuntime;
+  onConnect: () => void;
+  onDisconnect: () => void;
+}): ReactNode {
+  const failed = device.status === 'failed';
+  return (
+    <div className="group border-b border-line/60">
+      <div className="flex h-8 items-center gap-2 px-2 hover:bg-raised">
+        <button
+          type="button"
+          onClick={onConnect}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <StatusDot tone={toneOf(device.status)} />
+          <span className="truncate text-body">{device.name}</span>
+          <span className="text-badge text-faint">{kindLabel(device.kind)}</span>
+        </button>
+        <span className="w-20 text-right text-badge text-dim">
+          {device.status === 'failed' ? '不可用' : device.resolution.join('×')}
+        </span>
+        {device.status === 'connected' ? (
+          <button
+            type="button"
+            onClick={onDisconnect}
+            className="w-12 text-right text-badge text-confirmed hover:text-failed"
+          >
+            断开
+          </button>
+        ) : device.status === 'connecting' ? (
+          <span className="flex w-12 items-center justify-end gap-1 text-badge text-pending">
+            <RefreshCw className="size-3 animate-spin" />
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={onConnect}
+            className="w-12 text-right text-badge text-brand opacity-0 group-hover:opacity-100"
+          >
+            连接
+          </button>
+        )}
+      </div>
+
+      {failed && (
+        <div className="flex items-center gap-2 bg-raised/40 px-2 py-1.5">
+          <StatusDot tone="failed" />
+          <span className="flex-1 text-badge text-failed">
+            {device.error ?? '连接失败'}
+            {device.suggestedFix ? ` · ${device.suggestedFix}` : ''}
+          </span>
+          <button type="button" onClick={onConnect} className="text-badge text-brand">
+            重新检测
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function kindLabel(kind: DeviceKind): string {
+  switch (kind) {
+    case 'android':
+      return '安卓';
+    case 'emulator':
+      return '模拟器';
+    case 'windows':
+      return 'Windows';
+    case 'mock':
+      return 'Mock';
+    default:
+      return '远程';
+  }
+}

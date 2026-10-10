@@ -1,0 +1,151 @@
+/**
+ * UI store：录制状态机 + 弹层/布局等跨面板的界面状态。
+ *
+ * 录制是「手感」的核心（DESIGN.md §4.4），流程写在这里而不是散在组件里：
+ *   off ──点录制──▶ marquee / pick ──框选或点选──▶ draft ──确认──▶ 写入 graph + 事件 ──▶ 回到 marquee
+ *                                        └──取消（Esc）──┘
+ */
+import { create } from 'zustand';
+
+import { useDeviceStore } from '@/stores/device.store';
+import { useEventStore } from '@/stores/event.store';
+import { useGraphStore } from '@/stores/graph.store';
+import type { GraphEdgeView, GraphNodeView, RecognizerView, RecordDraft, RecordMode } from '@/types';
+
+const DEFAULT_THRESHOLD = 0.82;
+
+interface UiState {
+  readonly recordMode: RecordMode;
+  readonly draft: RecordDraft | null;
+  readonly devicePopoverOpen: boolean;
+  readonly rightTab: 'events' | 'recognizers';
+  readonly sequence: number;
+  readonly setRecordMode: (mode: RecordMode) => void;
+  readonly toggleRecording: () => void;
+  readonly toggleDevicePopover: (open?: boolean) => void;
+  readonly setRightTab: (tab: 'events' | 'recognizers') => void;
+  readonly beginDraft: (input: { rect: readonly [number, number, number, number]; score: number }) => void;
+  readonly updateDraft: (patch: Partial<RecordDraft>) => void;
+  readonly cancelDraft: () => void;
+  /** 确认草稿：一次交互内同时落 识别器 + 节点 + 边，并写事件（可撤销的原子操作） */
+  readonly commitDraft: () => void;
+}
+
+export const useUiStore = create<UiState>()((set, get) => ({
+  recordMode: 'off',
+  draft: null,
+  devicePopoverOpen: false,
+  rightTab: 'events',
+  sequence: 1,
+
+  setRecordMode: (mode) => set({ recordMode: mode, draft: mode === 'off' ? null : get().draft }),
+  toggleRecording: () =>
+    set((state) => ({ recordMode: state.recordMode === 'off' ? 'marquee' : 'off', draft: null })),
+  toggleDevicePopover: (open) => set((state) => ({ devicePopoverOpen: open ?? !state.devicePopoverOpen })),
+  setRightTab: (rightTab) => set({ rightTab }),
+
+  beginDraft: ({ rect, score }) => {
+    const sequence = get().sequence;
+    set({
+      sequence: sequence + 1,
+      draft: {
+        rect,
+        label: '',
+        threshold: DEFAULT_THRESHOLD,
+        score,
+        asEnter: true,
+        asActionTarget: true,
+        targetMode: 'new',
+        targetNodeId: null,
+        newNodeName: '新界面',
+        newNodeId: `node_${sequence}`,
+      },
+    });
+  },
+
+  updateDraft: (patch) => set((state) => (state.draft ? { draft: { ...state.draft, ...patch } } : state)),
+
+  cancelDraft: () => set({ draft: null }),
+
+  commitDraft: () => {
+    const { draft } = get();
+    const deviceId = useDeviceStore.getState().activeId;
+    const graphStore = useGraphStore.getState();
+    const eventStore = useEventStore.getState();
+    if (!draft || !deviceId) {
+      return;
+    }
+    graphStore.ensure(deviceId);
+    const graph = useGraphStore.getState().graphs[deviceId];
+    if (!graph) {
+      return;
+    }
+
+    const label = draft.label.trim() || `region_${graph.recognizers.length + 1}`;
+    const recognizer: RecognizerView = {
+      label,
+      type: 'template',
+      score: draft.score,
+      threshold: draft.threshold,
+      roi: draft.rect,
+      samples: 1,
+      state: draft.score >= draft.threshold ? 'confirmed' : 'pending',
+    };
+    graphStore.addRecognizer(deviceId, recognizer);
+    eventStore.append(deviceId, 'recognizer_added', {
+      message: `+recognizer ${label} (阈值 ${draft.threshold})`,
+    });
+
+    const activeNodeId = graph.activeNodeId;
+    let targetId: string | null = null;
+
+    if (draft.asEnter) {
+      if (draft.targetMode === 'new') {
+        const node: GraphNodeView = {
+          id: draft.newNodeId,
+          name: draft.newNodeName,
+          enter: [label],
+          x: 90 + (graph.nodes.length % 3) * 200,
+          y: 300 + Math.floor(graph.nodes.length / 3) * 120,
+          visits: 0,
+        };
+        graphStore.addNode(deviceId, node);
+        targetId = node.id;
+        eventStore.append(deviceId, 'node_added', {
+          node: node.id,
+          message: `+node ${node.id} (enter=[${label}])`,
+        });
+      } else if (draft.targetNodeId) {
+        graphStore.updateNodeEnter(deviceId, draft.targetNodeId, label);
+        targetId = draft.targetNodeId;
+        eventStore.append(deviceId, 'node_added', {
+          node: targetId,
+          message: `${targetId}.enter += ${label}`,
+        });
+      }
+    }
+
+    if (draft.asActionTarget && activeNodeId && targetId && targetId !== activeNodeId) {
+      const edge: GraphEdgeView = {
+        id: `e_${label}`,
+        from: activeNodeId,
+        to: targetId,
+        when: label,
+        kind: 'normal',
+        priority: 5,
+        minScore: draft.threshold,
+        cooldownMs: 0,
+        retries: 1,
+        action: 'click',
+      };
+      graphStore.addEdge(deviceId, edge);
+      eventStore.append(deviceId, 'edge_added', {
+        node: activeNodeId,
+        edge: edge.id,
+        message: `+edge ${edge.id}: ${activeNodeId} --${label}--> ${targetId}`,
+      });
+    }
+
+    set({ draft: null });
+  },
+}));

@@ -35,12 +35,20 @@ gamepilot/
 │   └── adr/                     # 重大决策记录（一决策一文件）
 ├── apps/desktop/                # Tauri 2 壳 + React 前端
 │   ├── src/
-│   │   ├── App.tsx              # 骨架页：三栏容器
+│   │   ├── App.tsx              # 主壳 + 独立窗口（?pane=）路由
+│   │   ├── types.ts             # 界面层数据模型（M1 起由引擎填充）
+│   │   ├── layout/              # Toolbar / DeviceTabs / StatusBar / PanelShell
+│   │   ├── features/
+│   │   │   ├── device/          # ScreenPane（画面/网格/录制）、RecordOverlay、DevicePopover
+│   │   │   ├── graph/           # GraphPane（React Flow）
+│   │   │   ├── events/          # EventPane（事件流 + 时间轴）
+│   │   │   └── recognizers/     # RecognizerPane（分数 + 阈值滑块）
 │   │   ├── components/ui/       # shadcn/ui 组件（CLI 生成，可改）
-│   │   ├── features/            # 按业务域切分：device / graph / events / recognizers
 │   │   ├── lib/rpc.ts           # 与引擎通信的唯一出口
-│   │   ├── stores/              # Zustand store（按域拆分）
-│   │   └── test/                # 测试 setup
+│   │   ├── lib/windows.ts       # 多窗口（Tauri）与 ?pane= 解析
+│   │   ├── stores/              # Zustand：device / graph / event / ui / engine
+│   │   ├── mock/seed.ts         # 布局用样本数据（M1 删除或仅留演示模式）
+│   │   └── test/                # 测试 setup（jsdom 补丁）
 │   └── src-tauri/               # Rust：窗口 / sidecar 守护 / RPC 转发
 │       └── src/engine.rs        # 引擎桥（唯一与 Python 进程打交道的地方）
 └── engine/                      # Python 引擎
@@ -226,6 +234,28 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
    - 有没有更小的替代（例如图表用 uPlot 而不是 ECharts）？
 3. 每次新增依赖必须在 commit message 里写明**用途 + 许可**。
 4. 定期抽查：`pnpm licenses list`、`uv pip list`、`cargo deny`（M2 接入）。
+5. **已批准依赖清单**（新增依赖前先看这里有没有可复用的）：
+
+| 层 | 依赖 | 许可 | 用途 |
+|---|---|---|---|
+| 前端 | react / react-dom | MIT | 框架 |
+| 前端 | @xyflow/react (React Flow) | MIT | 状态图画布 |
+| 前端 | react-resizable-panels | MIT | 三栏拖拽 + 布局记忆 |
+| 前端 | zustand | MIT | 全局状态 |
+| 前端 | tailwindcss / shadcn-ui(cli) | MIT | 样式与组件 |
+| 前端 | lucide-react | ISC | 图标 |
+| 前端 | clsx / tailwind-merge | MIT | 类名合并 |
+| 前端 | class-variance-authority | Apache-2.0 | 组件变体 |
+| 前端 | uplot | MIT | 性能曲线（M4 用） |
+| 工具 | vite / vitest / eslint / prettier | MIT | 构建与质量 |
+| 工具 | typescript | Apache-2.0 | 类型 |
+| 壳 | tauri / tauri-plugin-log / serde | MIT 或 Apache-2.0 | 桌面壳 |
+| 引擎 | numpy | BSD-3 | 数值 |
+| 引擎 | opencv-python-headless | Apache-2.0 | 图像识别 |
+| 引擎 | pillow | HPND(MIT-CMU) | 合成测试画面 |
+| 引擎 | rapidocr-onnxruntime（可选） | Apache-2.0 | OCR 识别器 |
+| 引擎 | av（可选） | BSD-3 | scrcpy H.264 解码（M3） |
+| 引擎 | pytest / ruff / mypy | MIT | 测试与静态检查 |
 
 ---
 

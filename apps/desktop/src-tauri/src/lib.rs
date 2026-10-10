@@ -8,6 +8,7 @@
 //! 业务逻辑（识别、状态机、设备控制）**一律不在这里**。
 
 mod engine;
+mod window;
 
 use engine::Bridge;
 
@@ -18,7 +19,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             engine::engine_start,
             engine::engine_rpc,
-            engine::engine_stop
+            engine::engine_stop,
+            window::open_pane_window
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
