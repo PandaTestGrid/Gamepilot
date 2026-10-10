@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { DevicePopover } from '@/features/device/DevicePopover';
@@ -12,7 +12,7 @@ import { StatusBar } from '@/layout/StatusBar';
 import { Toolbar } from '@/layout/Toolbar';
 import { devLog } from '@/lib/rpc';
 import { readPaneQuery, type PaneKind } from '@/lib/windows';
-import { useDeviceStore } from '@/stores/device.store';
+import { connectedDevices, useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
@@ -89,6 +89,27 @@ export function App(): ReactNode {
       void connectSession(target.id, target.uri);
     }
   }, [engineStatus, devices, connectSession]);
+
+  // 推流策略：只给"看得见的画面"推帧，并按同时显示的数量分配帧率。
+  // 不做这件事的话，每台设备都会以 14fps 推 60~143KB 的 JPEG（两台就 ~4MB/s），界面必然卡。
+  const gridView = useDeviceStore((state) => state.gridView);
+  const setStreamPolicy = useSessionStore((state) => state.setStreamPolicy);
+  const [windowHidden, setWindowHidden] = useState(false);
+  useEffect(() => {
+    const onVisibility = (): void => setWindowHidden(document.hidden);
+    document.addEventListener('visibilitychange', onVisibility);
+    onVisibility();
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+  useEffect(() => {
+    const connected = connectedDevices(devices);
+    const grid = gridView && connected.length >= 2;
+    const gridFps = connected.length >= 4 ? 4 : 6;
+    for (const device of connected) {
+      const fps = windowHidden ? 0 : grid ? gridFps : device.id === activeId ? 10 : 0;
+      setStreamPolicy(device.id, fps);
+    }
+  }, [devices, activeId, gridView, windowHidden, setStreamPolicy]);
 
   if (pane) {
     return <StandalonePane pane={pane} deviceId={deviceId} />;

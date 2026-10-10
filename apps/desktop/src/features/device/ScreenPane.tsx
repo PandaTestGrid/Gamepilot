@@ -362,7 +362,16 @@ function ScreenGrid(): ReactNode {
   const columns = connected.length >= 4 ? 2 : 1;
 
   return (
-    <div className="grid h-full gap-1" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+    <div
+      className="grid h-full min-h-0 gap-1"
+      style={{
+        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+        // 行高必须显式 1fr：默认 auto 行会被瓦片里绝对定位的 <img> 撑成 0 高度，
+        // 表现就是"多开看不到画面"（和单画面之前那个塌陷是同一类问题）
+        gridAutoRows: 'minmax(0, 1fr)',
+        gridTemplateRows: `repeat(${Math.ceil(connected.length / columns)}, minmax(0, 1fr))`,
+      }}
+    >
       {connected.map((device) => {
         const frame = frames[device.id];
         return (
@@ -381,7 +390,7 @@ function ScreenGrid(): ReactNode {
               <span className="flex-1" />
               <span className="text-badge text-faint">{frame ? `${frame.fps}fps` : '—'}</span>
             </span>
-            <span className="relative flex flex-1 items-center justify-center overflow-hidden">
+            <span className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden">
               {frame ? (
                 <img
                   src={frame.imageUrl}

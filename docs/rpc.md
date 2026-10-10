@@ -205,6 +205,14 @@ Rust 桥的调度规则：
 `{ deviceId }` → `{ ok: true, running: boolean }`。
 `run.start` 要求状态图里至少有一个节点，否则报「状态图还没有节点：先在画面上框选录制一个界面」。
 
+### `device.stream`
+
+`{ deviceId, fps }` → `{ ok, streamFps }`。界面告诉引擎"这台设备我只看 N fps"（**0 = 先别推帧**）。
+
+- 引擎的截图、识别、状态机**照常跑**，只是不再编码 JPEG 推给界面
+- 多设备同时投屏时这是最大的一笔开销：每帧 60~143KB，14fps 就是每台 1~2MB/s
+- 界面的策略：单画面看的那台 10fps；多开每台 4~6fps；窗口不可见 0fps
+
 ### `timeline.get`
 
 `{ deviceId, limit }` → `{ frames: [...], events: [...] }`（最近 N 帧摘要 + 事件，供时间轴回溯）。

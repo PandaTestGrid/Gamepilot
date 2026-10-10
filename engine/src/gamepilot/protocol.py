@@ -40,6 +40,8 @@ METHOD_DEVICE_LIST = "device.list"
 METHOD_DEVICE_CONNECT = "device.connect"
 METHOD_DEVICE_DISCONNECT = "device.disconnect"
 METHOD_DEVICE_STATUS = "device.status"
+# UI 告知引擎"这台设备我只看 N fps"（0 = 不推帧，识别与状态机照常跑）
+METHOD_DEVICE_STREAM = "device.stream"
 
 # 状态图
 METHOD_GRAPH_GET = "graph.get"

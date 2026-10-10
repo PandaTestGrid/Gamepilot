@@ -207,6 +207,16 @@ export async function fetchFrameDataUrl(deviceId: string): Promise<string | null
   return `data:image/jpeg;base64,${text}`;
 }
 
+/**
+ * 告诉引擎这台设备界面要看多少帧（0 = 先别推）。
+ *
+ * 引擎的截图、识别、状态机照常跑，只是不再编码 JPEG 推给界面：
+ * 多设备同时投屏时，这是最大的一笔开销（每帧 60~143KB，14fps 就是 1~2MB/s）。
+ */
+export function setStreamFps(deviceId: string, fps: number): Promise<unknown> {
+  return invoke('engine_rpc', { method: 'device.stream', params: { deviceId, fps } });
+}
+
 export function connectDevice(uri: string): Promise<ConnectResult> {
   return rpc<ConnectResult>('device.connect', { uri });
 }

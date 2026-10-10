@@ -20,6 +20,7 @@ from ..protocol import (
     METHOD_DEVICE_CONNECT,
     METHOD_DEVICE_DISCONNECT,
     METHOD_DEVICE_STATUS,
+    METHOD_DEVICE_STREAM,
     METHOD_GRAPH_GET,
     METHOD_GRAPH_SAVE,
     METHOD_RECOGNIZER_THRESHOLD,
@@ -177,6 +178,20 @@ def register(server: RpcServer) -> SessionManager:
     @server.method(METHOD_DEVICE_STATUS)
     def _status(params: dict[str, Any]) -> dict[str, Any]:
         return manager.get(_require_str(params, "deviceId")).status()
+
+    @server.method(METHOD_DEVICE_STREAM)
+    def _stream(params: dict[str, Any]) -> dict[str, Any]:
+        """界面告知引擎"这台设备我只看 N fps"（0 = 先别推帧）。
+
+        识别与状态机不受影响：引擎照常按会话帧率截图、识别、跑状态机，
+        只是不再编码 JPEG 推给界面 —— 多设备同时开时这是最大的一笔开销。
+        """
+        session = manager.get(_require_str(params, "deviceId"))
+        fps = params.get("fps", 15.0)
+        if not isinstance(fps, (int, float)):
+            raise ValueError("fps 必须是数字（0 表示暂停推帧）")
+        session.set_stream_fps(float(fps))
+        return {"ok": True, "streamFps": session.stream_fps}
 
     @server.method(METHOD_GRAPH_GET)
     def _graph_get(params: dict[str, Any]) -> dict[str, Any]:

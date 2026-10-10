@@ -15,6 +15,7 @@ import {
   devLog,
   fetchFrame,
   fetchFrameDataUrl,
+  setStreamFps,
   disconnectDevice,
   type EngineEventPayload,
   type FramePayload,
@@ -65,6 +66,8 @@ interface SessionState {
   readonly clearError: () => void;
   /** blob 渲染失败时改用 data URL（保证画面一定显示得出来） */
   readonly recoverImage: (deviceId: string) => Promise<void>;
+  /** 界面告诉引擎：这台设备我需要多少帧（0 = 停推） */
+  readonly setStreamPolicy: (deviceId: string, fps: number) => void;
 }
 
 function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState): void {
@@ -129,26 +132,54 @@ async function pullFrame(deviceId: string): Promise<void> {
  * 能 onload 说明 <img> 一定能显示，问题就在布局或 store 选择器上。
  */
 function verifyImage(url: string, index: number): void {
+  // 只验前 3 帧：探针本身也要完整解码一次，14fps 下等于把解码开销翻倍（应用会卡）
+  if (index > 3) {
+    return;
+  }
   const probe = new Image();
   probe.onload = () => {
-    // 只在前几帧与偶尔抽样时打日志：探针本身也要解码一次，别每帧都来
-    if (index <= 3 || index % 300 === 0) {
-      devLog(`pull: 第 ${index} 帧解码成功 ${probe.naturalWidth}x${probe.naturalHeight}`);
-    }
+    devLog(`pull: 第 ${index} 帧解码成功 ${probe.naturalWidth}x${probe.naturalHeight}`);
   };
   probe.onerror = () => devLog(`pull: 第 ${index} 帧解码失败（字节可能坏了）`);
   probe.src = url;
 }
 
-function startFramePolling(deviceId: string): void {
-  if (framePollers.has(deviceId)) {
+/** 每台设备当前应用的推流帧率（避免重复发同样的 RPC） */
+const streamPolicy = new Map<string, number>();
+
+/**
+ * 按需拉帧：间隔与"界面想看多少帧"一致，fps<=0 直接停（引擎那边同时停止推帧）。
+ *
+ * 单画面 10fps、多开每台 4~6fps、窗口不可见 0fps —— 不这么限，
+ * 两台设备就是 ~4MB/s 的文本流，界面必然卡。
+ */
+function startFramePolling(deviceId: string, fps = 10): void {
+  const existing = framePollers.get(deviceId);
+  if (existing) {
+    clearInterval(existing);
+    framePollers.delete(deviceId);
+  }
+  framePollTick.delete(deviceId);
+  const effective = Math.max(0, fps);
+  if (effective <= 0) {
     return;
   }
-  devLog(`pull: 开始为 ${deviceId} 拉帧`);
   framePollers.set(
     deviceId,
-    setInterval(() => void pullFrame(deviceId), 70),
+    setInterval(() => void pullFrame(deviceId), Math.max(50, Math.round(1000 / effective))),
   );
+}
+
+/** 应用推流策略：通知引擎 + 调整拉帧节奏 */
+function applyStreamPolicy(deviceId: string, fps: number): void {
+  startFramePolling(deviceId, fps);
+  if (!useSessionStore.getState().ready[deviceId] || streamPolicy.get(deviceId) === fps) {
+    return;
+  }
+  streamPolicy.set(deviceId, fps);
+  void setStreamFps(deviceId, fps).catch((error: unknown) => {
+    devLog(`push: 设置推流帧率失败 ${String(error)}`);
+  });
 }
 
 export const useSessionStore = create<SessionState>()((set, get) => ({
@@ -286,6 +317,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       set({ error: error instanceof Error ? error.message : String(error) });
     }
     stopFramePolling(deviceId);
+    streamPolicy.delete(deviceId);
     useDeviceStore.getState().disconnect(deviceId);
     set((current) => ({ ready: { ...current.ready, [deviceId]: false } }));
   },
@@ -341,6 +373,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   isReady: (deviceId) => Boolean(get().ready[deviceId]),
 
   clearError: () => set({ error: null }),
+
+  setStreamPolicy: (deviceId, fps) => applyStreamPolicy(deviceId, fps),
 
   recoverImage: async (deviceId) => {
     devLog(`画面栏: blob 加载失败，改用 base64 兜底 (${deviceId})`);

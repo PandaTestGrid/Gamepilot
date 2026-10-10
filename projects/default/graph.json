@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "defaults": {
+    "vote": 2,
+    "tick_ms": 200,
+    "transition_timeout_ms": 4000
+  },
+  "recognizers": {
+    "main_region_1": {
+      "type": "template",
+      "template": "templates/main_region_1.png",
+      "threshold": 0.82,
+      "roi": [0.439189, 0.148148, 0.10473, 0.231111]
+    },
+    "main_region_2": {
+      "type": "template",
+      "template": "templates/main_region_2.png",
+      "threshold": 0.82,
+      "roi": [0.650338, 0.224964, 0.152027, 0.110305]
+    },
+    "main_region_3": {
+      "type": "template",
+      "template": "templates/main_region_3.png",
+      "threshold": 0.82,
+      "roi": [0.518581, 0.188537, 0.101351, 0.119155]
+    }
+  },
+  "nodes": [
+    {
+      "id": "node_1",
+      "name": "新界面",
+      "enter": ["main_region_1", "main_region_2"]
+    },
+    {
+      "id": "node_4",
+      "name": "新界面",
+      "enter": ["main_region_3"]
+    }
+  ],
+  "edges": []
+}

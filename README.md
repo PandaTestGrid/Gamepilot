@@ -99,7 +99,7 @@ pnpm tauri dev        # 启动（窗口几秒后出现）
 
 | 指标 | scrcpy 通道（默认） | adb screencap 回退 |
 |---|---|---|
-| 画面帧率 | **解码 ~28fps，交付 ~14fps** | ~1.8fps（553ms/帧） |
+| 画面帧率 | 解码 ~28fps；按界面需要交付（单画面 10fps、多开每台 4~6fps、窗口不可见 0fps） | ~1.8fps（553ms/帧） |
 | 每次取帧耗时 | 0.3ms（复用已解码帧） | 553ms |
 | 点击 | **0.1ms**（控制 socket） | ~1030ms（`adb shell input tap` 要 fork 进程） |
 | 连接耗时 | 1.6~2.5s | 1.8~3s |
@@ -109,6 +109,8 @@ pnpm tauri dev        # 启动（窗口几秒后出现）
 - 走哪条通道在**底栏的 `link`** 里能看到；显示 `screencap（慢）` 说明 scrcpy 没起来
   （常见原因：设备端 jar 推送失败、视频编码器被占用、Android 版本过低）
 - scrcpy **只在画面变化时才出帧**（静止画面会复用上一帧），所以 fps 会随画面活动浮动
+- 界面不需要的帧不会被推：`device.stream` 让前端告诉引擎"这台的画面我看不看、看多少帧"，
+  识别与状态机仍在引擎里照常跑 —— 多设备时这是避免卡顿的关键
 - scrcpy-server（v3.3.4，Apache-2.0）已收进 `engine/vendor/`，不需要你单独装 scrcpy；
   也可以用 `GAMEPILOT_SCRCPY_SERVER` 指向自己的版本
 

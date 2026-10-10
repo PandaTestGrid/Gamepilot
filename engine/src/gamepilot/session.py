@@ -46,8 +46,8 @@ class DeviceSession:
         emit: Emit,
         *,
         fps: float = 8.0,
-        jpeg_width: int = 960,
-        jpeg_quality: int = 70,
+        jpeg_width: int = 720,
+        jpeg_quality: int = 65,
     ) -> None:
         self.device_id = device_id
         self.controller = controller
@@ -72,6 +72,10 @@ class DeviceSession:
         self.capture_ms = 0.0
         self.last_frame: np.ndarray | None = None
         self._last_emit_at: float | None = None
+        # 推给界面的帧率（0 = 暂停推帧）。识别/状态机不受影响，仍按 fps_limit 跑，
+        # 这样"界面不看这台设备"时不会白烧 CPU 与带宽（多设备时尤其明显）
+        self.stream_fps = 15.0
+        self._last_push_at = 0.0
         self._last_seq: int | None = None
         self._last_jpeg: str | None = None
         self._stop = threading.Event()
@@ -136,7 +140,8 @@ class DeviceSession:
                     )
 
             detections = [item.to_dict() for item in self.engine.detections.values()]
-            self._emit_frame(frame, detections)
+            if self._should_push():
+                self._emit_frame(frame, detections)
 
             elapsed = time.perf_counter() - started
             # fps 是"实际交付节奏"（两次推帧的间隔），不是 1/截图耗时：
@@ -146,6 +151,20 @@ class DeviceSession:
             self.fps = 1.0 / period if period > 0 else 0.0
             self._last_emit_at = now
             time.sleep(max(0.0, interval - (time.perf_counter() - started)))
+
+    def _should_push(self) -> bool:
+        """这一拍要不要推给界面（stream_fps = 0 表示界面没显示这台设备）。"""
+        if self.stream_fps <= 0:
+            return False
+        now = time.perf_counter()
+        if now - self._last_push_at < 1.0 / self.stream_fps:
+            return False
+        self._last_push_at = now
+        return True
+
+    def set_stream_fps(self, fps: float) -> None:
+        self.stream_fps = max(0.0, float(fps))
+        logger.info("推流帧率: %.1f fps (设备 %s)", self.stream_fps, self.device_id)
 
     def _emit_frame(self, frame: Frame, detections: list[dict[str, Any]]) -> None:
         # 画面没变（scrcpy 静止时会重复同一帧）就复用上次的 JPEG，省掉一次编码
@@ -314,6 +333,7 @@ class DeviceSession:
                 "fps": round(self.fps, 1),
                 "captureMs": round(self.capture_ms, 1),
                 "channel": getattr(self.controller, "channel", "unknown"),
+                "streamFps": round(self.stream_fps, 1),
                 "linkNote": getattr(self.controller, "link_note", ""),
                 "linkFps": round(float(getattr(self.controller, "link_fps", 0.0)), 1),
                 "node": self.engine.current,
