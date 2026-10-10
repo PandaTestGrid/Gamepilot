@@ -133,7 +133,7 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 - 类型导入必须用 `import { type Foo }`（`verbatimModuleSyntax`）。
 - 组件用**函数组件 + named export**（`react-refresh` 规则需要）；只有 `main.tsx` 允许顶层副作用。
 - 状态管理：**服务端/引擎状态放 Zustand store**，组件内只放 UI 局部状态（选中项、hover）。
-- 不在组件里写死颜色：一律用 `index.css` 里的 theme token（§4.4 的语义色也是 token）。
+- 不在组件里写死颜色：一律用 `index.css` 里的 theme token（§4.5 的语义色也是 token）。
 - 副作用收敛在 hook 里；`useEffect` 必须有明确的清理函数（订阅类必须有）。
 
 ### 3.2 Python

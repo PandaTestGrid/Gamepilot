@@ -3,58 +3,81 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * 主题变量：shadcn/ui (slate) 默认值。
- * DESIGN.md §4.4 的语义色（已确认/待确认/失败/恢复边）在 UI 评审通过后
- * 作为独立 token 追加到这里，禁止在各组件里写死颜色。
+ * 设计语言：扁平化（DESIGN.md §4.0 / §4.5）
+ * 层次只由「三级背景 + 1px 描边」表达：禁止阴影、渐变、卡片堆叠。
+ *
+ * 命名注意：品牌蓝叫 --brand，不叫 --accent —— 后者是 shadcn/ui 的悬停背景 token，
+ * 复用会让下拉菜单的 hover 变成蓝色。
  */
-:root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.129 0.042 264.695);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.129 0.042 264.695);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.129 0.042 264.695);
-  --primary: oklch(0.208 0.042 265.755);
-  --primary-foreground: oklch(0.984 0.003 247.858);
-  --secondary: oklch(0.968 0.007 247.896);
-  --secondary-foreground: oklch(0.208 0.042 265.755);
-  --muted: oklch(0.968 0.007 247.896);
-  --muted-foreground: oklch(0.554 0.046 257.417);
-  --accent: oklch(0.968 0.007 247.896);
-  --accent-foreground: oklch(0.208 0.042 265.755);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.929 0.013 255.508);
-  --input: oklch(0.929 0.013 255.508);
-  --ring: oklch(0.704 0.04 256.788);
-}
-
+:root,
 .dark {
-  --background: oklch(0.129 0.042 264.695);
-  --foreground: oklch(0.984 0.003 247.858);
-  --card: oklch(0.208 0.042 265.755);
-  --card-foreground: oklch(0.984 0.003 247.858);
-  --popover: oklch(0.208 0.042 265.755);
-  --popover-foreground: oklch(0.984 0.003 247.858);
-  --primary: oklch(0.929 0.013 255.508);
-  --primary-foreground: oklch(0.208 0.042 265.755);
-  --secondary: oklch(0.279 0.041 260.031);
-  --secondary-foreground: oklch(0.984 0.003 247.858);
-  --muted: oklch(0.279 0.041 260.031);
-  --muted-foreground: oklch(0.704 0.04 256.788);
-  --accent: oklch(0.279 0.041 260.031);
-  --accent-foreground: oklch(0.984 0.003 247.858);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.551 0.027 264.364);
+  /* 背景层次 */
+  --bg-canvas: #0f1115;
+  --bg-panel: #161920;
+  --bg-raised: #1c2029;
+  --bg-active: #232833;
+  --border: #262b36;
+
+  /* 文字 */
+  --fg: #e6e8ee;
+  --fg-dim: #9aa3b2;
+  --fg-faint: #6b7280;
+
+  /* 唯一强调色 */
+  --brand: #4da3ff;
+
+  /* 状态语义色（全项目统一，见 DESIGN.md §4.5） */
+  --state-confirmed: #4ade80;
+  --state-pending: #fbbf24;
+  --state-failed: #f87171;
+  --state-recovery: #fb7185;
+  --state-idle: #6b7280;
+
+  --radius: 4px;
+
+  /* shadcn/ui 变量映射到本项目调色板（组件库可用，且保持扁平） */
+  --background: var(--bg-canvas);
+  --foreground: var(--fg);
+  --card: var(--bg-panel);
+  --card-foreground: var(--fg);
+  --popover: var(--bg-panel);
+  --popover-foreground: var(--fg);
+  --primary: var(--brand);
+  --primary-foreground: #0b0d12;
+  --secondary: var(--bg-raised);
+  --secondary-foreground: var(--fg);
+  --muted: var(--bg-raised);
+  --muted-foreground: var(--fg-dim);
+  --accent: var(--bg-raised); /* shadcn 的悬停背景，不是品牌色 */
+  --accent-foreground: var(--fg);
+  --destructive: var(--state-failed);
+  --input: var(--border);
+  --ring: var(--brand);
 }
 
 @theme inline {
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: 2px;
+  --radius-md: var(--radius);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --radius-xl: var(--radius);
+
+  --color-canvas: var(--bg-canvas);
+  --color-panel: var(--bg-panel);
+  --color-raised: var(--bg-raised);
+  --color-active: var(--bg-active);
+  --color-line: var(--border);
+
+  --color-fg: var(--fg);
+  --color-dim: var(--fg-dim);
+  --color-faint: var(--fg-faint);
+  --color-brand: var(--brand);
+
+  --color-confirmed: var(--state-confirmed);
+  --color-pending: var(--state-pending);
+  --color-failed: var(--state-failed);
+  --color-recovery: var(--state-recovery);
+  --color-idle: var(--state-idle);
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -73,11 +96,22 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+
+  /* 字号与行高：只用这几档，避免到处出现随手值 */
+  --text-badge: 11px;
+  --text-body: 12px;
+  --text-panel: 13px;
+  --text-title: 15px;
+
+  --height-toolbar: 36px;
+  --height-panelhead: 28px;
+  --height-row: 26px;
+  --height-statusbar: 24px;
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
   }
 
   html,
@@ -87,8 +121,37 @@
   }
 
   body {
-    @apply bg-background text-foreground antialiased;
+    @apply bg-canvas text-fg antialiased;
     font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
-    /* 桌面应用：禁用文本选择与右键菜单的浏览器默认行为由各面板自行控制 */
+    font-size: var(--text-body);
+    /* 数字等宽：分数 / fps / tick 刷新时不跳动 */
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 扁平化：默认无过渡，只允许 120ms 的底色/透明度反馈 */
+  button,
+  [role='button'],
+  tr {
+    transition:
+      background-color 120ms linear,
+      opacity 120ms linear;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--brand) 35%, transparent);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--bg-canvas);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2e3440;
+    border: 2px solid var(--bg-canvas);
   }
 }

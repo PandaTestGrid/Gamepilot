@@ -11,4 +11,4 @@
 规则：
 - 组件内**禁止**出现像素坐标：所有矩形都是 `[0,1]` 归一化，转像素只在引擎侧。
 - 画面渲染不直接调用引擎：一律经 `src/lib/rpc.ts`。
-- 不在本目录里写死颜色：三态语义色走 `index.css` 的 theme token（DESIGN.md §4.4）。
+- 不在本目录里写死颜色：三态语义色走 `index.css` 的 theme token（DESIGN.md §4.5）。
