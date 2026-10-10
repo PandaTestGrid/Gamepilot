@@ -22,6 +22,10 @@ INTERNAL_ERROR = -32603
 
 # 引擎 → 前端 的通知方法（无 id，不期待响应）
 NOTIFY_READY = "engine.ready"
+NOTIFY_DEVICE_CONNECTING = "device.connecting"
+NOTIFY_DEVICE_CONNECTED = "device.connected"
+NOTIFY_DEVICE_DISCONNECTED = "device.disconnected"
+NOTIFY_DEVICE_FAILED = "device.failed"
 NOTIFY_LOG = "engine.log"
 NOTIFY_EVENT = "engine.event"
 NOTIFY_FRAME = "engine.frame"
@@ -33,3 +37,19 @@ METHOD_SHUTDOWN = "engine.shutdown"
 
 # 设备（多设备：所有设备相关方法与通知都带 deviceId，见 docs/rpc.md）
 METHOD_DEVICE_LIST = "device.list"
+METHOD_DEVICE_CONNECT = "device.connect"
+METHOD_DEVICE_DISCONNECT = "device.disconnect"
+METHOD_DEVICE_STATUS = "device.status"
+
+# 状态图
+METHOD_GRAPH_GET = "graph.get"
+METHOD_GRAPH_SAVE = "graph.save"
+
+# 录制与调参
+METHOD_RECORD_TEMPLATE = "record.template"
+METHOD_RECOGNIZER_THRESHOLD = "recognizer.threshold"
+
+# 运行控制
+METHOD_RUN_START = "run.start"
+METHOD_RUN_STOP = "run.stop"
+METHOD_TIMELINE = "timeline.get"

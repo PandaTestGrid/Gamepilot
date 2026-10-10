@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from 'react';
+import { type ReactNode, useEffect } from 'react';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { DevicePopover } from '@/features/device/DevicePopover';
@@ -14,6 +14,7 @@ import { useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
+import { useSessionStore } from '@/stores/session.store';
 
 /**
  * 主壳。
@@ -24,20 +25,26 @@ import { useGraphStore } from '@/stores/graph.store';
  */
 export function App(): ReactNode {
   const { pane, deviceId } = readPaneQuery();
-  const [running, setRunning] = useState(false);
   const init = useEngineStore((state) => state.init);
+  const initSession = useSessionStore((state) => state.init);
+  const activeId = useDeviceStore((state) => state.activeId);
+  const running = useSessionStore((state) => Boolean(state.running[activeId]));
+  const startRun = useSessionStore((state) => state.startRun);
+  const stopRun = useSessionStore((state) => state.stopRun);
   // 布局记忆：拖过的栏宽会存进 localStorage，下次启动恢复
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({ id: 'gamepilot.layout.v1' });
 
+  // 两条订阅：引擎通知（engine.ready/...）与运行时消息（engine.frame / engine.event / device.*）
   useEffect(() => {
-    let dispose: (() => void) | undefined;
-    void init().then((unlisten) => {
-      dispose = unlisten;
-    });
+    const disposers: Array<() => void> = [];
+    void init().then((unlisten) => disposers.push(unlisten));
+    void initSession().then((unlisten) => disposers.push(unlisten));
     return () => {
-      dispose?.();
+      for (const dispose of disposers) {
+        dispose();
+      }
     };
-  }, [init]);
+  }, [init, initSession]);
 
   // 引擎连上后自动扫描一次真实设备（第 1 块：device.list）
   const engineStatus = useEngineStore((state) => state.status);
@@ -65,7 +72,16 @@ export function App(): ReactNode {
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden">
-      <Toolbar running={running} onToggleRun={() => setRunning((value) => !value)} />
+      <Toolbar
+        running={running}
+        onToggleRun={() => {
+          if (running) {
+            void stopRun(activeId);
+          } else {
+            void startRun(activeId);
+          }
+        }}
+      />
       <DeviceTabs />
 
       <main className="min-h-0 flex-1">

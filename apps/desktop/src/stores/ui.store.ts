@@ -10,6 +10,7 @@ import { create } from 'zustand';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
+import { useSessionStore } from '@/stores/session.store';
 import type { GraphEdgeView, GraphNodeView, RecognizerView, RecordDraft, RecordMode } from '@/types';
 
 const DEFAULT_THRESHOLD = 0.82;
@@ -75,6 +76,13 @@ export const useUiStore = create<UiState>()((set, get) => ({
     if (!draft || !deviceId) {
       return;
     }
+    // 已连接真设备：交给引擎裁剪落盘（引擎是唯一真源）
+    if (useSessionStore.getState().isReady(deviceId)) {
+      void useSessionStore.getState().record(deviceId, draft);
+      set({ draft: null });
+      return;
+    }
+
     graphStore.ensure(deviceId);
     const graph = useGraphStore.getState().graphs[deviceId];
     if (!graph) {

@@ -14,6 +14,7 @@ import { StatusDot, type DotTone } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
+import { useSessionStore } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
 import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
 
@@ -42,8 +43,8 @@ export function DevicePopover(): ReactNode {
   const open = useUiStore((state) => state.devicePopoverOpen);
   const toggle = useUiStore((state) => state.toggleDevicePopover);
   const devices = useDeviceStore((state) => state.devices);
-  const connect = useDeviceStore((state) => state.connect);
-  const disconnect = useDeviceStore((state) => state.disconnect);
+  const connectSession = useSessionStore((state) => state.connect);
+  const disconnectSession = useSessionStore((state) => state.disconnect);
   const scan = useDeviceStore((state) => state.scan);
   const scanState = useDeviceStore((state) => state.scanState);
   const scanErrors = useDeviceStore((state) => state.scanErrors);
@@ -127,11 +128,11 @@ export function DevicePopover(): ReactNode {
               key={device.id}
               device={device}
               onConnect={() => {
-                connect(device.id);
+                void connectSession(device.id, device.uri);
                 // 连接是低频操作：成功后自动收起弹层（M1 改成订阅 device.connected 通知）
                 setTimeout(() => toggle(false), 900);
               }}
-              onDisconnect={() => disconnect(device.id)}
+              onDisconnect={() => void disconnectSession(device.id)}
             />
           ))}
           {rows.length === 0 && (

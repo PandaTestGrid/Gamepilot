@@ -49,18 +49,18 @@
 | 项目规范 | ✅ 完成 | [`CONVENTIONS.md`](./CONVENTIONS.md)（依赖方向/命名/坐标铁律/契约版本/测试矩阵/DoD）+ [`rpc.md`](./rpc.md) 契约 |
 | 布局实现（多设备 / 多窗口） | ✅ 完成 | 三栏可拖拽 + 布局记忆、设备标签条与设备弹层、录制框选→草稿表单→原子写入状态图、React Flow 状态图、事件流/时间轴/识别器阈值滑块、多开网格、独立窗口（`?pane=`）；数据为 mock，M1 接引擎 |
 | **实现分块 1**：真实设备发现 | ✅ 完成 | 引擎 `devices/`（发现层 + Controller 抽象）、RPC `device.list`、前端设备弹层/空态接真实数据；本机实测扫到 3 台真机（型号 + 分辨率） |
-| 实现分块 2~6 | ⛔ 未开始 | 见下方分块表 |
+| 实现分块 2~6 | ✅ 完成 | 真机截图与输入（adb 通道）、会话层（唯一截图循环 + 帧推送）、模板/颜色识别器、录制落盘、状态机运行与事件流；**OPPO A57 真机跑通「连接→出帧→录制→运行→点击」**，前端已全部接真引擎 |
 
 **实现分块（每块都能在 App 里独立验收，不一口气做完）**
 
 | 块 | 内容 | 验收现象 |
 |---|---|---|
 | 1 ✅ | `device.list` 真实扫描（adb / Mock） | 打开设备选择器看到真机列表；未授权设备带修复建议 |
-| 2 | `device.connect` + 首帧 `engine.frame` | 画面栏出现真机截图 |
-| 3 | 连续投屏 + fps/延迟指标 | 画面动起来，底栏 fps 跳动；掉线自动重连 |
-| 4 | 模板匹配识别器上屏 | 画面上的识别框 + 识别器面板分数 |
-| 5 | 录制落盘（框选 → 真 PNG → graph.json） | 框一下生成识别器，实时出分，可保存/重载 |
-| 6 | 状态机运行 + 事件流 | 事件栏出真事件，recovery 边生效 |
+| 2 ✅ | `device.connect` + 首帧 `engine.frame` | 画面栏出现真机截图 |
+| 3 🟡 | 连续投屏 + fps/延迟指标 | 已通（实测 1.8fps）；**scrcpy 通道待做**才能到 30~60ms |
+| 4 ✅ | 模板/颜色识别器上屏 | 画面识别框 + 识别器面板实时分数（含纯色自动降级） |
+| 5 ✅ | 录制落盘（框选 → 真 PNG → graph.json） | 框一下生成识别器并实时出分，工程文件可 git diff |
+| 6 ✅ | 状态机运行 + 事件流 | 真机跑出 node_entered / edge_matched / action_executed；recovery 边有单测 |
 | 之后 | Android 精确触控（scrcpy 通道，参考 panda-agent `devices/android/control/`）、Windows 窗口、iOS（QuickTime 投屏）、多开调度 | — |
 
 参考实现：`~/GitHub/pandatest/panda-agent/src/pda/`（`devices/provider.py` 的 adbutils 发现、

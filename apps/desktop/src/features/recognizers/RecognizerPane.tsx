@@ -10,12 +10,15 @@ import { PanelShell, StatusDot } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { useGraphStore } from '@/stores/graph.store';
+import { useSessionStore } from '@/stores/session.store';
 import type { RecognizerType } from '@/types';
 
 export function RecognizerPane(): ReactNode {
   const activeId = useDeviceStore((state) => state.activeId);
   const graph = useGraphStore((state) => state.graphs[activeId]);
   const updateThreshold = useGraphStore((state) => state.updateRecognizerThreshold);
+  const pushThreshold = useSessionStore((state) => state.setThreshold);
+  const sessionReady = useSessionStore((state) => Boolean(state.ready[activeId]));
   const recognizers = graph?.recognizers ?? [];
 
   return (
@@ -49,7 +52,13 @@ export function RecognizerPane(): ReactNode {
                   max={1}
                   step={0.01}
                   value={item.threshold}
-                  onChange={(event) => updateThreshold(activeId, item.label, Number(event.target.value))}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    updateThreshold(activeId, item.label, value); // 本地立即反馈
+                    if (sessionReady) {
+                      void pushThreshold(activeId, item.label, value); // 写回引擎
+                    }
+                  }}
                   className="h-1 flex-1 accent-[var(--brand)]"
                   title="拖动即时重算当前帧匹配分数"
                 />

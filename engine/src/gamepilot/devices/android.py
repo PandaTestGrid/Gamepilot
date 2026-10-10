@@ -17,6 +17,7 @@ import logging
 import re
 from typing import Any
 
+import cv2
 import numpy as np
 
 from .base import (
@@ -188,7 +189,85 @@ class AndroidController(Controller):
         return size
 
     def screenshot(self) -> np.ndarray:
-        raise NotImplementedError("Android 截图在第 2 块实现（screencap / scrcpy）")
+        """抓一帧（BGR）。
+
+        直接走 `adb exec-out screencap -p`（不经过 adbutils 的截图封装）：
+        实测 OPPO A57 / USB 2.0 上 PNG 通道 0.55s/帧，而 adbutils 那条路径会先失败
+        再回退，要 1.7s。原始二进制 screencap（3.6MB/帧）在这个设备上更慢（1.7s），
+        所以 PNG 是当前最优解。
+
+        第 3 块换 scrcpy 通道（H.264 硬解 + 精确触控），目标 30~60ms。
+        """
+        raw = self._exec_out_png()
+        if raw:
+            image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is not None:
+                return image
+        if self._client_device is None:
+            raise RuntimeError("设备未连接")
+        pil_image = self._client_device.screenshot()
+        return np.asarray(pil_image.convert("RGB"))[:, :, ::-1].copy()
+
+    def _adb_binary(self) -> str:
+        cached = getattr(self, "_adb_path", None)
+        if cached:
+            return str(cached)
+        import shutil
+
+        try:
+            import adbutils
+
+            path = adbutils.adb_path()
+        except Exception:
+            path = shutil.which("adb") or "adb"
+        self._adb_path = path
+        return str(path)
+
+    def _exec_out_png(self) -> bytes | None:
+        """一次 exec-out 抓帧；失败返回 None 由调用方回退。"""
+        import subprocess
+
+        command = [self._adb_binary()]
+        if self.serial:
+            command += ["-s", str(self.serial)]  # argv 只能是字符串，别让 int 混进来
+        command += ["exec-out", "screencap", "-p"]
+        try:
+            # stdin 必须是 DEVNULL：引擎的 stdin 是 JSON-RPC 协议管道，
+            # 一旦被子进程继承，adb 会去转发它（变慢，且有污染协议流的风险）
+            result = subprocess.run(command, capture_output=True, timeout=15, check=False, stdin=subprocess.DEVNULL)
+        except Exception as exc:
+            # 必须留痕：静默回退到 adbutils 会慢 3 倍，就是这条把问题藏了整整一轮排查
+            logger.warning("exec-out screencap 失败，回退到 adbutils（会慢很多）: %s", exc)
+            return None
+        if result.returncode != 0 or not result.stdout:
+            return None
+        return result.stdout
+
+    def _to_pixels(self, x: float, y: float) -> tuple[int, int]:
+        width, height = self.resolution
+        return round(x * width), round(y * height)
+
+    def click(self, x: float, y: float) -> None:
+        if self._client_device is None:
+            raise RuntimeError("设备未连接")
+        self._client_device.click(*self._to_pixels(x, y))
+
+    def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
+        if self._client_device is None:
+            raise RuntimeError("设备未连接")
+        px1, py1 = self._to_pixels(x1, y1)
+        px2, py2 = self._to_pixels(x2, y2)
+        self._client_device.swipe(px1, py1, px2, py2, duration=max(0.05, duration))
+
+    def key(self, name: str) -> None:
+        if self._client_device is None:
+            raise RuntimeError("设备未连接")
+        self._client_device.keyevent(name)
+
+    def text(self, value: str) -> None:
+        if self._client_device is None:
+            raise RuntimeError("设备未连接")
+        self._client_device.send_keys(value)
 
     def shell(self, command: str) -> str:
         if self._client_device is None:

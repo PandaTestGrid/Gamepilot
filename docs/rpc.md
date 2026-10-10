@@ -125,35 +125,85 @@ Rust 桥的调度规则：
 
 | 方法 | 状态 | 说明 |
 |---|---|---|
-| `engine.ready` | ✅ 已实现 | 引擎启动完成（握手）。params：`version` / `protocol` / `pid` / `methods` |
-| `engine.log` | ⬜ 计划 M1 | 引擎侧结构化日志（避免前端只能读 stderr） |
-| `engine.event` | ⬜ 计划 M3 | 状态机事件（`node_entered` / `edge_matched` / `recovery_done` / `transition_failed` …） |
-| `engine.frame` | ⬜ 计划 M1 | 帧推送：base64 JPEG + 当帧识别结果 + 节点状态（会限频，约 8~15fps） |
+| `engine.ready` | ✅ | 引擎启动完成（握手）。params：`version` / `protocol` / `pid` / `methods` |
+| `device.connecting` | ✅ | 连接阶段变化：`deviceId, uri, phase`（`adb 连接中…` / `读取分辨率…`） |
+| `device.connected` | ✅ | 连接成功：`deviceId, uri, resolution, graph` |
+| `device.disconnected` | ✅ | 主动断开：`deviceId` |
+| `device.failed` | ✅ | 连接失败 / 截图失败：`deviceId, error` |
+| `engine.frame` | ✅ | 每帧画面：`deviceId, index, ts, resolution, node, pending, tick, fps, captureMs, detections[], jpeg(base64)` |
+| `engine.event` | ✅ | 状态机事件：`deviceId, seq, ts, type, node, edge, message` |
+| `run.started` / `run.stopped` | ✅ | 运行控制：`deviceId` |
+| `engine.log` | ⬜ 计划 | 引擎侧结构化日志（当前日志走 stderr） |
+
+> 帧推送是**限频**的，且受设备截图耗时限制（adb 通道实测 ~550ms/帧 → ~1.8fps）。
+> UI 不要假设固定帧率。真实时投屏要等 scrcpy 通道（H.264，目标 30~60ms）。
 
 高频通知的约定（CONVENTIONS §11.4）：必须限频或聚合，禁止把每一帧原样推给 UI。
 
-### 计划中的方法（M1，多设备）
+### `device.connect`
 
-> 约定：**所有与设备相关的方法与通知都带 `deviceId`**，这样一台设备的帧、
-> 事件、状态图不会串到另一台设备上（DESIGN.md §4.6）。
+连接设备并启动截图循环（**已实现**）。
 
-| 方法 | 参数 | 说明 |
-|---|---|---|
-| `device.connect` | `{ uri: string }` | 连接并返回 `deviceId`；过程通过通知回报阶段 |
-| `device.disconnect` | `{ deviceId: string }` | 断开 |
-| `device.status` | `{ deviceId: string }` | 单台设备状态（含 error / suggestedFix） |
-| `graph.get` | `{ deviceId: string }` | 取该设备的状态图（DESIGN.md §7 的 JSON） |
-| `graph.save` | `{ deviceId: string, graph: object }` | 写回并校验 |
+- params：`{ "uri": "Android:///?serial=3387980" }`；无真机时用 `Mock:///?width=640&height=360`
+- result：`{ "deviceId": "android:3387980", "resolution": [720, 1280], "graph": {…} }`
+- 响应返回前会**等首帧**（最多 3s），所以拿到响应时画面里已经有内容
+- URI 规则：scheme 大小写不敏感；**`serial` 始终按字符串处理**
+  （纯数字序列号被转成 int 会进到 subprocess 的 argv 抛 TypeError，表现为截图静默回退、慢 3 倍）
 
-计划通知：
+### `device.disconnect` / `device.status`
 
-| 方法 | 说明 |
-|---|---|
-| `device.discovered` | 扫描到新设备 |
-| `device.connecting` | 连接阶段变化（`adb 连接中` / `读取分辨率` / `首帧截图`） |
-| `device.connected` / `device.lost` / `device.reconnected` | 连接状态变化与自愈 |
-| `engine.event` | 状态机事件，params 里带 `deviceId` |
-| `engine.frame` | 帧推送，params 带 `deviceId` + base64 JPEG + 当帧识别结果 |
+- `device.disconnect`：`{ deviceId }` → `{ ok: true }`（停止截图循环并释放设备）
+- `device.status`：`{ deviceId }` →
+
+```json
+{
+  "deviceId": "android:3387980",
+  "running": true,
+  "index": 128, "fps": 1.8, "captureMs": 553,
+  "node": "home", "pending": null, "tick": 42,
+  "stats": { "ticks": 42, "actions": 3, "transitions": 1, "failed": 0, "recoveries": 0 },
+  "graph": { "…": "DESIGN.md §7 的状态图" }
+}
+```
+
+### `graph.get` / `graph.save`
+
+- `graph.get`：`{ deviceId }` → 状态图 JSON
+- `graph.save`：`{ deviceId, graph }` → **校验后**写盘并热重载；
+  校验失败返回 `-32603`，错误信息指明是哪个节点/边/识别器的问题
+
+### `record.template`
+
+从**当前帧**裁剪模板 → 落盘 `templates/<label>.png` → 注册识别器（可选建节点/边）→ 写回 `graph.json`。
+
+```json
+{
+  "deviceId": "android:3387980",
+  "rect": [0.35, 0.40, 0.30, 0.12],
+  "label": "center",
+  "threshold": 0.8,
+  "nodeId": "home", "nodeName": "首页",
+  "asEnter": true, "asActionTarget": true
+}
+```
+
+- result：`{ "label", "mode": "template" | "color", "template", "rect", "graph" }`
+- **纯色区域自动降级成颜色识别器**（`mode: "color"`）：纯色模板在归一化互相关里是退化的，
+  会在画面任意位置给满分；宁可换算法也不报假命中
+- 设备还没出帧时报「还没有可用画面」，不会写出空模板
+
+### `recognizer.threshold`
+
+`{ deviceId, label, threshold }` → 写回阈值并热重载（阈值滑块拖动时调用）。
+
+### `run.start` / `run.stop`
+
+`{ deviceId }` → `{ ok: true, running: boolean }`。
+`run.start` 要求状态图里至少有一个节点，否则报「状态图还没有节点：先在画面上框选录制一个界面」。
+
+### `timeline.get`
+
+`{ deviceId, limit }` → `{ frames: [...], events: [...] }`（最近 N 帧摘要 + 事件，供时间轴回溯）。
 
 ## 5. 错误码
 

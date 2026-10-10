@@ -20,6 +20,17 @@ interface GraphState {
   readonly updateNodeEnter: (deviceId: string, nodeId: string, label: string) => void;
   readonly moveNode: (deviceId: string, nodeId: string, x: number, y: number) => void;
   readonly selectEdge: (edgeId: string | null) => void;
+  /** 引擎给出的状态图（唯一真源） */
+  readonly setGraph: (deviceId: string, graph: GraphData) => void;
+  /** 每帧同步：识别分数 / 当前节点 / pending 目标 */
+  readonly updateLive: (
+    deviceId: string,
+    live: {
+      node: string | null;
+      pending: string | null;
+      detections: ReadonlyArray<{ label: string; score: number; state: string }>;
+    },
+  ) => void;
 }
 
 function update(deviceId: string, graph: GraphData, changes: Partial<GraphData>): Record<string, GraphData> {
@@ -99,4 +110,32 @@ export const useGraphStore = create<GraphState>()((set) => ({
     }),
 
   selectEdge: (edgeId) => set({ selectedEdgeId: edgeId }),
+
+  setGraph: (deviceId, graph) => set((state) => ({ graphs: { ...state.graphs, [deviceId]: graph } })),
+
+  updateLive: (deviceId, live) =>
+    set((state) => {
+      const graph = state.graphs[deviceId];
+      if (!graph) {
+        return state;
+      }
+      const hits = new Map(live.detections.map((item) => [item.label, item] as const));
+      const recognizers = graph.recognizers.map((item) => {
+        const hit = hits.get(item.label);
+        return hit
+          ? { ...item, score: hit.score, state: hit.state as RecognizerView['state'] }
+          : { ...item, score: 0, state: 'idle' as const };
+      });
+      return {
+        graphs: {
+          ...state.graphs,
+          [deviceId]: {
+            ...graph,
+            recognizers,
+            activeNodeId: live.node ?? graph.activeNodeId,
+            pendingNodeId: live.pending,
+          },
+        },
+      };
+    }),
 }));

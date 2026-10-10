@@ -4,6 +4,7 @@ import { activeDevice, useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
+import { useSessionStore } from '@/stores/session.store';
 
 /** 底栏 24px：运行指标。任一指标异常变红（DESIGN.md §4.2 E）。 */
 export function StatusBar({ running }: { running: boolean }): ReactNode {
@@ -12,20 +13,25 @@ export function StatusBar({ running }: { running: boolean }): ReactNode {
   const graph = useGraphStore((state) => state.graphs[activeId]);
   const events = useEventStore((state) => state.events[activeId]);
   const engineStatus = useEngineStore((state) => state.status);
+  const frame = useSessionStore((state) => state.frames[activeId]);
 
   const device = activeDevice(devices, activeId);
   const connected = device?.status === 'connected';
-  const fps = connected ? (device?.fps ?? 0) : 0;
+  const fps = frame ? frame.fps : connected ? (device?.fps ?? 0) : 0;
   const last = events?.[events.length - 1];
 
   const items: Array<{ key: string; value: string; bad?: boolean }> = [
-    { key: 'node', value: graph?.activeNodeId ?? '-' },
-    { key: 'tick', value: running ? '142' : '0' },
+    { key: 'node', value: frame?.node ?? graph?.activeNodeId ?? '-' },
+    { key: 'tick', value: String(frame?.tick ?? 0) },
     { key: 'vote', value: running ? '2/2' : '-' },
     { key: 'fps', value: connected ? String(fps) : '-', bad: connected && fps < 3 },
-    { key: 'capture', value: connected ? '12ms' : '-', bad: connected && false },
+    {
+      key: 'capture',
+      value: frame ? `${frame.captureMs}ms` : '-',
+      bad: Boolean(frame && frame.captureMs > 200),
+    },
     { key: 'input', value: connected ? '48ms' : '-' },
-    { key: 'run', value: running ? '00:12:31' : '00:00:00' },
+    { key: 'run', value: running ? '运行中' : '停止' },
   ];
 
   return (

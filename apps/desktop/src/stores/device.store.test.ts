@@ -17,15 +17,17 @@ describe('多设备 store', () => {
     vi.useRealTimers();
   });
 
-  it('connect 先进入 connecting，再变成 connected 并带 fps', () => {
+  it('connect 只切到 connecting；真实连接结果由引擎回填', () => {
     useDeviceStore.getState().connect('dev-c');
     expect(useDeviceStore.getState().devices.find((item) => item.id === 'dev-c')?.status).toBe('connecting');
 
-    vi.advanceTimersByTime(800);
+    // 引擎连接成功后由 session.store 回填分辨率与连接态
+    useDeviceStore.getState().markConnectedWith('dev-c', [1080, 1920]);
 
     const device = useDeviceStore.getState().devices.find((item) => item.id === 'dev-c');
     expect(device?.status).toBe('connected');
-    expect(device?.fps).toBeGreaterThan(0);
+    expect(device?.resolution).toEqual([1080, 1920]);
+    expect(device?.error).toBeUndefined();
   });
 
   it('切换活动设备只改 activeId，不影响其他设备', () => {

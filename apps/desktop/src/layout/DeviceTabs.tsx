@@ -13,6 +13,7 @@ import { StatusDot, type DotTone } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { openPaneWindow } from '@/lib/windows';
 import { useDeviceStore } from '@/stores/device.store';
+import { useSessionStore } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
 
 const TONE: Record<string, DotTone> = {
@@ -25,7 +26,7 @@ export function DeviceTabs(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
   const setActive = useDeviceStore((state) => state.setActive);
-  const disconnect = useDeviceStore((state) => state.disconnect);
+  const disconnect = useSessionStore((state) => state.disconnect);
   const markWindowed = useDeviceStore((state) => state.markWindowed);
   const toggleDevicePopover = useUiStore((state) => state.toggleDevicePopover);
   const connected = devices.filter(
@@ -69,7 +70,7 @@ export function DeviceTabs(): ReactNode {
             <button
               type="button"
               title="断开"
-              onClick={() => disconnect(device.id)}
+              onClick={() => void disconnect(device.id)}
               className="opacity-0 group-hover:opacity-100"
             >
               <X className="size-3 text-dim hover:text-failed" />

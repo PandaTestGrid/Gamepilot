@@ -84,3 +84,125 @@ export interface DeviceListResult {
 export function listDevices(scan = true): Promise<DeviceListResult> {
   return rpc<DeviceListResult>('device.list', { scan });
 }
+
+/* ------------------------------------------------------------------ *
+ * 会话相关（第 2~6 块）：连接设备、状态图、录制、运行
+ * 契约见 docs/rpc.md
+ * ------------------------------------------------------------------ */
+
+export interface GraphPayload {
+  readonly version: number;
+  readonly defaults: Record<string, unknown>;
+  readonly recognizers: Record<string, Record<string, unknown>>;
+  readonly nodes: ReadonlyArray<{ id: string; name?: string; enter?: string[]; timeout_ms?: number }>;
+  readonly edges: ReadonlyArray<Record<string, unknown>>;
+}
+
+export interface ConnectResult {
+  readonly deviceId: string;
+  readonly resolution: readonly [number, number];
+  readonly graph: GraphPayload;
+}
+
+export interface RecordResult {
+  readonly label: string;
+  readonly mode: 'template' | 'color';
+  readonly template: string;
+  readonly rect: readonly [number, number, number, number];
+  readonly graph: GraphPayload;
+}
+
+/** 引擎推送的一帧画面（engine.frame 通知）。 */
+export interface FramePayload {
+  readonly deviceId: string;
+  readonly index: number;
+  readonly ts: number;
+  readonly resolution: readonly [number, number];
+  readonly node: string | null;
+  readonly pending: string | null;
+  readonly tick: number;
+  readonly fps: number;
+  readonly captureMs: number;
+  readonly detections: ReadonlyArray<{
+    label: string;
+    rect: readonly [number, number, number, number];
+    score: number;
+    source: string;
+    state: 'confirmed' | 'pending' | 'idle';
+  }>;
+  readonly jpeg: string;
+}
+
+/** 引擎推送的状态机事件（engine.event 通知）。 */
+export interface EngineEventPayload {
+  readonly deviceId: string;
+  readonly seq: number;
+  readonly ts: number;
+  readonly type: string;
+  readonly node: string | null;
+  readonly edge: string | null;
+  readonly message: string;
+}
+
+export interface DeviceNotificationPayload {
+  readonly deviceId: string;
+  readonly uri?: string;
+  readonly phase?: string;
+  readonly resolution?: readonly [number, number];
+  readonly error?: string;
+  readonly graph?: GraphPayload;
+}
+
+export function connectDevice(uri: string): Promise<ConnectResult> {
+  return rpc<ConnectResult>('device.connect', { uri });
+}
+
+export async function disconnectDevice(deviceId: string): Promise<void> {
+  await rpc('device.disconnect', { deviceId });
+}
+
+export function graphGet(deviceId: string): Promise<GraphPayload> {
+  return rpc<GraphPayload>('graph.get', { deviceId });
+}
+
+export function graphSave(deviceId: string, graph: GraphPayload): Promise<GraphPayload> {
+  return rpc<GraphPayload>('graph.save', { deviceId, graph });
+}
+
+export function recordTemplate(params: {
+  deviceId: string;
+  rect: readonly [number, number, number, number];
+  label: string;
+  threshold: number;
+  nodeId?: string;
+  nodeName?: string;
+  asEnter?: boolean;
+  asActionTarget?: boolean;
+}): Promise<RecordResult> {
+  return rpc<RecordResult>('record.template', { ...params });
+}
+
+export function setRecognizerThreshold(deviceId: string, label: string, threshold: number): Promise<void> {
+  return rpc<void>('recognizer.threshold', { deviceId, label, threshold });
+}
+
+export function runStart(deviceId: string): Promise<{ running: boolean }> {
+  return rpc<{ running: boolean }>('run.start', { deviceId });
+}
+
+export function runStop(deviceId: string): Promise<{ running: boolean }> {
+  return rpc<{ running: boolean }>('run.stop', { deviceId });
+}
+
+export function timelineGet(deviceId: string, limit = 60): Promise<{ frames: unknown[]; events: unknown[] }> {
+  return rpc<{ frames: unknown[]; events: unknown[] }>('timeline.get', { deviceId, limit });
+}
+
+/** 统一的引擎通知订阅：按 method 分发，返回取消订阅函数。 */
+export async function onEngineMessage(
+  handler: (method: string, params: Record<string, unknown>) => void,
+): Promise<UnlistenFn> {
+  return listen<{ method: string; params: Record<string, unknown> }>('engine://event', (event) => {
+    handler(event.payload.method, event.payload.params);
+  });
+}

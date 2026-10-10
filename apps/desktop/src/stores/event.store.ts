@@ -22,6 +22,18 @@ interface EventState {
     detail?: { node?: string | null; edge?: string | null; message?: string },
   ) => void;
   readonly setFilter: (filter: EventFilter) => void;
+  /** 接入真引擎时清掉该设备的 mock 事件（避免真假事件混在一起） */
+  readonly clearDevice: (deviceId: string) => void;
+  /** 引擎推来的事件（seq 由引擎维护，前端只做展示与去重） */
+  readonly appendEngineEvent: (payload: {
+    deviceId: string;
+    seq: number;
+    ts: number;
+    type: string;
+    node: string | null;
+    edge: string | null;
+    message: string;
+  }) => void;
 }
 
 export function matchFilter(event: TraceEventView, filter: EventFilter): boolean {
@@ -75,4 +87,27 @@ export const useEventStore = create<EventState>()((set, get) => ({
   },
 
   setFilter: (filter) => set({ filter }),
+
+  clearDevice: (deviceId) => set((state) => ({ events: { ...state.events, [deviceId]: [] } })),
+
+  appendEngineEvent: (payload) =>
+    set((state) => {
+      const list = state.events[payload.deviceId] ?? [];
+      if (list.some((item) => item.seq === payload.seq && item.type === payload.type)) {
+        return state;
+      }
+      const event: TraceEventView = {
+        seq: payload.seq,
+        ts: payload.ts,
+        type: payload.type as TraceEventType,
+        deviceId: payload.deviceId,
+        node: payload.node,
+        edge: payload.edge,
+        message: payload.message,
+      };
+      return {
+        seq: Math.max(state.seq, payload.seq),
+        events: { ...state.events, [payload.deviceId]: [...list, event].slice(-500) },
+      };
+    }),
 }));

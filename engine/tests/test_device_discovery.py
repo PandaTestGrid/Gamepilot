@@ -141,3 +141,51 @@ def test_device_list_rpc_over_stdio() -> None:
     assert isinstance(result["devices"], list)
     assert result["errors"] == []
     assert result["devices"][0]["kind"] == KIND_MOCK
+
+
+# --------------------------------------------------------------------------- #
+# URI 解析（回归：数字型 serial 被转成 int 会导致截图慢 3 倍）
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("uri", "scheme", "expected"),
+    [
+        ("Android:///?serial=3387980", "android", {"serial": "3387980"}),
+        ("Android:///?serial=emulator-5554", "android", {"serial": "emulator-5554"}),
+        ("Mock:///?width=640&height=360", "mock", {"width": 640, "height": 360}),
+        ("Android:///", "android", {}),
+    ],
+)
+def test_parse_device_uri(uri: str, scheme: str, expected: dict[str, object]) -> None:
+    from gamepilot.rpc.session import parse_device_uri
+
+    parsed_scheme, options = parse_device_uri(uri)
+    assert parsed_scheme == scheme
+    assert options == expected
+
+
+def test_parse_device_uri_keeps_serial_as_string() -> None:
+    """纯数字 serial 必须保持字符串：int 进 subprocess argv 会抛 TypeError。"""
+    from gamepilot.rpc.session import parse_device_uri
+
+    _, options = parse_device_uri("Android:///?serial=3387980")
+    assert isinstance(options["serial"], str)
+    assert options["serial"] == "3387980"
+
+
+def test_parse_device_uri_rejects_empty() -> None:
+    """空 URI 必须明确报错，而不是让上层拿到一个空 scheme。"""
+    from gamepilot.rpc.session import parse_device_uri
+
+    with pytest.raises(ValueError, match="无法解析设备 URI"):
+        parse_device_uri("://")
+
+
+def test_parse_device_uri_bare_scheme_is_accepted() -> None:
+    """裸 scheme（如 `Mock`）是允许的写法：由注册表决定是否支持。"""
+    from gamepilot.rpc.session import parse_device_uri
+
+    scheme, options = parse_device_uri("Mock")
+    assert scheme == "mock"
+    assert options == {}

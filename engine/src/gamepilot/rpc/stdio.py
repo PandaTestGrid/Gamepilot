@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import sys
+import threading
 import time
 from collections.abc import Callable
 from typing import IO, Any
@@ -44,13 +45,16 @@ class RpcServer:
     def __init__(self, stdin: IO[str], stdout: IO[str]) -> None:
         self._stdin = stdin
         self._stdout = stdout
+        self._write_lock = threading.Lock()  # 截图线程也会推通知，必须串行写
         self._handlers: dict[str, Handler] = {}
         self._stopping = False
         self._register_builtin()
         # 延迟导入：devices 方法模块需要 RpcServer 的类型，反过来运行时依赖 stdio
         from . import devices as device_methods
+        from . import session as session_methods
 
         device_methods.register(self)
+        self.sessions = session_methods.register(self)
 
     # ------------------------------------------------------------------ #
     # 注册与分发
@@ -97,8 +101,10 @@ class RpcServer:
     # ------------------------------------------------------------------ #
 
     def _write(self, payload: dict[str, Any]) -> None:
-        self._stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        self._stdout.flush()
+        line = json.dumps(payload, ensure_ascii=False) + "\n"
+        with self._write_lock:
+            self._stdout.write(line)
+            self._stdout.flush()
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         """主动推送通知（无 id）。"""

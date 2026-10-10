@@ -36,6 +36,7 @@ interface DeviceState {
   readonly setActive: (id: string) => void;
   readonly connect: (id: string) => void;
   readonly markConnected: (id: string) => void;
+  readonly markConnectedWith: (id: string, resolution: readonly [number, number]) => void;
   readonly failConnect: (id: string, error: string) => void;
   readonly disconnect: (id: string) => void;
   readonly toggleGrid: () => void;
@@ -82,7 +83,7 @@ function patch(list: readonly DeviceRuntime[], id: string, value: Partial<Device
   return list.map((device) => (device.id === id ? { ...device, ...value } : device));
 }
 
-export const useDeviceStore = create<DeviceState>()((set, get) => ({
+export const useDeviceStore = create<DeviceState>()((set) => ({
   devices: MOCK_DEVICES,
   activeId: MOCK_DEVICES[0]?.id ?? '',
   gridView: false,
@@ -114,19 +115,19 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
   setActive: (id) => set({ activeId: id }),
 
   connect: (id) => {
+    // 只把 UI 切到"连接中"；真正的连接由 session.store 调 engine 的 device.connect 完成，
+    // 结果通过 markConnectedWith / failConnect 回填（引擎是唯一真源）。
     set((state) => ({ devices: patch(state.devices, id, { status: 'connecting', error: undefined }) }));
-    // 第 2 块：换成 engine_rpc('device.connect') + 订阅 device.* 通知
-    setTimeout(() => {
-      const device = get().devices.find((item) => item.id === id);
-      if (device?.status === 'connecting') {
-        get().markConnected(id);
-      }
-    }, 700);
   },
 
   markConnected: (id) =>
     set((state) => ({
       devices: patch(state.devices, id, { status: 'connected', fps: 10, error: undefined }),
+    })),
+
+  markConnectedWith: (id, resolution) =>
+    set((state) => ({
+      devices: patch(state.devices, id, { status: 'connected', resolution, error: undefined }),
     })),
 
   failConnect: (id, error) =>

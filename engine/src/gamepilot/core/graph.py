@@ -1,0 +1,208 @@
+"""状态图模型 + JSON DSL（DESIGN.md §7）。
+
+一个工程一份 `graph.json`（人可读、可 git diff、可手改），旁边的 `templates/`
+放模板 PNG。识别器 spec 原样保留，改字段不会被写回时丢掉。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Any
+
+from .geometry import Rect
+from .recognizer import Recognizer, build_recognizer
+
+
+@dataclass
+class Node:
+    id: str
+    name: str = ""
+    enter: list[str] = field(default_factory=list)
+    timeout_ms: int | None = None
+    note: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Node:
+        return cls(
+            id=str(data["id"]),
+            name=str(data.get("name", data["id"])),
+            enter=[str(item) for item in data.get("enter", [])],
+            timeout_ms=int(data["timeout_ms"]) if data.get("timeout_ms") else None,
+            note=str(data.get("note", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"id": self.id, "name": self.name, "enter": list(self.enter)}
+        if self.timeout_ms:
+            out["timeout_ms"] = self.timeout_ms
+        if self.note:
+            out["note"] = self.note
+        return out
+
+
+@dataclass
+class Edge:
+    id: str
+    when: str
+    src: str | None = None
+    dst: str | None = None
+    kind: str = "normal"  # normal | recovery
+    priority: int = 0
+    min_score: float = 0.0
+    cooldown_ms: int = 0
+    retries: int = 1
+    action: dict[str, object] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Edge:
+        when = str(data["when"])
+        return cls(
+            id=str(data["id"]),
+            when=when,
+            src=data.get("from") or data.get("src"),
+            dst=data.get("to") or data.get("dst"),
+            kind=str(data.get("kind", "normal")),
+            priority=int(data.get("priority", 0)),
+            min_score=float(data.get("min_score", 0.0)),
+            cooldown_ms=int(data.get("cooldown_ms", 0)),
+            retries=int(data.get("retries", 1)),
+            action=dict(data.get("action") or {"type": "click", "target": when}),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"id": self.id, "when": self.when, "action": dict(self.action)}
+        if self.src:
+            out["from"] = self.src
+        if self.dst:
+            out["to"] = self.dst
+        if self.kind != "normal":
+            out["kind"] = self.kind
+        if self.priority:
+            out["priority"] = self.priority
+        if self.min_score:
+            out["min_score"] = self.min_score
+        if self.cooldown_ms:
+            out["cooldown_ms"] = self.cooldown_ms
+        if self.retries != 1:
+            out["retries"] = self.retries
+        return out
+
+
+@dataclass
+class Graph:
+    nodes: dict[str, Node] = field(default_factory=dict)
+    edges: list[Edge] = field(default_factory=list)
+    recognizers: dict[str, Recognizer] = field(default_factory=dict)
+    specs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    defaults: dict[str, object] = field(default_factory=dict)
+    path: str | None = None
+    base_dir: str = "."
+
+    # ---------- 构造 / 读写 ----------
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], base_dir: str, path: str | None = None) -> Graph:
+        specs = {str(label): dict(spec) for label, spec in (data.get("recognizers") or {}).items()}
+        graph = cls(
+            nodes={node["id"]: Node.from_dict(node) for node in data.get("nodes", [])},
+            edges=[Edge.from_dict(edge) for edge in data.get("edges", [])],
+            defaults=dict(data.get("defaults") or {}),
+            path=path,
+            base_dir=base_dir,
+        )
+        graph.specs = specs
+        graph.recognizers = {label: build_recognizer(label, spec, base_dir) for label, spec in specs.items()}
+        graph.validate()
+        return graph
+
+    @classmethod
+    def empty(cls, base_dir: str, path: str | None = None) -> Graph:
+        return cls(
+            base_dir=base_dir,
+            path=path or os.path.join(base_dir, "graph.json"),
+            defaults={"vote": 2, "tick_ms": 200, "transition_timeout_ms": 4000},
+        )
+
+    @classmethod
+    def load(cls, path: str) -> Graph:
+        if not os.path.exists(path):
+            return cls.empty(os.path.dirname(os.path.abspath(path)), os.path.abspath(path))
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return cls.from_dict(data, base_dir=os.path.dirname(os.path.abspath(path)), path=os.path.abspath(path))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "defaults": dict(self.defaults),
+            "recognizers": {label: dict(spec) for label, spec in self.specs.items()},
+            "nodes": [node.to_dict() for node in self.nodes.values()],
+            "edges": [edge.to_dict() for edge in self.edges],
+        }
+
+    def save(self, path: str | None = None) -> str:
+        target = path or self.path
+        if not target:
+            raise ValueError("状态图没有保存路径")
+        os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2)
+        self.path = os.path.abspath(target)
+        return self.path
+
+    # ---------- 编辑 ----------
+
+    def add_recognizer(self, label: str, spec: dict[str, Any]) -> None:
+        self.specs[label] = dict(spec)
+        self.recognizers[label] = build_recognizer(label, spec, self.base_dir)
+
+    def set_threshold(self, label: str, threshold: float) -> None:
+        spec = self.specs.get(label)
+        if spec is None:
+            raise KeyError(f"识别器不存在: {label}")
+        spec["threshold"] = round(float(threshold), 4)
+        self.add_recognizer(label, spec)
+
+    def upsert_node(self, node: Node) -> None:
+        self.nodes[node.id] = node
+
+    def add_edge(self, edge: Edge) -> None:
+        self.edges = [item for item in self.edges if item.id != edge.id] + [edge]
+
+    def labels(self) -> list[str]:
+        return sorted(self.recognizers)
+
+    def default(self, key: str, fallback: object) -> object:
+        return self.defaults.get(key, fallback)
+
+    # ---------- 校验 ----------
+
+    def validate(self) -> None:
+        for edge in self.edges:
+            if edge.src and edge.src not in self.nodes:
+                raise ValueError(f"边 {edge.id} 的 from 节点不存在: {edge.src}")
+            if edge.dst and edge.dst not in self.nodes:
+                raise ValueError(f"边 {edge.id} 的 to 节点不存在: {edge.dst}")
+            if edge.when not in self.recognizers:
+                raise ValueError(f"边 {edge.id} 引用了未定义的识别器: {edge.when}")
+            target = edge.action.get("target")
+            if isinstance(target, str) and target and target not in self.recognizers:
+                raise ValueError(f"边 {edge.id} 的动作引用了未定义的识别器: {target}")
+        for node in self.nodes.values():
+            for label in node.enter:
+                if label not in self.recognizers:
+                    raise ValueError(f"节点 {node.id} 引用了未定义的识别器: {label}")
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "nodes": [node.to_dict() for node in self.nodes.values()],
+            "edges": [edge.to_dict() for edge in self.edges],
+            "recognizers": [{"label": label, **spec} for label, spec in self.specs.items()],
+        }
+
+
+def roi_of(spec: dict[str, Any]) -> Rect | None:
+    return Rect.parse(spec["roi"]) if spec.get("roi") else None
