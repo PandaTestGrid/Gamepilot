@@ -254,7 +254,8 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 | 引擎 | opencv-python-headless | Apache-2.0 | 图像识别 |
 | 引擎 | pillow | HPND(MIT-CMU) | 合成测试画面 |
 | 引擎 | rapidocr-onnxruntime（可选） | Apache-2.0 | OCR 识别器 |
-| 引擎 | av（可选） | BSD-3 | scrcpy H.264 解码（M3） |
+| 引擎 | av (PyAV) | BSD-3 | scrcpy H.264 解码（投屏主通道） |
+| 引擎 | scrcpy-server（vendor/，非 Python 依赖） | Apache-2.0 | 设备端投屏/控制程序，版本 3.3.4 与 `devices/scrcpy.py::SCRCPY_VERSION` 对齐 |
 | 引擎 | pytest / ruff / mypy | MIT | 测试与静态检查 |
 
 ---

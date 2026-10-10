@@ -160,11 +160,19 @@ class AndroidController(Controller):
     scheme = "Android"
     description = "安卓真机/模拟器（adbutils）"
 
-    def __init__(self, device_id: str = "", serial: str = "", **options: object) -> None:
+    def __init__(self, device_id: str = "", serial: str = "", **options: Any) -> None:
+        prefer_scrcpy = bool(options.pop("prefer_scrcpy", True))
         super().__init__(device_id or make_device_id(serial), **options)
         self.serial = serial
+        self.prefer_scrcpy = prefer_scrcpy
         self._client_device: Any = None
         self._resolution: Size | None = None
+        # scrcpy 视频通道（H.264，~28fps）；为 None 时回退 adb 截图（~1.8fps）
+        self._scrcpy: Any = None
+        self.channel = "screencap"
+        self.link_note = ""
+        self._last_frame: Any = None
+        self._frame_seq = 0  # scrcpy 解码帧号：画面没变时用来复用 JPEG 编码
 
     def connect(self) -> None:
         import adbutils
@@ -175,9 +183,13 @@ class AndroidController(Controller):
             raise RuntimeError(f"设备 {self.serial} 状态异常: {state}")
         self._resolution = None
         self._connected = True
+        self._start_scrcpy()
 
     @property
     def resolution(self) -> Size:
+        if self._scrcpy is not None and self._scrcpy.canvas_size != (0, 0):
+            # scrcpy 生效时画面就是视频画布：坐标必须与画布一致
+            return (int(self._scrcpy.canvas_size[0]), int(self._scrcpy.canvas_size[1]))
         if self._resolution is not None:
             return self._resolution
         if not self._connected or self._client_device is None:
@@ -198,6 +210,21 @@ class AndroidController(Controller):
 
         第 3 块换 scrcpy 通道（H.264 硬解 + 精确触控），目标 30~60ms。
         """
+        if self._scrcpy is not None:
+            # _scrcpy / _last_frame 都是 Any（可选依赖），这里显式收窄回 ndarray
+            # 非阻塞拿当前帧：scrcpy 只在画面变化时才出帧，静止时等"新帧"会白等一秒
+            frame: np.ndarray | None = self._scrcpy.latest_frame(timeout=0.0)
+            if frame is None:
+                frame = self._scrcpy.latest_frame(timeout=1.0)  # 还没有任何帧时才等首帧
+            if frame is not None:
+                self._last_frame = frame
+                self._frame_seq = int(getattr(self._scrcpy, "frame_id", 0))
+                return frame
+            cached: np.ndarray | None = self._last_frame
+            if cached is not None:
+                return cached
+            raise RuntimeError("scrcpy 通道暂时没有画面")
+
         raw = self._exec_out_png()
         if raw:
             image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -207,6 +234,52 @@ class AndroidController(Controller):
             raise RuntimeError("设备未连接")
         pil_image = self._client_device.screenshot()
         return np.asarray(pil_image.convert("RGB"))[:, :, ::-1].copy()
+
+    # ------------------------------------------------------------------ #
+    # scrcpy 投屏通道
+    # ------------------------------------------------------------------ #
+
+    def _start_scrcpy(self) -> None:
+        """建立 scrcpy 通道；失败就回退 adb 截图并把原因记下来（不抛异常）。"""
+        if not self.prefer_scrcpy:
+            return
+        try:
+            from .scrcpy import ScrcpyChannel, find_server_jar
+
+            jar = find_server_jar()
+            if jar is None:
+                self.link_note = "未找到 scrcpy-server，回退 adb 截图（约 1.8fps）"
+                logger.warning(self.link_note)
+                return
+            channel = ScrcpyChannel(serial=str(self.serial), adb_path=self._adb_binary(), server_jar=jar)
+            channel.start()
+            self._scrcpy = channel
+            self.channel = "scrcpy"
+            self.link_note = f"scrcpy {channel.video_size[0]}×{channel.video_size[1]}"
+            logger.info("投屏通道: scrcpy %s", channel.video_size)
+        except Exception as exc:
+            self._scrcpy = None
+            self.channel = "screencap"
+            self.link_note = f"scrcpy 不可用（{type(exc).__name__}: {exc}），回退 adb 截图"
+            logger.warning(self.link_note)
+
+    @property
+    def link_fps(self) -> float:
+        return float(getattr(self._scrcpy, "fps", 0.0)) if self._scrcpy is not None else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        data = super().to_dict()
+        data.update({"channel": self.channel, "linkNote": self.link_note, "linkFps": round(self.link_fps, 1)})
+        return data
+
+    def close(self) -> None:
+        if self._scrcpy is not None:
+            try:
+                self._scrcpy.close()
+            except Exception:
+                logger.debug("关闭 scrcpy 通道失败", exc_info=True)
+            self._scrcpy = None
+        super().close()
 
     def _adb_binary(self) -> str:
         cached = getattr(self, "_adb_path", None)
@@ -248,11 +321,17 @@ class AndroidController(Controller):
         return round(x * width), round(y * height)
 
     def click(self, x: float, y: float) -> None:
+        if self._scrcpy is not None:
+            self._scrcpy.click(x, y)  # 毫秒级，不用 fork adb 进程
+            return
         if self._client_device is None:
             raise RuntimeError("设备未连接")
         self._client_device.click(*self._to_pixels(x, y))
 
     def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
+        if self._scrcpy is not None:
+            self._scrcpy.swipe(x1, y1, x2, y2, duration=duration)
+            return
         if self._client_device is None:
             raise RuntimeError("设备未连接")
         px1, py1 = self._to_pixels(x1, y1)

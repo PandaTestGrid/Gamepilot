@@ -95,15 +95,22 @@ pnpm tauri dev        # 启动（窗口几秒后出现）
 | 录纯色区域（血条之类） | 会自动改用**颜色识别器**（模板匹配对纯色不可靠），事件栏会写明 `mode: color` |
 | 工程文件在哪 | `engine/projects/default/`（`graph.json` + `templates/`），可直接 git diff；用 `GAMEPILOT_PROJECT_DIR` 切工程 |
 
-### 性能现状（真机实测：OPPO A57 / USB 2.0）
+### 性能现状（真机实测：OPPO A57 / Android 6.0.1 / USB 2.0）
 
-| 通道 | 实测 | 说明 |
+| 指标 | scrcpy 通道（默认） | adb screencap 回退 |
 |---|---|---|
-| adb `screencap -p`（当前默认） | ~1.8fps（553ms/帧） | 免 root、兼容性最好 |
-| 三台设备同时截图 | ~1.3s/台 | USB 带宽共享，多开按此估算 |
-| scrcpy（H.264，待做） | 目标 30~60ms | 下一步主要性能项 |
-| 连接耗时 | 1.8~3s | 含 adb 握手 + 等首帧 |
-| 录制一次模板 | ~10ms | 从已有帧裁剪 + 落盘 |
+| 画面帧率 | **解码 ~28fps，交付 ~14fps** | ~1.8fps（553ms/帧） |
+| 每次取帧耗时 | 0.3ms（复用已解码帧） | 553ms |
+| 点击 | **0.1ms**（控制 socket） | ~1030ms（`adb shell input tap` 要 fork 进程） |
+| 连接耗时 | 1.6~2.5s | 1.8~3s |
+| 录制一次模板 | ~10ms | ~10ms |
+| 三台设备同时投屏 | USB 带宽共享，按 1.3s/台 估算 | 同左 |
+
+- 走哪条通道在**底栏的 `link`** 里能看到；显示 `screencap（慢）` 说明 scrcpy 没起来
+  （常见原因：设备端 jar 推送失败、视频编码器被占用、Android 版本过低）
+- scrcpy **只在画面变化时才出帧**（静止画面会复用上一帧），所以 fps 会随画面活动浮动
+- scrcpy-server（v3.3.4，Apache-2.0）已收进 `engine/vendor/`，不需要你单独装 scrcpy；
+  也可以用 `GAMEPILOT_SCRCPY_SERVER` 指向自己的版本
 
 ## 提交前检查
 

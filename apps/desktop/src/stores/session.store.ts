@@ -46,6 +46,8 @@ interface SessionState {
   readonly frames: Readonly<Record<string, FrameState>>;
   readonly running: Readonly<Record<string, boolean>>;
   readonly ready: Readonly<Record<string, boolean>>;
+  /** 投屏通道（scrcpy / screencap）与说明，底栏显示 */
+  readonly links: Readonly<Record<string, { channel: string; note: string }>>;
   readonly connectingPhase: Readonly<Record<string, string>>;
   readonly error: string | null;
   readonly init: () => Promise<() => void>;
@@ -68,6 +70,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   frames: {},
   running: {},
   ready: {},
+  links: {},
   connectingPhase: {},
   error: null,
 
@@ -150,6 +153,9 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     try {
       const result = await connectDevice(uri);
       useDeviceStore.getState().markConnectedWith(result.deviceId, result.resolution, uri);
+      set((current) => ({
+        links: { ...current.links, [result.deviceId]: { channel: result.channel, note: result.linkNote } },
+      }));
       applyGraph(result.deviceId, result.graph, get().frames[result.deviceId]);
       set((current) => ({ ready: { ...current.ready, [result.deviceId]: true } }));
       return true;

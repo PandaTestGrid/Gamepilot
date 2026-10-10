@@ -101,6 +101,9 @@ export interface GraphPayload {
 export interface ConnectResult {
   readonly deviceId: string;
   readonly resolution: readonly [number, number];
+  /** scrcpy（H.264，流畅）| screencap（adb 截图，约 1.8fps） */
+  readonly channel: string;
+  readonly linkNote: string;
   readonly graph: GraphPayload;
 }
 
@@ -149,6 +152,8 @@ export interface DeviceNotificationPayload {
   readonly uri?: string;
   readonly phase?: string;
   readonly resolution?: readonly [number, number];
+  readonly channel?: string;
+  readonly linkNote?: string;
   readonly error?: string;
   readonly graph?: GraphPayload;
 }

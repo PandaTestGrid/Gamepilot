@@ -130,7 +130,7 @@ Rust 桥的调度规则：
 | `device.connected` | ✅ | 连接成功：`deviceId, uri, resolution, graph` |
 | `device.disconnected` | ✅ | 主动断开：`deviceId` |
 | `device.failed` | ✅ | 连接失败 / 截图失败：`deviceId, error` |
-| `engine.frame` | ✅ | 每帧画面：`deviceId, index, ts, resolution, node, pending, tick, fps, captureMs, detections[], jpeg(base64)` |
+| `engine.frame` | ✅ | 每帧画面：`deviceId, index, ts, resolution, node, pending, tick, fps, captureMs, detections[], jpeg(base64)`。fps 是实际交付节奏；scrcpy 静止画面会复用上一帧与上次的 JPEG 编码 |
 | `engine.event` | ✅ | 状态机事件：`deviceId, seq, ts, type, node, edge, message` |
 | `run.started` / `run.stopped` | ✅ | 运行控制：`deviceId` |
 | `engine.log` | ⬜ 计划 | 引擎侧结构化日志（当前日志走 stderr） |
@@ -145,7 +145,10 @@ Rust 桥的调度规则：
 连接设备并启动截图循环（**已实现**）。
 
 - params：`{ "uri": "Android:///?serial=3387980" }`；无真机时用 `Mock:///?width=640&height=360`
-- result：`{ "deviceId": "android:3387980", "resolution": [720, 1280], "graph": {…} }`
+- result：`{ "deviceId", "resolution", "channel", "linkNote", "graph" }`
+  - `channel`：`scrcpy`（H.264，解码 ~28fps / 交付 ~14fps、点击 0.1ms）
+    或 `screencap`（adb 截图回退，~1.8fps、点击 ~1s）
+  - `linkNote`：通道说明（含回退原因），界面底栏直接显示
 - 响应返回前会**等首帧**（最多 3s），所以拿到响应时画面里已经有内容
 - URI 规则：scheme 大小写不敏感；**`serial` 始终按字符串处理**
   （纯数字序列号被转成 int 会进到 subprocess 的 argv 抛 TypeError，表现为截图静默回退、慢 3 倍）
@@ -159,7 +162,8 @@ Rust 桥的调度规则：
 {
   "deviceId": "android:3387980",
   "running": true,
-  "index": 128, "fps": 1.8, "captureMs": 553,
+  "index": 128, "fps": 14.2, "captureMs": 0.3,
+  "channel": "scrcpy", "linkNote": "scrcpy 720×1280", "linkFps": 27.8,
   "node": "home", "pending": null, "tick": 42,
   "stats": { "ticks": 42, "actions": 3, "transitions": 1, "failed": 0, "recoveries": 0 },
   "graph": { "…": "DESIGN.md §7 的状态图" }

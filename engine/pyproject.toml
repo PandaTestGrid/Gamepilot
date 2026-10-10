@@ -11,13 +11,13 @@ dependencies = [
   "pillow>=10",
   # 安卓连接与控制（发现 / 截图 / 输入）。MIT 许可，纯 Python 调用 adb
   "adbutils>=2.0",
+  # scrcpy 视频通道的 H.264 解码（BSD-3）。有它才能走 30fps 的投屏通道
+  "av>=12",
 ]
 
 [project.optional-dependencies]
 # OCR 识别器是可选能力：装了 rapidocr 才出现 ocr 类型识别器
 ocr = ["rapidocr-onnxruntime>=1.3"]
-# scrcpy 投屏通道（M3）：PyAV 做 H.264 解码
-scrcpy = ["av>=12"]
 
 [project.scripts]
 gamepilot-engine = "gamepilot.rpc.stdio:main"

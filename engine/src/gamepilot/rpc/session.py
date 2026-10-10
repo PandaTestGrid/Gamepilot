@@ -119,7 +119,14 @@ class SessionManager:
         self.sessions[device_id] = session
         self.emit(
             NOTIFY_DEVICE_CONNECTED,
-            {"deviceId": device_id, "uri": uri, "resolution": resolution, "graph": session.graph.to_dict()},
+            {
+                "deviceId": device_id,
+                "uri": uri,
+                "resolution": resolution,
+                "channel": getattr(controller, "channel", "unknown"),
+                "linkNote": getattr(controller, "link_note", ""),
+                "graph": session.graph.to_dict(),
+            },
         )
         return session
 
@@ -157,6 +164,8 @@ def register(server: RpcServer) -> SessionManager:
         return {
             "deviceId": session.device_id,
             "resolution": list(session.controller.resolution),
+            "channel": getattr(session.controller, "channel", "unknown"),
+            "linkNote": getattr(session.controller, "link_note", ""),
             "graph": session.graph.to_dict(),
         }
 

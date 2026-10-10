@@ -53,6 +53,10 @@ class DeviceSession:
         self.controller = controller
         self.project = project
         self.emit = emit
+        # scrcpy 通道能到 ~28fps，帧率上限跟着提上去；adb 截图通道每秒只有 1.8 帧，
+        # 上限设多少都无所谓（循环自然被截图耗时卡住）
+        if getattr(controller, "channel", "") == "scrcpy":
+            fps = max(fps, 15.0)
         self.fps_limit = max(1.0, fps)
         self.jpeg_width = jpeg_width
         self.jpeg_quality = jpeg_quality
@@ -67,6 +71,9 @@ class DeviceSession:
         self.fps = 0.0
         self.capture_ms = 0.0
         self.last_frame: np.ndarray | None = None
+        self._last_emit_at: float | None = None
+        self._last_seq: int | None = None
+        self._last_jpeg: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -132,10 +139,23 @@ class DeviceSession:
             self._emit_frame(frame, detections)
 
             elapsed = time.perf_counter() - started
-            self.fps = 1.0 / elapsed if elapsed > 0 else 0.0
-            time.sleep(max(0.0, interval - elapsed))
+            # fps 是"实际交付节奏"（两次推帧的间隔），不是 1/截图耗时：
+            # scrcpy 通道截图只要 0.3ms，按后者算会得出 1300fps 这种假数字
+            now = time.perf_counter()
+            period = now - self._last_emit_at if self._last_emit_at else elapsed
+            self.fps = 1.0 / period if period > 0 else 0.0
+            self._last_emit_at = now
+            time.sleep(max(0.0, interval - (time.perf_counter() - started)))
 
     def _emit_frame(self, frame: Frame, detections: list[dict[str, Any]]) -> None:
+        # 画面没变（scrcpy 静止时会重复同一帧）就复用上次的 JPEG，省掉一次编码
+        seq = getattr(self.controller, "_frame_seq", None)
+        if seq is not None and seq == self._last_seq and self._last_jpeg is not None:
+            jpeg = self._last_jpeg
+        else:
+            jpeg = self._encode(frame.image)
+            self._last_seq = seq
+            self._last_jpeg = jpeg
         payload = {
             "deviceId": self.device_id,
             "index": frame.index,
@@ -147,7 +167,7 @@ class DeviceSession:
             "fps": round(self.fps, 1),
             "captureMs": round(self.capture_ms, 1),
             "detections": detections,
-            "jpeg": self._encode(frame.image),
+            "jpeg": jpeg,
         }
         self.emit("engine.frame", payload)
 
@@ -293,6 +313,9 @@ class DeviceSession:
                 "index": self.index,
                 "fps": round(self.fps, 1),
                 "captureMs": round(self.capture_ms, 1),
+                "channel": getattr(self.controller, "channel", "unknown"),
+                "linkNote": getattr(self.controller, "link_note", ""),
+                "linkFps": round(float(getattr(self.controller, "link_fps", 0.0)), 1),
                 "node": self.engine.current,
                 "pending": self.engine.pending.edge.id if self.engine.pending else None,
                 "tick": self.engine.stats["ticks"],

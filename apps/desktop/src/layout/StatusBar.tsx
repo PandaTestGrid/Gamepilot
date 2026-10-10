@@ -14,6 +14,7 @@ export function StatusBar({ running }: { running: boolean }): ReactNode {
   const events = useEventStore((state) => state.events[activeId]);
   const engineStatus = useEngineStore((state) => state.status);
   const frame = useSessionStore((state) => state.frames[activeId]);
+  const link = useSessionStore((state) => state.links[activeId]);
 
   const device = activeDevice(devices, activeId);
   const connected = device?.status === 'connected';
@@ -24,7 +25,12 @@ export function StatusBar({ running }: { running: boolean }): ReactNode {
     { key: 'node', value: frame?.node ?? graph?.activeNodeId ?? '-' },
     { key: 'tick', value: String(frame?.tick ?? 0) },
     { key: 'vote', value: running ? '2/2' : '-' },
-    { key: 'fps', value: connected ? String(fps) : '-', bad: connected && fps < 3 },
+    {
+      key: 'link',
+      value: link ? `${link.channel}${link.channel === 'scrcpy' ? '' : '（慢）'}` : '-',
+      bad: Boolean(link && link.channel !== 'scrcpy'),
+    },
+    { key: 'fps', value: connected ? fps.toFixed(1) : '-', bad: connected && fps < 3 },
     {
       key: 'capture',
       value: frame ? `${frame.captureMs}ms` : '-',
