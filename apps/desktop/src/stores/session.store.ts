@@ -220,7 +220,6 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
   init: async () => {
     devLog('session: 开始订阅 engine://event');
-    void get().refreshProject();
     let seen = 0;
     const unlisten = await onEngineMessage((method, params) => {
       seen += 1;

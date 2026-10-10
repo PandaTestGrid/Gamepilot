@@ -58,11 +58,13 @@ export function App(): ReactNode {
   // 引擎连上后自动扫描一次真实设备
   const engineStatus = useEngineStore((state) => state.status);
   const scanDevices = useDeviceStore((state) => state.scan);
+  const refreshProject = useSessionStore((state) => state.refreshProject);
   useEffect(() => {
     if (engineStatus === 'ready') {
       void scanDevices();
+      void refreshProject(); // 引擎起来后才能问它在哪个脚本目录
     }
-  }, [engineStatus, scanDevices]);
+  }, [engineStatus, scanDevices, refreshProject]);
 
   // 每台设备首次出现时补齐它的状态图与事件桶（M1 换成从引擎拉取）
   const devices = useDeviceStore((state) => state.devices);
