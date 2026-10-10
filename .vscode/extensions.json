@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "esbenp.prettier-vscode",
+    "dbaeumer.vscode-eslint",
+    "bradlc.vscode-tailwindcss",
+    "charliermarsh.ruff",
+    "ms-python.python",
+    "rust-lang.rust-analyzer",
+    "tamasfe.even-better-toml",
+    "tauri-apps.tauri-vscode"
+  ]
+}

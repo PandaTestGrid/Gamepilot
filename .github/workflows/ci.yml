@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: 前端（lint / 类型 / 测试 / 构建）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm -r lint
+      - run: pnpm -r typecheck
+      - run: pnpm -r test
+      - run: pnpm build
+
+  engine:
+    name: 引擎（ruff / mypy / pytest）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+        working-directory: engine
+      - run: uv run ruff check . && uv run ruff format --check .
+        working-directory: engine
+      - run: uv run mypy
+        working-directory: engine
+      - run: uv run pytest
+        working-directory: engine
+
+  shell:
+    name: Rust 壳（clippy / test）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      # Tauri 在 Linux 上编译需要 WebKitGTK 等系统依赖
+      - name: 安装 Tauri 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: 准备前端产物（tauri::generate_context! 需要 frontendDist 存在）
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # Rust 侧的 sidecar 往返测试会真的启动 Python 引擎
+      - run: uv sync
+        working-directory: engine
+      - run: cargo clippy -- -D warnings
+        working-directory: apps/desktop/src-tauri
+      - run: cargo test
+        working-directory: apps/desktop/src-tauri

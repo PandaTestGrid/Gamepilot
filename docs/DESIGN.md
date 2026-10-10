@@ -39,6 +39,20 @@
 
 若 §4/§5 的改动导致 §6 选型不成立（例如要内嵌 3D 预览、要浏览器端复用 UI），我会回来改 §6 并标注变更。
 
+### 0.4 进度记录
+
+| 阶段 | 状态 | 产出 |
+|---|---|---|
+| M0 设计确认 | 🟡 部分 | §6 选型已定；**§4 UI 线框 / §5 功能清单待你审定** |
+| 项目骨架 | ✅ 完成 | pnpm workspace + Tauri 2 壳 + React/TS/Tailwind/shadcn + Python 引擎（uv）+ 三路 CI；`React → Rust → Python` 链路自检可跑通 |
+| 项目规范 | ✅ 完成 | [`CONVENTIONS.md`](./CONVENTIONS.md)（依赖方向/命名/坐标铁律/契约版本/测试矩阵/DoD）+ [`rpc.md`](./rpc.md) 契约 |
+| M1 起的功能 | ⛔ 未开始 | 等你批 §4/§5 后再动 |
+
+骨架阶段实际验证过的东西（不是"写完就算"）：
+- 引擎：`ruff check` / `ruff format --check` / `mypy --strict` 全绿，8 个 stdio 契约测试通过；
+- 前端：`eslint` / `tsc --noEmit` / 4 个 Vitest 用例 / `vite build` 全绿；
+- 壳：`cargo test` 真实启动 Python 引擎跑通 ping 往返（见 `src-tauri/src/engine.rs` 测试）。
+
 ---
 
 ## 1. 定位
@@ -235,22 +249,29 @@ Project（一个游戏一个工程）
 
 ```
 ~/Desktop/gamepilot/                 # git 仓库根（pnpm workspace）
-├── docs/DESIGN.md                   # 本文档
+├── README.md                        # 环境要求 / 快速开始 / 常用命令
+├── docs/
+│   ├── DESIGN.md                    # 本文档
+│   ├── CONVENTIONS.md               # 项目规范（依赖方向、命名、坐标铁律、DoD）
+│   ├── rpc.md                       # 前端 ⇄ 引擎 RPC 契约
+│   └── adr/                         # 重大决策记录
 ├── apps/desktop/                    # Tauri 2 壳 + React 前端
-│   ├── src/                         # React + TS(strict) + Tailwind v4 + shadcn/ui
-│   │   ├── features/device/         # 画面栏：投屏、识别覆盖、框选录制
-│   │   ├── features/graph/          # 状态图画布（React Flow）
-│   │   ├── features/events/         # 事件流 + 时间轴
-│   │   ├── features/recognizers/    # 识别器面板 + 阈值滑块
-│   │   └── lib/rpc.ts               # JSON-RPC 客户端（请求 + 流式事件）
-│   └── src-tauri/                   # Rust：窗口、托盘、sidecar 生命周期、更新
+│   ├── src/
+│   │   ├── App.tsx                  # 骨架页：三栏容器 + 链路自检
+│   │   ├── components/ui/           # shadcn/ui（CLI 生成，可改）
+│   │   ├── features/                # device(画面) / graph(状态图) / events / recognizers
+│   │   ├── lib/rpc.ts               # JSON-RPC 客户端（唯一通信出口）
+│   │   └── stores/                  # Zustand store（按域拆分）
+│   └── src-tauri/                   # Rust：窗口、托盘、sidecar 守护、RPC 转发
+│       └── src/engine.rs            # 引擎桥：按 id 路由响应 / 转发通知（含往返测试）
 ├── engine/                          # Python 引擎（sidecar）
-│   ├── gamepilot/core/              # 归一化几何 / Frame / Recognizer / Graph / Engine
-│   ├── gamepilot/devices/           # mock / android(scrcpy) / windows(dxgi+hid)
-│   ├── gamepilot/rpc/               # JSON-RPC 2.0 over stdio + 帧推送
-│   └── tests/                       # pytest
-├── package.json
-└── pnpm-workspace.yaml
+│   ├── src/gamepilot/
+│   │   ├── core/                    # 归一化几何 / Frame / Recognizer / Graph / Engine
+│   │   ├── devices/                 # mock / android(scrcpy) / windows(dxgi+hid)
+│   │   ├── rpc/                     # stdio JSON-RPC 2.0（NDJSON）
+│   │   └── protocol.py              # 协议常量（契约源）
+│   └── tests/                       # pytest（离线可跑，含契约测试）
+└── .github/workflows/ci.yml         # 前端 / 引擎 / Rust 三路 CI
 ```
 
 ### 6.2 进程与通信

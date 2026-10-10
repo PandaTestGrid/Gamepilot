@@ -1,0 +1,29 @@
+{
+  "name": "gamepilot",
+  "version": "0.0.1",
+  "private": true,
+  "description": "面向游戏的状态机式自动化框架（Tauri 桌面 App + Python 引擎）",
+  "packageManager": "pnpm@10.23.0",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @gamepilot/desktop dev",
+    "tauri": "pnpm --filter @gamepilot/desktop tauri",
+    "build": "pnpm --filter @gamepilot/desktop build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "engine:lint": "cd engine && uv run ruff check . && uv run ruff format --check . && uv run mypy",
+    "engine:test": "cd engine && uv run pytest -q",
+    "engine:fmt": "cd engine && uv run ruff format .",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm engine:lint && pnpm engine:test"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3"
+  }
+}

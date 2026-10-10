@@ -1,0 +1,31 @@
+[package]
+name = "gamepilot"
+version = "0.0.1"
+description = "GamePilot 桌面壳：Tauri 2 + 引擎 sidecar 桥"
+authors = ["mini"]
+license = "MIT"
+repository = ""
+edition = "2024"
+rust-version = "1.90"
+
+[lib]
+name = "gamepilot_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.1" }
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+tauri = { version = "2.12.1" }
+tauri-plugin-log = "2"
+
+# 发布构建按 Tauri 官方建议做体积与性能取舍
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

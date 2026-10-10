@@ -1,0 +1,181 @@
+"""stdio JSON-RPC 服务：Tauri 壳通过子进程 stdin/stdout 与本模块通信。
+
+信封与分帧（docs/rpc.md）：
+- 请求：{"jsonrpc":"2.0","id":<int>,"method":"engine.ping","params":{...}}
+- 响应：{"jsonrpc":"2.0","id":<int>,"result":{...}} | {"jsonrpc":"2.0","id":<int>,"error":{...}}
+- 通知：{"jsonrpc":"2.0","method":"engine.ready","params":{...}}   ← 无 id
+
+**铁律**：stdout 只能出现协议帧。任何调试输出、第三方库日志一律走 stderr，
+否则前端会解析失败。日志用 `logging` 且 handler 指向 stderr。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import platform
+import sys
+import time
+from collections.abc import Callable
+from typing import IO, Any
+
+from .. import __version__
+from ..protocol import (
+    INTERNAL_ERROR,
+    INVALID_REQUEST,
+    METHOD_INFO,
+    METHOD_NOT_FOUND,
+    METHOD_PING,
+    METHOD_SHUTDOWN,
+    NOTIFY_READY,
+    PARSE_ERROR,
+    PROTOCOL_VERSION,
+)
+
+logger = logging.getLogger("gamepilot.rpc")
+
+Handler = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+class RpcServer:
+    """极简 JSON-RPC 2.0（NDJSON）服务端，只实现本项目需要的子集。"""
+
+    def __init__(self, stdin: IO[str], stdout: IO[str]) -> None:
+        self._stdin = stdin
+        self._stdout = stdout
+        self._handlers: dict[str, Handler] = {}
+        self._stopping = False
+        self._register_builtin()
+
+    # ------------------------------------------------------------------ #
+    # 注册与分发
+    # ------------------------------------------------------------------ #
+
+    def method(self, name: str) -> Callable[[Handler], Handler]:
+        """装饰器：注册一个 RPC 方法。"""
+
+        def wrapper(func: Handler) -> Handler:
+            if name in self._handlers:
+                raise ValueError(f"RPC 方法重复注册: {name}")
+            self._handlers[name] = func
+            return func
+
+        return wrapper
+
+    def _register_builtin(self) -> None:
+        @self.method(METHOD_PING)
+        def _ping(params: dict[str, Any]) -> dict[str, Any]:
+            _ = params
+            return {"pong": True, "version": __version__, "protocol": PROTOCOL_VERSION, "ts": time.time()}
+
+        @self.method(METHOD_INFO)
+        def _info(params: dict[str, Any]) -> dict[str, Any]:
+            _ = params
+            return {
+                "name": "gamepilot-engine",
+                "version": __version__,
+                "protocol": PROTOCOL_VERSION,
+                "python": platform.python_version(),
+                "platform": platform.platform(),
+                "pid": os.getpid(),
+                "methods": sorted(self._handlers),
+            }
+
+        @self.method(METHOD_SHUTDOWN)
+        def _shutdown(params: dict[str, Any]) -> dict[str, Any]:
+            _ = params
+            self._stopping = True
+            return {"ok": True}
+
+    # ------------------------------------------------------------------ #
+    # 收发
+    # ------------------------------------------------------------------ #
+
+    def _write(self, payload: dict[str, Any]) -> None:
+        self._stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self._stdout.flush()
+
+    def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        """主动推送通知（无 id）。"""
+        self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    def _error(self, request_id: Any, code: int, message: str, data: Any = None) -> None:
+        error: dict[str, Any] = {"code": code, "message": message}
+        if data is not None:
+            error["data"] = data
+        self._write({"jsonrpc": "2.0", "id": request_id, "error": error})
+
+    def handle_line(self, line: str) -> None:
+        line = line.strip()
+        if not line:
+            return
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as exc:
+            self._error(None, PARSE_ERROR, f"JSON 解析失败: {exc}")
+            return
+        if not isinstance(request, dict):
+            self._error(None, INVALID_REQUEST, "请求必须是 JSON 对象")
+            return
+
+        request_id = request.get("id")
+        method = request.get("method")
+        raw_params = request.get("params") or {}
+        if not isinstance(method, str):
+            self._error(request_id, INVALID_REQUEST, "缺少 method")
+            return
+        if not isinstance(raw_params, dict):
+            self._error(request_id, INVALID_REQUEST, "params 必须是对象")
+            return
+
+        handler = self._handlers.get(method)
+        if handler is None:
+            self._error(request_id, METHOD_NOT_FOUND, f"未知方法: {method}", data={"known": sorted(self._handlers)})
+            return
+        try:
+            result = handler(raw_params)
+        except Exception as exc:  # 任何 handler 异常都不能打死服务
+            logger.exception("RPC 方法执行失败: %s", method)
+            self._error(request_id, INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
+            return
+
+        if request_id is None:  # 通知：不需要响应
+            return
+        self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+    # ------------------------------------------------------------------ #
+    # 主循环
+    # ------------------------------------------------------------------ #
+
+    def serve_forever(self) -> int:
+        self.notify(
+            NOTIFY_READY,
+            {
+                "version": __version__,
+                "protocol": PROTOCOL_VERSION,
+                "pid": os.getpid(),
+                "methods": sorted(self._handlers),
+            },
+        )
+        for line in self._stdin:
+            self.handle_line(line)
+            if self._stopping:
+                break
+        logger.info("引擎退出")
+        return 0
+
+
+def main() -> int:
+    """stdio 入口：stdout 归协议，所有日志进 stderr。"""
+    logging.basicConfig(
+        level=os.environ.get("GAMEPILOT_LOG_LEVEL", "INFO").upper(),
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    server = RpcServer(sys.stdin, sys.stdout)
+    return server.serve_forever()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

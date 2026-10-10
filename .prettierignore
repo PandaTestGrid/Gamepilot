@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+pnpm-lock.yaml
+apps/desktop/src-tauri/target
+engine/.venv
+engine/uv.lock
+*.md

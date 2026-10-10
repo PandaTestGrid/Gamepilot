@@ -1,0 +1,39 @@
+# ---------- Node / 前端 ----------
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+coverage/
+.turbo/
+
+# ---------- Tauri / Rust ----------
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/binaries/
+Cargo.lock.bak
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+engine/.venv/
+
+# ---------- 运行时产物（用户数据不入库）----------
+assets/runtime/
+runs/
+*.log
+
+# ---------- 编辑器 / 系统 ----------
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
