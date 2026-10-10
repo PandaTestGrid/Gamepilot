@@ -20,8 +20,11 @@ from ..project import resolve_project
 from ..protocol import (
     METHOD_DEVICE_CONNECT,
     METHOD_DEVICE_DISCONNECT,
+    METHOD_DEVICE_KEY,
     METHOD_DEVICE_STATUS,
     METHOD_DEVICE_STREAM,
+    METHOD_DEVICE_SWIPE,
+    METHOD_DEVICE_TAP,
     METHOD_GRAPH_GET,
     METHOD_GRAPH_SAVE,
     METHOD_RECOGNIZER_THRESHOLD,
@@ -52,6 +55,13 @@ def _coerce(value: str) -> Any:
         except ValueError:
             continue
     return value
+
+
+def _require_float(params: dict[str, Any], key: str) -> float:
+    value = params.get(key)
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"缺少 {key} 参数（需要数字）")
+    return float(value)
 
 
 def _require_str(params: dict[str, Any], key: str) -> str:
@@ -188,6 +198,33 @@ def register(server: RpcServer) -> SessionManager:
     @server.method(METHOD_DEVICE_STATUS)
     def _status(params: dict[str, Any]) -> dict[str, Any]:
         return manager.get(_require_str(params, "deviceId")).status()
+
+    @server.method(METHOD_DEVICE_TAP)
+    def _tap(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        session.tap(_require_float(params, "x"), _require_float(params, "y"))
+        return {"ok": True}
+
+    @server.method(METHOD_DEVICE_SWIPE)
+    def _swipe(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        duration = params.get("durationMs", 300)
+        if not isinstance(duration, (int, float)):
+            raise ValueError("durationMs 必须是数字")
+        session.swipe(
+            _require_float(params, "x1"),
+            _require_float(params, "y1"),
+            _require_float(params, "x2"),
+            _require_float(params, "y2"),
+            max(0.02, float(duration) / 1000.0),
+        )
+        return {"ok": True}
+
+    @server.method(METHOD_DEVICE_KEY)
+    def _key(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        session.press(_require_str(params, "key"))
+        return {"ok": True}
 
     @server.method(METHOD_DEVICE_STREAM)
     def _stream(params: dict[str, Any]) -> dict[str, Any]:

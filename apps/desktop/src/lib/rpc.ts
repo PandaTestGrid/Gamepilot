@@ -213,6 +213,31 @@ export async function fetchFrameDataUrl(deviceId: string): Promise<string | null
  * 引擎的截图、识别、状态机照常跑，只是不再编码 JPEG 推给界面：
  * 多设备同时投屏时，这是最大的一笔开销（每帧 60~143KB，14fps 就是 1~2MB/s）。
  */
+/** 手动控制：归一化坐标轻触（走 scrcpy 控制通道，实测 0.1ms） */
+export function deviceTap(deviceId: string, x: number, y: number): Promise<unknown> {
+  return invoke('engine_rpc', { method: 'device.tap', params: { deviceId, x, y } });
+}
+
+/** 手动控制：归一化坐标滑动 */
+export function deviceSwipe(
+  deviceId: string,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  durationMs: number,
+): Promise<unknown> {
+  return invoke('engine_rpc', {
+    method: 'device.swipe',
+    params: { deviceId, x1, y1, x2, y2, durationMs },
+  });
+}
+
+/** 手动控制：功能键（back / home / recents / power / volume_up / volume_down） */
+export function deviceKey(deviceId: string, key: string): Promise<unknown> {
+  return invoke('engine_rpc', { method: 'device.key', params: { deviceId, key } });
+}
+
 export function setStreamFps(deviceId: string, fps: number): Promise<unknown> {
   return invoke('engine_rpc', { method: 'device.stream', params: { deviceId, fps } });
 }

@@ -77,6 +77,12 @@ class ScanResult:
         }
 
 
+# 手动控制支持的功能键（引擎与界面共用这一份定义）
+SUPPORTED_KEYS: frozenset[str] = frozenset(
+    {"back", "home", "recents", "power", "volume_up", "volume_down", "enter", "delete"}
+)
+
+
 class Controller(abc.ABC):
     """设备控制器：截图 + 输入 + 生命周期。所有坐标都是归一化坐标。"""
 
@@ -119,6 +125,10 @@ class Controller(abc.ABC):
 
     def key(self, name: str) -> None:
         raise NotImplementedError(f"{type(self).__name__} 不支持 key")
+
+    def press(self, name: str) -> None:
+        """按功能键。合法的键名见 `SUPPORTED_KEYS`，各实现自己映射到 keycode。"""
+        self.key(name)
 
     def text(self, value: str) -> None:
         raise NotImplementedError(f"{type(self).__name__} 不支持 text")

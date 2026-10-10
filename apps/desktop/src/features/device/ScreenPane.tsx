@@ -5,7 +5,16 @@
  * 识别框、node/tick/fps 浮层全部是引擎的真实数据，前端只做展示与坐标换算
  * （而且坐标本来就是归一化的，连换算都不需要）。
  */
-import { Grid2x2, MousePointerSquareDashed, ScanLine } from 'lucide-react';
+import {
+  House,
+  Layers,
+  MousePointerClick,
+  Power,
+  Grid2x2,
+  MousePointerSquareDashed,
+  ScanLine,
+  Undo2,
+} from 'lucide-react';
 import { type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
 
 import { RecordOverlay } from '@/features/device/RecordOverlay';
@@ -30,6 +39,9 @@ export function ScreenPane(): ReactNode {
   const gridView = useDeviceStore((state) => state.gridView);
   const toggleGrid = useDeviceStore((state) => state.toggleGrid);
   const toggleDevicePopover = useUiStore((state) => state.toggleDevicePopover);
+  const controlMode = useUiStore((state) => state.controlMode);
+  const toggleControl = useUiStore((state) => state.toggleControl);
+  const pressKey = useSessionStore((state) => state.pressKey);
   const recordMode = useUiStore((state) => state.recordMode);
   const frame = useSessionStore((state) => state.frames[activeId]);
   const graph = useGraphStore((state) => state.graphs[activeId]);
@@ -92,6 +104,37 @@ export function ScreenPane(): ReactNode {
             多开{connected.length > 0 ? ` ${connected.length}` : ''}
           </GhostButton>
           <GhostButton title="当前帧命中的识别器数量">读数 {confirmedCount}</GhostButton>
+          <span className="mx-0.5 h-3 w-px bg-line" />
+          <GhostButton
+            active={controlMode}
+            onClick={toggleControl}
+            title={
+              controlMode
+                ? '控制已开启：点击画面=轻触，拖拽=滑动（录制时自动让位）'
+                : '控制已关闭：画面上的操作只用于框选/点选录制'
+            }
+          >
+            <MousePointerClick className="size-3" />
+            控制
+          </GhostButton>
+          {(['back', 'home', 'recents'] as const).map((key) => (
+            <GhostButton
+              key={key}
+              onClick={() => void pressKey(activeId, key)}
+              title={key === 'back' ? '返回' : key === 'home' ? '回到桌面（Home）' : '最近任务'}
+            >
+              {key === 'back' ? (
+                <Undo2 className="size-3" />
+              ) : key === 'home' ? (
+                <House className="size-3" />
+              ) : (
+                <Layers className="size-3" />
+              )}
+            </GhostButton>
+          ))}
+          <GhostButton onClick={() => void pressKey(activeId, 'power')} title="电源键（锁屏/亮屏）">
+            <Power className="size-3" />
+          </GhostButton>
         </>
       }
       footer={<RecognizerReadout recognizers={recognizers} onConnect={() => toggleDevicePopover(true)} />}
@@ -177,9 +220,33 @@ function SingleScreen({
   frame: FrameState | undefined;
 }): ReactNode {
   const recordMode = useUiStore((state) => state.recordMode);
+  const controlMode = useUiStore((state) => state.controlMode);
+  const tapDevice = useSessionStore((state) => state.tap);
+  const swipeDevice = useSessionStore((state) => state.swipe);
   const draft = useUiStore((state) => state.draft);
   const beginDraft = useUiStore((state) => state.beginDraft);
   const viewport = useRef<HTMLDivElement>(null);
+  // 控制模式下的鼠标操作：按下→抬起是轻触，拖拽是滑动
+  const controlStart = useRef<{ x: number; y: number; at: number; moved: boolean } | null>(null);
+  const [ripple, setRipple] = useState<{ x: number; y: number; id: number } | null>(null);
+
+  const normalize = (event: {
+    clientX: number;
+    clientY: number;
+    currentTarget: HTMLDivElement;
+  }): [number, number] => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return [
+      Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width))),
+      Math.min(1, Math.max(0, (event.clientY - rect.top) / Math.max(1, rect.height))),
+    ];
+  };
+
+  const flashRipple = (x: number, y: number): void => {
+    const id = Date.now();
+    setRipple({ x, y, id });
+    window.setTimeout(() => setRipple((current) => (current?.id === id ? null : current)), 450);
+  };
   const [selection, setSelection] = useState<[number, number, number, number] | null>(null);
   const dragStart = useRef<[number, number] | null>(null);
   const [pointer, setPointer] = useState<[number, number] | null>(null);
@@ -265,9 +332,42 @@ function SingleScreen({
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
+      onPointerDown={(event) => {
+        controlStart.current = null;
+        if (!controlMode || recordMode !== 'off') {
+          return;
+        }
+        const [x, y] = normalize(event);
+        controlStart.current = { x, y, at: performance.now(), moved: false };
+      }}
+      onPointerMove={(event) => {
+        const start = controlStart.current;
+        if (!start) {
+          return;
+        }
+        const [x, y] = normalize(event);
+        if (Math.hypot(x - start.x, y - start.y) > 0.012) {
+          start.moved = true;
+        }
+      }}
+      onPointerUp={(event) => {
+        const start = controlStart.current;
+        controlStart.current = null;
+        if (!start || !controlMode || recordMode !== 'off') {
+          return;
+        }
+        const [x, y] = normalize(event);
+        const durationMs = Math.round(performance.now() - start.at);
+        flashRipple(x, y);
+        if (!start.moved && durationMs < 600) {
+          void tapDevice(deviceId, x, y);
+        } else {
+          void swipeDevice(deviceId, start.x, start.y, x, y, Math.min(1500, Math.max(60, durationMs)));
+        }
+      }}
       className={cn(
         'relative min-h-0 w-full flex-1 border border-line bg-[#0b0d12]',
-        recordMode !== 'off' && 'cursor-crosshair',
+        (recordMode !== 'off' || controlMode) && 'cursor-crosshair',
       )}
     >
       {frame ? (
@@ -295,6 +395,15 @@ function SingleScreen({
           </span>
           <span className="text-badge">等待首帧…</span>
         </div>
+      )}
+
+      {/* 触控反馈：点下去在画面上闪一下，能直观确认"点到了哪里" */}
+      {ripple && (
+        <span
+          key={ripple.id}
+          className="pointer-events-none absolute size-8 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full border-2 border-brand/80 bg-brand/15"
+          style={{ left: `${ripple.x * 100}%`, top: `${ripple.y * 100}%` }}
+        />
       )}
 
       {/* 画面角标：一眼看出"有没有帧、多大、多少帧率"。排查"看不见画面"时这是最直接的证据 */}

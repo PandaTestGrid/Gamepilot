@@ -176,6 +176,12 @@ class RpcServer:
                 pool.submit(self.handle_line, line)
                 if self._stopping:
                     break
+        # shutdown 后主线程原本还阻塞在 stdin 的 readline 上（客户端不再发消息就永远不退出，
+        # 留下孤儿进程）。这里给响应留出 flush 时间后强制退出。
+        if self._stopping:
+            time.sleep(0.2)
+            logger.info("引擎退出（shutdown）")
+            os._exit(0)
         logger.info("引擎退出")
         return 0
 

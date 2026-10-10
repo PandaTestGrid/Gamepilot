@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from .base import KIND_MOCK, STATUS_DISCOVERED, Controller, DeviceInfo, Size, register
+from .base import KIND_MOCK, STATUS_DISCOVERED, SUPPORTED_KEYS, Controller, DeviceInfo, Size, register
 
 MOCK_SERIAL = "mock-1"
 MOCK_DEVICE_ID = f"mock:{MOCK_SERIAL}"
@@ -53,10 +53,14 @@ class MockController(Controller):
         self.height = int(height)
         self.frames = 0
         self.hits = 0
+        self.keys: list[str] = []
+        self.swipes: list[tuple[float, float, float, float, float]] = []
 
     def connect(self) -> None:
         self.frames = 0
         self.hits = 0
+        self.keys = []
+        self.swipes = []
         self._connected = True
 
     @property
@@ -75,6 +79,14 @@ class MockController(Controller):
         top = (self.frames * 6) % max(1, self.height - band)
         canvas[top : top + band, :] = (60, 120, 200)
         return canvas
+
+    def press(self, name: str) -> None:
+        if name not in SUPPORTED_KEYS:
+            raise ValueError(f"不支持的按键: {name}")
+        self.keys.append(name)
+
+    def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
+        self.swipes.append((x1, y1, x2, y2, duration))
 
     def click(self, x: float, y: float) -> None:
         if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):

@@ -12,6 +12,9 @@ import { create } from 'zustand';
 
 import {
   connectDevice,
+  deviceKey,
+  deviceSwipe,
+  deviceTap,
   devLog,
   fetchFrame,
   fetchFrameDataUrl,
@@ -68,6 +71,17 @@ interface SessionState {
   readonly recoverImage: (deviceId: string) => Promise<void>;
   /** 界面告诉引擎：这台设备我需要多少帧（0 = 停推） */
   readonly setStreamPolicy: (deviceId: string, fps: number) => void;
+  /** 手动控制：轻触 / 滑动 / 功能键 */
+  readonly tap: (deviceId: string, x: number, y: number) => Promise<void>;
+  readonly swipe: (
+    deviceId: string,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    durationMs: number,
+  ) => Promise<void>;
+  readonly pressKey: (deviceId: string, key: string) => Promise<void>;
 }
 
 function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState): void {
@@ -377,6 +391,42 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   clearError: () => set({ error: null }),
 
   setStreamPolicy: (deviceId, fps) => applyStreamPolicy(deviceId, fps),
+
+  tap: async (deviceId, x, y) => {
+    if (!get().ready[deviceId]) {
+      set({ error: '设备未连接：先在设备面板连接一台，再操作画面' });
+      return;
+    }
+    try {
+      await deviceTap(deviceId, x, y);
+    } catch (error) {
+      set({ error: `点击失败: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  },
+
+  swipe: async (deviceId, x1, y1, x2, y2, durationMs) => {
+    if (!get().ready[deviceId]) {
+      set({ error: '设备未连接：先在设备面板连接一台，再操作画面' });
+      return;
+    }
+    try {
+      await deviceSwipe(deviceId, x1, y1, x2, y2, durationMs);
+    } catch (error) {
+      set({ error: `滑动失败: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  },
+
+  pressKey: async (deviceId, key) => {
+    if (!get().ready[deviceId]) {
+      set({ error: '设备未连接：先在设备面板连接一台，再操作画面' });
+      return;
+    }
+    try {
+      await deviceKey(deviceId, key);
+    } catch (error) {
+      set({ error: `按键失败: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  },
 
   recoverImage: async (deviceId) => {
     devLog(`画面栏: blob 加载失败，改用 base64 兜底 (${deviceId})`);

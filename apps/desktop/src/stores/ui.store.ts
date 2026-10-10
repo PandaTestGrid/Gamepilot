@@ -22,6 +22,9 @@ interface UiState {
   readonly sequence: number;
   readonly setRecordMode: (mode: RecordMode) => void;
   readonly toggleRecording: () => void;
+  /** 控制模式：开启后画面栏的鼠标操作会直接作用于设备（scrcpy 那样） */
+  readonly controlMode: boolean;
+  readonly toggleControl: () => void;
   readonly toggleDevicePopover: (open?: boolean) => void;
   readonly setRightTab: (tab: 'events' | 'recognizers') => void;
   readonly beginDraft: (input: { rect: readonly [number, number, number, number]; score: number }) => void;
@@ -33,6 +36,7 @@ interface UiState {
 
 export const useUiStore = create<UiState>()((set, get) => ({
   recordMode: 'off',
+  controlMode: true,
   draft: null,
   devicePopoverOpen: false,
   rightTab: 'events',
@@ -41,6 +45,7 @@ export const useUiStore = create<UiState>()((set, get) => ({
   setRecordMode: (mode) => set({ recordMode: mode, draft: mode === 'off' ? null : get().draft }),
   toggleRecording: () =>
     set((state) => ({ recordMode: state.recordMode === 'off' ? 'marquee' : 'off', draft: null })),
+  toggleControl: () => set((state) => ({ controlMode: !state.controlMode })),
   toggleDevicePopover: (open) => set((state) => ({ devicePopoverOpen: open ?? !state.devicePopoverOpen })),
   setRightTab: (rightTab) => set({ rightTab }),
 

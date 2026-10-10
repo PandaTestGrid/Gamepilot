@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, ClassVar
 
 import cv2
 import numpy as np
@@ -25,6 +25,7 @@ from .base import (
     KIND_EMULATOR,
     STATUS_DISCOVERED,
     STATUS_FAILED,
+    SUPPORTED_KEYS,
     Controller,
     DeviceInfo,
     Size,
@@ -337,6 +338,30 @@ class AndroidController(Controller):
         px1, py1 = self._to_pixels(x1, y1)
         px2, py2 = self._to_pixels(x2, y2)
         self._client_device.swipe(px1, py1, px2, py2, duration=max(0.05, duration))
+
+    # 常用按键（scrcpy 走控制通道注入，回退时用 `adb shell input keyevent`）
+    KEYCODES: ClassVar[dict[str, int]] = {
+        "back": 4,
+        "home": 3,
+        "recents": 187,
+        "power": 26,
+        "volume_up": 24,
+        "volume_down": 25,
+        "enter": 66,
+        "delete": 67,
+    }
+
+    def press(self, name: str) -> None:
+        """按一个功能键（back/home/recents/power/volume_up/volume_down/enter/delete）。"""
+        keycode = self.KEYCODES.get(name) if name in SUPPORTED_KEYS else None
+        if keycode is None:
+            raise ValueError(f"不支持的按键: {name}（可用: {', '.join(sorted(SUPPORTED_KEYS))}）")
+        if self._scrcpy is not None:
+            self._scrcpy.key(keycode)
+            return
+        if self._client_device is None:
+            raise RuntimeError("设备未连接")
+        self._client_device.keyevent(keycode)
 
     def key(self, name: str) -> None:
         if self._client_device is None:

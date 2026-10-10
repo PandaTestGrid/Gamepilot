@@ -35,6 +35,13 @@
       "template": "templates/main_region_5.png",
       "threshold": 0.82,
       "roi": [0.600549, 0.527005, 0.056963, 0.12275]
+    },
+    "main_region_6": {
+      "type": "color",
+      "target_bgr": [242, 245, 243],
+      "tolerance": 30,
+      "min_pixels": 250,
+      "roi": [0.562117, 0.473889, 0.03, 0.03]
     }
   },
   "nodes": [
@@ -51,7 +58,7 @@
     {
       "id": "node_2",
       "name": "新界面",
-      "enter": ["main_region_5"]
+      "enter": ["main_region_5", "main_region_6"]
     }
   ],
   "edges": []

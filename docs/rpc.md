@@ -226,6 +226,22 @@ Rust 桥的调度规则：
 `{ deviceId }` → `{ ok: true, running: boolean }`。
 `run.start` 要求状态图里至少有一个节点，否则报「状态图还没有节点：先在画面上框选录制一个界面」。
 
+### `device.tap` / `device.swipe` / `device.key`（手动控制）
+
+画面栏直接操作设备时用这三个，走 scrcpy 控制通道（实测点击 **0.1ms**，比
+`adb shell input tap` 的 ~1030ms 快四个数量级）：
+
+- `device.tap { deviceId, x, y }` → `{ ok }`（坐标是**归一化**的，与帧一致）
+- `device.swipe { deviceId, x1, y1, x2, y2, durationMs }` → `{ ok }`
+- `device.key { deviceId, key }` → `{ ok }`；
+  key ∈ `back` / `home` / `recents` / `power` / `volume_up` / `volume_down` / `enter` / `delete`
+
+每次操作都会发一条 `engine.event`（type = `manual_input`，消息如
+`手动点击 (0.139, 0.922)（0.0ms）`），所以事件栏和时间轴能看到手动操作记录。
+
+真机验证（OPPO A57）：控制通道 tap 到桌面「拨号」图标 → 画面差异 110.0（拨号盘打开）；
+返回键 → 差异 112.7。
+
 ### `device.stream`
 
 `{ deviceId, fps }` → `{ ok, streamFps }`。界面告诉引擎"这台设备我只看 N fps"（**0 = 先别推帧**）。

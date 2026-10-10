@@ -73,6 +73,7 @@ class DeviceSession:
         self.capture_ms = 0.0
         self.last_frame: np.ndarray | None = None
         self._last_emit_at: float | None = None
+        self._input_seq = 0  # 手动控制事件的序号（事件栏按 seq 排序）
         # 推给界面的帧率（0 = 暂停推帧）。识别/状态机不受影响，仍按 fps_limit 跑，
         # 这样"界面不看这台设备"时不会白烧 CPU 与带宽（多设备时尤其明显）
         # 默认 0：界面明确要了才推。连接瞬间就按 15fps 推帧会把控制通道（同一根
@@ -221,6 +222,52 @@ class DeviceSession:
     # ------------------------------------------------------------------ #
     # 运行控制
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # 手动控制（画面栏直接操作设备）
+    # ------------------------------------------------------------------ #
+
+    def tap(self, x: float, y: float) -> None:
+        """归一化坐标轻触。"""
+        started = time.perf_counter()
+        with self.lock:
+            self.controller.click(x, y)
+        self._emit_input("手动点击", f"({x:.3f}, {y:.3f})", started)
+
+    def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float) -> None:
+        """归一化坐标滑动。"""
+        started = time.perf_counter()
+        with self.lock:
+            self.controller.swipe(x1, y1, x2, y2, duration=duration)
+        self._emit_input("手动滑动", f"({x1:.2f}, {y1:.2f}) → ({x2:.2f}, {y2:.2f}) {duration * 1000:.0f}ms", started)
+
+    def press(self, name: str) -> None:
+        """功能键（back/home/recents/power/volume_*）。"""
+        started = time.perf_counter()
+        with self.lock:
+            controller = self.controller
+            if hasattr(controller, "press"):
+                controller.press(name)
+            else:
+                controller.key(name)
+        self._emit_input("手动按键", name, started)
+
+    def _emit_input(self, title: str, detail: str, started: float) -> None:
+        cost_ms = (time.perf_counter() - started) * 1000
+        with self.lock:
+            self._input_seq += 1
+        self.emit(
+            "engine.event",
+            {
+                "deviceId": self.device_id,
+                "seq": self._input_seq,
+                "ts": time.time(),
+                "type": "manual_input",
+                "node": self.engine.current,
+                "edge": None,
+                "message": f"{title} {detail}（{cost_ms:.1f}ms）",
+            },
+        )
 
     def start_run(self) -> None:
         with self.lock:

@@ -42,6 +42,10 @@ METHOD_DEVICE_DISCONNECT = "device.disconnect"
 METHOD_DEVICE_STATUS = "device.status"
 # UI 告知引擎"这台设备我只看 N fps"（0 = 不推帧，识别与状态机照常跑）
 METHOD_DEVICE_STREAM = "device.stream"
+# 手动控制（画面栏直接操作设备）
+METHOD_DEVICE_TAP = "device.tap"
+METHOD_DEVICE_SWIPE = "device.swipe"
+METHOD_DEVICE_KEY = "device.key"
 
 # 状态图
 METHOD_GRAPH_GET = "graph.get"

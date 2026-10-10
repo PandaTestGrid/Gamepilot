@@ -39,6 +39,7 @@ SCRCPY_VERSION = "3.3.4"
 SOCKET_NAME = "scrcpy"
 
 # 控制报文
+MSG_INJECT_KEYCODE = 0
 MSG_INJECT_TOUCH = 2
 ACTION_DOWN = 0
 ACTION_UP = 1
@@ -187,6 +188,15 @@ class ScrcpyChannel:
             return None if self._frame is None else self._frame.copy()
 
     @property
+    def frame_id(self) -> int:
+        return self._frame_id
+
+    @property
+    def alive(self) -> bool:
+        """视频流是否还活着。解码线程退出后为 False —— 此时画面会冻结在最后一帧。"""
+        return not self._stop.is_set()
+
+    @property
     def canvas_size(self) -> tuple[int, int]:
         return self.video_size
 
@@ -203,6 +213,15 @@ class ScrcpyChannel:
         y = round(min(max(y_norm, 0.0), 1.0) * (height - 1))
         self._send_touch(ACTION_DOWN, x, y)
         self._send_touch(ACTION_UP, x, y)
+
+    def key(self, keycode: int) -> None:
+        """注入一个按键（返回 / Home / 任务 / 电源 …）。"""
+        if self._control is None:
+            raise RuntimeError("控制通道未就绪")
+        for action in (ACTION_DOWN, ACTION_UP):
+            payload = struct.pack(">BBIII", MSG_INJECT_KEYCODE, action, keycode, 0, 0)
+            assert len(payload) == 14, len(payload)
+            self._control.sendall(payload)
 
     def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3, steps: int = 12) -> None:
         if self._control is None:
@@ -282,6 +301,9 @@ class ScrcpyChannel:
             logger.warning("scrcpy 解码线程退出: %s", self.error)
         finally:
             self._stop.set()
+            if self.error is None:
+                self.error = f"视频流结束（已解码 {self.frames_decoded} 帧，{self.fps:.1f}fps）"
+            logger.warning("scrcpy 视频流结束: %s | server: %s", self.error, self.server_log()[-300:])
 
     def _read_maybe(self, size: int) -> bytes | None:
         assert self._video is not None
