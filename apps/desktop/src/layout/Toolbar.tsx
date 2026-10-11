@@ -48,7 +48,8 @@ export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRu
         : null;
 
   return (
-    <header className="flex h-9 shrink-0 items-center bg-panel pr-2">
+    // 顶栏同样允许换行：窗口窄/按钮多的时候不会把右边的状态挤没
+    <header className="flex min-h-9 shrink-0 flex-wrap items-center gap-y-0.5 bg-panel pr-2">
       <span className="px-3 text-[15px] font-medium tracking-wide">GamePilot</span>
       <VDivider />
       <ProjectMenu />

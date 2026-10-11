@@ -51,6 +51,9 @@ class MockController(Controller):
         super().__init__(device_id, **options)
         self.width = int(width)
         self.height = int(height)
+        # 通道信息：界面底栏要显示"走的哪条路"，Mock 也要有，否则显示 unknown（慢）
+        self.channel = "mock"
+        self.link_note = "内置合成画面（不依赖真机）"
         self.frames = 0
         self.hits = 0
         self.keys: list[str] = []
@@ -68,6 +71,10 @@ class MockController(Controller):
     @property
     def resolution(self) -> Size:
         return (self.width, self.height)
+
+    @property
+    def link_fps(self) -> float:
+        return float(self.frames)
 
     def screenshot(self) -> np.ndarray:
         self.frames += 1

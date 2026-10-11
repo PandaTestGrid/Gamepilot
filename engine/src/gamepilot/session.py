@@ -355,6 +355,12 @@ class DeviceSession:
             parsed = Action.parse(action)
             # 录制时状态机不一定在跑：先靠当前帧判断，判断不出来就用最近录过的节点
             source = self.engine.locate() or self._last_node_id
+            if source is None:
+                # 别造"看不见也用不上"的孤立步骤：它没有 from，画布上不显示、运行时也不会触发
+                raise RuntimeError(
+                    "录操作前先在画面栏「框选」录一个界面（这一步要挂在某个界面上，"
+                    "否则它不在任何界面的出口上，跑起来不会被触发）"
+                )
             when = ""
             if source and source in self.graph.nodes:
                 enter = self.graph.nodes[source].enter

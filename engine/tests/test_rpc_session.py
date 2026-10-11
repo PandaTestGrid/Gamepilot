@@ -306,12 +306,11 @@ def test_record_action_chains_into_next_node(engine: EngineProcess, tmp_path: Pa
     """录操作：点一下 → 变成脚本里的一步；录下一个界面时自动接上（A --点--> B）。"""
     engine.call("device.connect", {"uri": DEVICE_URI})
 
-    # 还没有任何界面时录的一步：无条件（进节点就做）
-    orphan = engine.call("record.action", {"deviceId": DEVICE_ID, "action": {"type": "wait", "seconds": 0.2}})
-    orphan_edge = next(edge for edge in orphan["graph"]["edges"] if edge["id"] == orphan["edgeId"])
-    assert orphan_edge["when"] == "always"
-    assert orphan_edge["condition"] == {"always": True}, orphan_edge
-    assert "from" not in orphan_edge, "还没有界面时录的步骤不属于任何界面"
+    # 还没有任何界面时录操作：明确报错，而不是造一条看不见也用不上的孤立步骤
+    request_id = engine.send("record.action", {"deviceId": DEVICE_ID, "action": {"type": "wait", "seconds": 0.2}})
+    refused = engine.wait_for(lambda item: item.get("id") == request_id)
+    assert "error" in refused, refused
+    assert "框选" in str(refused["error"]), refused
 
     # 录第一个界面（模板 + 节点 main）
     engine.call(

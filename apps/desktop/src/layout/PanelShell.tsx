@@ -20,9 +20,14 @@ export function PanelShell({
     // h-full 是关键：没有确定高度时，flex-1 的内容区在自动高度容器里会塌成 0
     // （内容区全是绝对定位元素，撑不起高度）——画面栏"只剩一条边框线"就是这么来的
     <section className={cn('flex h-full min-h-0 flex-col bg-panel', className)}>
-      <div className="flex h-7 shrink-0 items-center gap-1 border-b border-line px-2">
-        <span className="text-panel font-medium">{title}</span>
-        <div className="flex-1" />
+      {/*
+        头部必须能换行：面板拖窄时按钮不换行就会被挤成一列竖排文字
+        （截图里「框选/点选/多开」被压成"框 选"两行就是这个原因）。
+        min-h-7 保证窄的时候长高，宽的时候还是 28px。
+      */}
+      <div className="flex min-h-7 shrink-0 flex-wrap items-center gap-x-1 gap-y-0.5 border-b border-line px-2 py-0.5">
+        <span className="shrink-0 text-panel font-medium">{title}</span>
+        <div className="min-w-2 flex-1" />
         {actions}
       </div>
       {/*
@@ -55,7 +60,7 @@ export function GhostButton({
       onClick={onClick}
       title={title}
       className={cn(
-        'flex h-5 items-center gap-1 rounded-sm px-1.5 text-badge text-dim hover:bg-raised hover:text-fg',
+        'flex h-5 shrink-0 items-center gap-1 rounded-sm px-1.5 text-badge whitespace-nowrap text-dim hover:bg-raised hover:text-fg',
         active && 'bg-active text-fg',
       )}
     >

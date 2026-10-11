@@ -6,3 +6,6 @@ apps/desktop/src-tauri/target
 engine/.venv
 engine/uv.lock
 *.md
+
+# 工程（脚本）数据：graph.json / templates 是应用运行时写出来的，不是源代码
+projects/
