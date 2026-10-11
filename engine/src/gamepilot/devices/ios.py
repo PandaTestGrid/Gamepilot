@@ -77,6 +77,9 @@ NAMED_BUTTONS: dict[str, tuple[int, int]] = {
 
 DIGITIZER_MAX = 65535
 
+# 单次 HID 调用的等待上限：交互路径要"快速失败"，不能把 RPC 挂到超时
+HID_CALL_TIMEOUT = 2.0
+
 
 # 界面方向（UIInterfaceOrientation）：和 SpringBoard 返回的方向码一致
 ORIENT_PORTRAIT = 1
@@ -275,6 +278,13 @@ class TunnelSession:
 
         loop = self._ensure_loop()
         return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
+
+    def submit(self, coro: Any) -> None:
+        """只丢进事件循环，不等待结果（触摸路径绝不能被这类杂事卡住）。"""
+        import asyncio
+
+        loop = self._ensure_loop()
+        asyncio.run_coroutine_threadsafe(coro, loop)
 
     # ---------- 连接 ----------
 
@@ -518,7 +528,8 @@ class HidBridge:
         )
 
         state = TOUCHSCREEN_STATE_RELEASE if phase == "up" else TOUCHSCREEN_STATE_CONTACT
-        self.run(self._touch(state, x, y))
+        # 触摸是交互路径：宁可能快速失败，也不能挂着让界面等 10 秒
+        self.run(self._touch(state, x, y), timeout=HID_CALL_TIMEOUT)
 
     def press(self, name: str) -> None:
         if name not in NAMED_BUTTONS:
@@ -526,7 +537,7 @@ class HidBridge:
         if self._indigo is None:
             raise RuntimeError("iOS 按键不可用（Indigo 未连上）")
         usage_page, usage_code = NAMED_BUTTONS[name]
-        self.run(self._apress(usage_page, usage_code))
+        self.run(self._apress(usage_page, usage_code), timeout=HID_CALL_TIMEOUT)
 
     async def _apress(self, usage_page: int, usage_code: int) -> None:
         from pymobiledevice3.remote.core_device.hid_service import (
@@ -540,7 +551,7 @@ class HidBridge:
         await self._indigo.send_button(usage_page, usage_code, HID_BUTTON_STATE_UP)
 
     def text(self, value: str) -> None:
-        self.run(self._atext(value))
+        self.run(self._atext(value), timeout=HID_CALL_TIMEOUT)
 
     async def _atext(self, value: str) -> None:
         from pymobiledevice3.remote.core_device.hid_service import ASCII_TO_HID
@@ -565,6 +576,12 @@ def contextlib_suppress() -> Any:
     import contextlib
 
     return contextlib.suppress(Exception)
+
+
+async def asyncio_wait_for(coro: Any, timeout: float) -> Any:
+    import asyncio
+
+    return await asyncio.wait_for(coro, timeout=timeout)
 
 
 async def asyncio_sleep(seconds: float) -> None:
@@ -601,6 +618,8 @@ class IosController(Controller):
         self._orientation_service: Any = None
         self._orientation_lockdown: Any = None
         self._last_aspect: str = ""
+        self._orientation_querying = False
+        self._recovering = False
         self.channel = "dvt"
         self.link_note = ""
         self.usb_report = ""
@@ -646,7 +665,11 @@ class IosController(Controller):
         bridge.attach(session)
         bridge.connect()
         self._hid = bridge
-        self._refresh_orientation(force=True)
+        try:  # 首次必须拿到方向（横屏下第一次触摸就要对），这里同步等一小会儿
+            self._orientation = self._session.run(self._aquery_orientation(), timeout=6)
+            logger.info("iOS 界面方向: %s", ORIENTATION_NAMES.get(self._orientation, self._orientation))
+        except Exception as exc:
+            logger.warning("首次查界面方向失败（按竖屏处理）: %s", exc)
         self._connected = True
 
     async def _aquery_orientation(self) -> int:
@@ -786,25 +809,33 @@ class IosController(Controller):
         return self._hid
 
     def _with_hid(self, action: str, call: Any) -> Any:
-        """执行一次 HID 操作；断线就自动重连并重试一次，再不行给一句人话。"""
+        """执行一次 HID 操作。
+
+        断线时**立刻返回可读错误 + 后台重连**，绝不在请求里同步重连：
+        重连要几秒，界面 10 秒就超时了（踩过："引擎响应超时（>10s）"）。
+        """
         try:
             return call(self._hid_or_raise())
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError) as exc:
-            logger.warning("iOS 控制通道断了（%s:%s），自动重连后重试", action, exc)
-            self._recover_hid()
+            logger.warning("iOS 控制通道断了（%s: %s），已安排后台重连", action, exc)
+            self._schedule_recovery()
+            raise RuntimeError("iOS 控制通道断了（隧道被系统回收）。已在后台自动重连，1~2 秒后再点一次即可") from exc
+
+    def _schedule_recovery(self) -> None:
+        """后台重连：同一个时刻只允许一次。"""
+        if self._recovering:
+            return
+        self._recovering = True
+
+        def worker() -> None:
             try:
-                return call(self._hid_or_raise())
-            except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError) as again:
-                # 隧道整个没了：整套重连一次
-                logger.warning("重试仍失败（%s），整套重连", again)
-                self.reconnect()
-                try:
-                    return call(self._hid_or_raise())
-                except Exception as final:
-                    raise RuntimeError(
-                        f"iOS 控制通道暂时不可用（{type(final).__name__}）。"
-                        "隧道可能被系统回收了，已自动重连；请再操作一次"
-                    ) from final
+                self._recover_hid()
+            except Exception as exc:
+                logger.warning("后台重连失败: %s", exc)
+            finally:
+                self._recovering = False
+
+        threading.Thread(target=worker, name="ios-hid-recover", daemon=True).start()
 
     def _recover_hid(self) -> None:
         """优先只重开 HID 服务（便宜），隧道死了才整套重连。"""

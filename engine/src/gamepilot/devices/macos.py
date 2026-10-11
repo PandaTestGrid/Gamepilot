@@ -7,7 +7,15 @@
 - 抓图：`CGWindowListCreateImage(..., kCGWindowListOptionIncludingWindow, handle, ...)`
   —— 只抓目标窗口，不受其它窗口遮挡影响
 - 控制：`CGEvent` 鼠标/键盘。坐标用**窗口原点的全局点坐标**（屏幕坐标，非像素），
-  所以 Retina 缩放不影响映射
+  所以 Retina 缩放不影响映射。
+  两种投递方式（`Mac:///?window=…&post=pid|global`）：
+
+  | 模式 | 鼠标/焦点 | 可靠性 |
+  |---|---|---|
+  | `pid`（默认） | **完全不动**（CGEventPostToPid 直投目标进程） | 部分 App 会忽略直投事件（实测 Finder / 活动监视器） |
+  | `global` | 会激活目标 App、指针被挪到点击处（点完自动放回原处） | 和真人操作一样可靠 |
+
+  所以：想一边用它一边干活 → 保持 `pid`；发现点了没反应 → 换 `global`。
 
 权限（macOS 必需，缺了会抓不到画面）：
 
@@ -206,17 +214,27 @@ class MacWindowController(Controller):
         window: str | int = "",
         pid: str | int = "",
         app: str = "",
-        activate: bool = True,
+        activate: bool = False,
+        post: str = "pid",
+        restore_cursor: bool = True,
         **options: Any,
     ) -> None:
         super().__init__(device_id or f"{KIND_MACOS}:{window or pid or app}", **options)
         self.window_ref = str(window or "")
         self.pid_ref = int(pid) if pid else 0
         self.app_ref = app
-        self.activate = activate
+        # 控制方式：
+        #   post="pid"（默认）→ CGEventPostToPid 直接投给目标进程：
+        #       **不移动你的鼠标、不抢焦点**，你可以一边用它一边干活
+        #   post="global"     → 走系统事件流（更像真人操作，但会接管鼠标/焦点）
+        self.post_to_pid = post != "global"
+        self.activate = activate if post == "global" else False
+        # 全局模式会真的把鼠标拽到点击位置 → 点完放回原处（默认开）
+        self.restore_cursor = restore_cursor
         self.channel = "quartz"
         self.link_note = ""
         self._target: MacWindow | None = None
+        self._cursor_origin: tuple[float, float] | None = None
         self._last_frame: np.ndarray | None = None
         self._frame_seq = 0
 
@@ -325,19 +343,42 @@ class MacWindowController(Controller):
                 "channel": self.channel,
                 "linkNote": self.link_note,
                 "window": self._target.to_dict() if self._target else None,
+                "post": "pid" if self.post_to_pid else "global",
                 "activate": self.activate,
+                "restoreCursor": self.restore_cursor,
             }
         )
         return data
 
     # ---------- 控制 ----------
 
-    def _post(self, event: Any) -> None:
+    def _post(self, event: Any, restore: bool = False) -> None:
+        """投递事件。
+
+        - `post="pid"`（默认）：`CGEventPostToPid` 直投目标进程，**鼠标与焦点都不动**
+          （用户反馈过"控制本机窗口会和我抢鼠标"）；代价是部分 App 会忽略直投事件
+        - `post="global"`：走系统事件流，和真人操作一样可靠，但会激活目标 App、
+          指针被挪到点击处 —— 所以**手势结束**时把指针放回原处（拖动中途不回位，否则会打断拖动）
+        """
         quartz = _quartz()
         assert quartz is not None
+        if self.post_to_pid and self._target is not None:
+            quartz.CGEventPostToPid(self._target.pid, event)
+            return
         if self.activate and self._target is not None:
             self._activate_app(quartz)
         quartz.CGEventPost(quartz.kCGHIDEventTap, event)
+        if restore and self.restore_cursor:
+            self._restore_cursor(quartz)
+
+    def _restore_cursor(self, quartz: Any) -> None:
+        if self._cursor_origin is None:
+            return
+        warp = quartz.CGEventCreateMouseEvent(
+            None, quartz.kCGEventMouseMoved, self._cursor_origin, quartz.kCGMouseButtonLeft
+        )
+        quartz.CGEventPost(quartz.kCGHIDEventTap, warp)
+        self._cursor_origin = None
 
     def _activate_app(self, quartz: Any) -> None:
         """把目标 App 激活：多数 App 只理会发给前台窗口的点击。"""
@@ -353,14 +394,14 @@ class MacWindowController(Controller):
         except Exception as exc:
             logger.debug("激活 App 失败（继续直接投事件）: %s", exc)
 
-    def _mouse(self, kind: str, x: float, y: float) -> None:
+    def _mouse(self, kind: str, x: float, y: float, restore: bool = False) -> None:
         quartz = _quartz()
         if quartz is None or self._target is None:
             raise RuntimeError("窗口控制器未连接")
         px, py = window_point(self._target.bounds, x, y)
         button = quartz.kCGMouseButtonLeft
         event = quartz.CGEventCreateMouseEvent(None, kind, (px, py), button)
-        self._post(event)
+        self._post(event, restore=restore)
 
     def _refresh_geometry(self) -> None:
         """窗口可能被用户挪动/改尺寸 —— 手势开始时刷一次，整段手势都用同一套坐标。"""
@@ -376,6 +417,11 @@ class MacWindowController(Controller):
         assert quartz is not None
         if phase == "down":
             self._refresh_geometry()  # 只在这一段手势开始时刷新，拖到一半移动窗口也不会算错
+            if not self.post_to_pid and self.restore_cursor:
+                quartz_now = _quartz()
+                if quartz_now is not None:
+                    point = quartz_now.CGEventGetLocation(quartz_now.CGEventCreate(None))
+                    self._cursor_origin = (point.x, point.y)
         mapping = {
             "down": quartz.kCGEventLeftMouseDown,
             "move": quartz.kCGEventLeftMouseDragged,
@@ -383,7 +429,7 @@ class MacWindowController(Controller):
         }
         if phase not in mapping:
             raise ValueError(f"phase 必须是 down/move/up，收到: {phase}")
-        self._mouse(mapping[phase], x, y)
+        self._mouse(mapping[phase], x, y, restore=phase == "up")
 
     def click(self, x: float, y: float) -> None:
         self.touch("down", x, y)
@@ -408,7 +454,7 @@ class MacWindowController(Controller):
         assert quartz is not None
         for down in (True, False):
             event = quartz.CGEventCreateKeyboardEvent(None, code, down)
-            self._post(event)
+            self._post(event, restore=not down)
 
     def text(self, value: str) -> None:
         quartz = _quartz()

@@ -444,35 +444,42 @@ class FlakyHid:
         self.broken = False
 
 
-def test_touch_recovers_from_broken_pipe() -> None:
-    """BrokenPipeError 要自动重连并重试一次，而不是把异常原样抛给界面。"""
+def test_touch_fails_fast_and_recovers_in_background() -> None:
+    """断线时触摸必须**立即**返回可读错误，并安排后台重连。
+
+    为什么不能同步重连：重连要几秒，界面 10 秒就超时了
+    （用户报过 "触控失败: 引擎响应超时（>10s）"）。
+    """
     controller = ios.IosController(udid="UDID-TEST")
     flaky = FlakyHid()
     controller._hid = flaky  # type: ignore[assignment]
     controller._orientation_at = float("inf")
-    controller._session = None  # 没有会话时 _recover_hid 会尝试整套重连 → 用假的替代
+
     recovered: list[str] = []
+    controller._recover_hid = lambda: recovered.append("recover")  # type: ignore[method-assign]
 
-    def fake_recover() -> None:
-        recovered.append("hid")
-        flaky.broken = False
+    started = time.time()
+    with pytest.raises(RuntimeError, match="后台自动重连"):
+        controller.touch("down", 0.5, 0.5)
+    elapsed = time.time() - started
+    assert elapsed < 1.0, f"touch should not wait for reconnect (took {elapsed:.2f}s)"
 
-    controller._recover_hid = fake_recover  # type: ignore[method-assign]
+    for _ in range(60):
+        if recovered:
+            break
+        time.sleep(0.02)
+    assert recovered == ["recover"], "should schedule exactly one background recovery"
 
-    controller.touch("down", 0.5, 0.5)
 
-    assert recovered == ["hid"], "断线应触发一次重连"
-    assert flaky.calls and flaky.calls[-1][0] == "down"
-
-
-def test_touch_gives_readable_error_when_recovery_fails() -> None:
-    """怎么都修不好时，错误信息要能看懂（不是裸的 BrokenPipeError）。"""
+def test_broken_pipe_error_message_is_readable() -> None:
+    """界面看到的必须是能照做的提示，不是裸的 BrokenPipeError。"""
     controller = ios.IosController(udid="UDID-TEST")
-    flaky = FlakyHid()
-    controller._hid = flaky  # type: ignore[assignment]
+    controller._hid = FlakyHid()  # type: ignore[assignment]
     controller._orientation_at = float("inf")
     controller._recover_hid = lambda: None  # type: ignore[method-assign]
-    controller.reconnect = lambda: None  # type: ignore[method-assign]
 
-    with pytest.raises(RuntimeError, match="控制通道暂时不可用"):
+    with pytest.raises(RuntimeError) as info:
         controller.touch("down", 0.5, 0.5)
+    message = str(info.value)
+    assert "BrokenPipeError" not in message
+    assert "再点一次" in message
