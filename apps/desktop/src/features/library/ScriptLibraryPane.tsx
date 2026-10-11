@@ -13,6 +13,7 @@ import { type ReactNode, useEffect, useState } from 'react';
 
 import { ScriptNameForm } from '@/features/library/ScriptNameForm';
 import { ScriptRow } from '@/features/library/ScriptRow';
+import { WelcomeCard } from '@/features/script/WelcomeCard';
 import { GhostButton } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { isUnknownMethodError } from '@/lib/engine-methods';
@@ -42,6 +43,11 @@ export function ScriptLibraryPane(): ReactNode {
   const restartEngine = useEngineStore((state) => state.restart);
   // 引擎是旧进程：错误里会出现 -32601 / 未知方法，或缺方法表校验没通过
   const staleEngine = missingMethods.length > 0 || isUnknownMethodError(error);
+
+  // 没有当前脚本（新用户/还没切过）→ 显示欢迎卡片：新建项目/工作区/任务 + 最近的
+  if (!currentRoot) {
+    return <WelcomeCard />;
+  }
 
   const [form, setForm] = useState<FormState>({ kind: 'closed' });
   const [busy, setBusy] = useState(false);
