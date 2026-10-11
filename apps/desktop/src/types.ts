@@ -38,6 +38,8 @@ export interface EdgeCondition {
   readonly minScore: number;
   /** 限时等待：进入源节点后最多等这么久，超时这条边就不走了 */
   readonly withinMs: number;
+  /** 无条件：录出来的一步（进节点就做），不依赖任何识别器 */
+  readonly always?: boolean;
 }
 
 /** 基础操作（和引擎 core/actions.py 一一对应） */

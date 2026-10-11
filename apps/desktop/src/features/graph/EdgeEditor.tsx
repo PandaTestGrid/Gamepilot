@@ -116,6 +116,17 @@ export function EdgeEditor({
       {/* 判断条件 */}
       <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-badge">
         <span className="text-dim">判断条件</span>
+        <button
+          type="button"
+          onClick={() => setCondition({ ...condition, always: !condition.always })}
+          className={cn(
+            'rounded-sm border px-1',
+            condition.always ? 'border-pending text-pending' : 'border-line text-dim hover:text-fg',
+          )}
+          title="无条件：进入源节点就做这一步（录制出来的步骤默认是「在当前界面才做」）"
+        >
+          无条件
+        </button>
         {(
           [
             ['allOf', '且'],

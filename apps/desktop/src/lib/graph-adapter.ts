@@ -110,12 +110,15 @@ function toCondition(edge: Record<string, unknown>): EdgeCondition {
   const anyOf = labels(spec.any_of);
   const noneOf = labels(spec.none_of);
   const when = str(edge.when);
+  // 录制出来的"无条件"步骤：when 是哨兵，不能当成识别器标签
+  const always = spec.always === true || when === 'always';
   return {
-    allOf: allOf.length > 0 || anyOf.length > 0 || noneOf.length > 0 ? allOf : [when],
+    allOf: always ? [] : allOf.length > 0 || anyOf.length > 0 || noneOf.length > 0 ? allOf : [when],
     anyOf,
     noneOf,
     minScore: num(spec.min_score, num(edge.min_score, 0)),
     withinMs: num(spec.within_ms, 0),
+    always,
   };
 }
 
@@ -143,6 +146,9 @@ export function toConditionPayload(
   condition: EdgeCondition,
   when: string,
 ): Record<string, unknown> | undefined {
+  if (condition.always) {
+    return { always: true, ...(condition.withinMs > 0 ? { within_ms: condition.withinMs } : {}) };
+  }
   const out: Record<string, unknown> = {};
   const allOf = condition.allOf.filter((item) => item !== when);
   if (allOf.length > 0) {
