@@ -30,6 +30,14 @@ from .base import (  # noqa: F401
     register_scheme,
 )
 
+# 界面方向码 → 中文标签（iOS 横屏坐标变换会变，状态栏里显示它便于排查）
+ORIENTATION_LABELS: dict[int, str] = {
+    1: "竖屏",
+    2: "竖屏（倒置）",
+    3: "横屏（左）",
+    4: "横屏（右）",
+}
+
 _SEEN: set[str] = set()
 
 

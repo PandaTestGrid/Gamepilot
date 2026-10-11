@@ -78,6 +78,38 @@ NAMED_BUTTONS: dict[str, tuple[int, int]] = {
 DIGITIZER_MAX = 65535
 
 
+# 界面方向（UIInterfaceOrientation）：和 SpringBoard 返回的方向码一致
+ORIENT_PORTRAIT = 1
+ORIENT_PORTRAIT_UPSIDE_DOWN = 2
+ORIENT_LANDSCAPE_LEFT = 3
+ORIENT_LANDSCAPE_RIGHT = 4
+
+ORIENTATION_NAMES = {
+    ORIENT_PORTRAIT: "竖屏",
+    ORIENT_PORTRAIT_UPSIDE_DOWN: "竖屏（倒置）",
+    ORIENT_LANDSCAPE_LEFT: "横屏（左）",
+    ORIENT_LANDSCAPE_RIGHT: "横屏（右）",
+}
+
+
+def to_digitizer(x: float, y: float, orientation: int) -> tuple[float, float]:
+    """把"当前画面里的归一化坐标"换算成 **HID digitizer 坐标**。
+
+    iOS 的触摸注入坐标系是**硬件竖屏**的：界面转到横屏后，直接送 (x, y) 会整体错位
+    （实机验证：横屏下点「7」键会点到别处，显示区出现 `888×333.`）。
+    用计算器做量化探针逐个方向测过，方向码 4（横屏右）对应 (x, y) → (y, 1-x)：
+    在这个变换下点 5 次「7」→ 显示区亮像素 +6060（真的键入了 5 个数字），
+    其余三种候选映射分别是 0 / +947 / +164。
+    """
+    if orientation == ORIENT_PORTRAIT_UPSIDE_DOWN:
+        return (1.0 - x, 1.0 - y)
+    if orientation == ORIENT_LANDSCAPE_LEFT:
+        return (1.0 - y, x)
+    if orientation == ORIENT_LANDSCAPE_RIGHT:
+        return (y, 1.0 - x)
+    return (x, y)
+
+
 def _version_tuple(text: str) -> tuple[int, ...]:
     parts = re.findall(r"\d+", text or "")
     return tuple(int(item) for item in parts[:3]) or (0,)
@@ -390,7 +422,6 @@ class HidBridge:
 
     def __init__(self, udid: str) -> None:
         self.udid = udid
-        self._display_name = ""
         self._session: TunnelSession | None = None
         self._uhs: Any = None
         self._indigo: Any = None
@@ -551,6 +582,12 @@ class IosController(Controller):
     def __init__(self, device_id: str = "", udid: str = "", fps: float = 8.0, **options: Any) -> None:
         super().__init__(device_id or f"{KIND_IOS}:{udid}", **options)
         self.udid = udid
+        self._display_name = ""
+        self._orientation: int = ORIENT_PORTRAIT
+        self._orientation_at: float = 0.0
+        self._orientation_service: Any = None
+        self._orientation_lockdown: Any = None
+        self._last_aspect: str = ""
         self.channel = "dvt"
         self.link_note = ""
         self.usb_report = ""
@@ -596,7 +633,49 @@ class IosController(Controller):
         bridge.attach(session)
         bridge.connect()
         self._hid = bridge
+        self._refresh_orientation(force=True)
         self._connected = True
+
+    async def _aquery_orientation(self) -> int:
+        """（会话循环里执行）查当前界面方向。"""
+        if self._orientation_service is None:
+            from pymobiledevice3.lockdown import create_using_usbmux
+            from pymobiledevice3.services.springboard import SpringBoardServicesService
+
+            lockdown = await create_using_usbmux(serial=self.udid)
+            service = SpringBoardServicesService(lockdown=lockdown)
+            await service.connect()
+            self._orientation_lockdown = lockdown
+            self._orientation_service = service
+            logger.info("iOS 界面方向查询就绪")
+        return int(await self._orientation_service.get_interface_orientation())
+
+    def _refresh_orientation(self, force: bool = False) -> None:
+        """刷新缓存的界面方向：每秒最多查一次；画面比例一变（旋转）立刻查。
+
+        iOS 的 HID digitizer 是硬件竖屏坐标系，界面转横屏后必须做变换，
+        所以要不断知道"现在是哪个方向"。
+        """
+        now = time.time()
+        if not force and now - self._orientation_at < 1.0:
+            return
+        self._orientation_at = now
+        if self._session is None:
+            return
+        try:
+            previous = self._orientation
+            self._orientation = self._session.run(self._aquery_orientation(), timeout=8)
+            if self._orientation != previous:
+                logger.info(
+                    "iOS 界面方向: %s（触摸坐标会做对应旋转）",
+                    ORIENTATION_NAMES.get(self._orientation, self._orientation),
+                )
+        except Exception as exc:
+            logger.debug("查界面方向失败（按竖屏处理）: %s", exc)
+
+    @property
+    def orientation(self) -> int:
+        return self._orientation
 
     def _report_usb_config(self) -> None:
         """只测绘、不擅自切换：切错配置会让设备从 usbmux 上消失。"""
@@ -649,6 +728,11 @@ class IosController(Controller):
     def screenshot(self) -> np.ndarray:
         if self._session is None:
             raise RuntimeError("iOS 采集未启动")
+        size = self._session.size
+        aspect = "landscape" if size[0] > size[1] else "portrait"
+        if aspect != self._last_aspect:
+            self._last_aspect = aspect
+            self._refresh_orientation(force=True)  # 旋转了：立刻更新方向
         if self._stalled():
             # 卡住超过 6 秒：先重建 DVT，再不行就整套重连
             self._session.run(self._session._reopen_dvt())
@@ -674,6 +758,9 @@ class IosController(Controller):
                 "linkFps": round(self.link_fps, 1),
                 "udid": self.udid,
                 "usb": self.usb_report,
+                # 当前界面方向（横屏错位排查用）
+                "orientation": self._orientation,
+                "orientationName": ORIENTATION_NAMES.get(self._orientation, str(self._orientation)),
             }
         )
         return data
@@ -688,7 +775,9 @@ class IosController(Controller):
     def touch(self, phase: str, x: float, y: float) -> None:
         if phase not in ("down", "move", "up"):
             raise ValueError(f"phase 必须是 down/move/up，收到: {phase}")
-        self._hid_or_raise().touch(phase, round(x * DIGITIZER_MAX), round(y * DIGITIZER_MAX))
+        self._refresh_orientation()
+        dx, dy = to_digitizer(x, y, self._orientation)
+        self._hid_or_raise().touch(phase, round(dx * DIGITIZER_MAX), round(dy * DIGITIZER_MAX))
 
     def click(self, x: float, y: float) -> None:
         self.touch("down", x, y)

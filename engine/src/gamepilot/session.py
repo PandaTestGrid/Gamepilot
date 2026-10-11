@@ -31,6 +31,7 @@ from .core.geometry import Rect
 from .core.graph import Edge, Graph, Node
 from .core.state_machine import Engine
 from .core.trace import TraceBuffer
+from .devices import ORIENTATION_LABELS
 from .devices.base import Controller
 from .frames import FrameSink
 from .project import Project
@@ -589,6 +590,8 @@ class DeviceSession:
 
     def status(self) -> dict[str, Any]:
         with self.lock:
+            orientation = getattr(self.controller, "orientation", None)
+            orientation_code = orientation if isinstance(orientation, int) else None
             return {
                 "deviceId": self.device_id,
                 "uri": getattr(self.controller, "options", {}),
@@ -599,6 +602,9 @@ class DeviceSession:
                 "captureMs": round(self.capture_ms, 1),
                 "channel": getattr(self.controller, "channel", "unknown"),
                 "streamFps": round(self.stream_fps, 1),
+                # iOS 会变：界面方向（横屏坐标变换靠它，排错时一眼能看到）
+                "orientation": orientation_code,
+                "orientationName": ORIENTATION_LABELS.get(orientation_code, None) if orientation_code else None,
                 "linkNote": getattr(self.controller, "link_note", ""),
                 "linkFps": round(float(getattr(self.controller, "link_fps", 0.0)), 1),
                 "node": self.engine.current,

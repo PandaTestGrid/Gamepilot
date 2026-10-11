@@ -151,6 +151,8 @@ def _controller_with_fake_hid() -> tuple[ios.IosController, FakeHid]:
     controller = ios.IosController(udid="UDID-TEST")
     fake = FakeHid()
     controller._hid = fake  # type: ignore[assignment]
+    # 不连真设备：方向缓存在测试里手动设置，_refresh_orientation 遇 None 会跳过
+    controller._orientation_at = float("inf")
     return controller, fake
 
 
@@ -370,3 +372,45 @@ def test_ios_controller_detects_stall() -> None:
 
     session.last_frame_at = time.time() - 10
     assert controller._stalled()
+
+
+# ---------------------------------------------------------------- 横屏坐标变换
+
+
+def test_digitizer_transform_per_orientation() -> None:
+    """iOS 触摸注入是硬件竖屏坐标系：横屏必须做旋转变换（实机测出来的）。"""
+    # 竖屏：原样
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_PORTRAIT) == (0.25, 0.75)
+    # 竖屏倒置：180°
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_PORTRAIT_UPSIDE_DOWN) == (0.75, 0.25)
+    # 横屏（右）：实测方向码 4 → (x,y) ↦ (y, 1-x)（计算器探针 Δ=6060 验证）
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_RIGHT) == (0.75, 0.75)
+    assert ios.to_digitizer(0.155, 0.492, ios.ORIENT_LANDSCAPE_RIGHT) == (0.492, 0.845)
+    # 横屏（左）：反方向
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_LEFT) == (0.25, 0.25)
+    # 未知方向按竖屏处理（至少不错得离谱）
+    assert ios.to_digitizer(0.3, 0.4, 99) == (0.3, 0.4)
+
+
+def test_digitizer_transform_keeps_corners_in_range() -> None:
+    for orientation in (
+        ios.ORIENT_PORTRAIT,
+        ios.ORIENT_PORTRAIT_UPSIDE_DOWN,
+        ios.ORIENT_LANDSCAPE_LEFT,
+        ios.ORIENT_LANDSCAPE_RIGHT,
+    ):
+        for x, y in ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)):
+            dx, dy = ios.to_digitizer(x, y, orientation)
+            assert 0.0 <= dx <= 1.0 and 0.0 <= dy <= 1.0, f"{orientation} {x},{y} → {dx},{dy}"
+
+
+def test_controller_applies_orientation_to_touch() -> None:
+    """控制器要按缓存的界面方向做变换后再送 HID。"""
+    controller, fake = _controller_with_fake_hid()
+    controller._orientation = ios.ORIENT_LANDSCAPE_RIGHT
+    controller.touch("down", 0.25, 0.75)
+    assert fake.calls == [("down", round(0.75 * 65535), round(0.75 * 65535))], fake.calls
+
+    controller._orientation = ios.ORIENT_PORTRAIT
+    controller.touch("down", 0.25, 0.75)
+    assert fake.calls[-1] == ("down", round(0.25 * 65535), round(0.75 * 65535))
