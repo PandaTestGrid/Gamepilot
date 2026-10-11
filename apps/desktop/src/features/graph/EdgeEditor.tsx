@@ -11,6 +11,7 @@
 import { type ReactNode, useState } from 'react';
 
 import { toActionPayload, toConditionPayload } from '@/lib/graph-adapter';
+import { describeEdgeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
 import type { EdgeAction, EdgeCondition, GraphData, GraphEdgeView } from '@/types';
@@ -117,6 +118,11 @@ export function EdgeEditor({
       </div>
 
       {/* 判断条件 */}
+      <div className="mb-1 text-badge text-dim">
+        <span className="text-faint">逻辑：</span>
+        <span className="text-fg">{describeEdgeLogic(edge, graph)}</span>
+      </div>
+
       <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-badge">
         <span className="text-dim">判断条件</span>
         <button

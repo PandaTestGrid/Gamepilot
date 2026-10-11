@@ -6,6 +6,7 @@
  */
 import { type ReactNode, useState } from 'react';
 
+import { describeAction, describeCondition, describeNodeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
 import type { GraphData, GraphNodeView } from '@/types';
@@ -20,6 +21,7 @@ export function NodeEditor({
   graph: GraphData | undefined;
 }): ReactNode {
   const updateNode = useGraphStore((state) => state.updateNode);
+  const selectEdge = useGraphStore((state) => state.selectEdge);
   const removeNode = useGraphStore((state) => state.removeNode);
   const selectNode = useGraphStore((state) => state.selectNode);
   const [name, setName] = useState(node.name);
@@ -102,10 +104,32 @@ export function NodeEditor({
           删除节点
         </button>
       </div>
-      <div className="text-badge text-faint">
-        提示：拖节点右侧的小圆点到另一个节点即可连边；连出来的边默认条件是"源界面的识别器"，
-        点那条边可以再改动作与条件。
+      {/* 这个界面的逻辑：怎么判定、有哪些操作、怎么进来的 */}
+      <div className="flex flex-col gap-0.5 text-badge text-faint">
+        {describeNodeLogic(node, graph).map((line) => (
+          <span key={line}>· {line}</span>
+        ))}
       </div>
+
+      {(graph?.edges ?? []).some((edge) => edge.from === node.id) && (
+        <div className="mt-1 flex flex-col gap-0.5">
+          <span className="text-badge text-dim">出去的操作（点一条可在下方编辑）</span>
+          {(graph?.edges ?? [])
+            .filter((edge) => edge.from === node.id)
+            .map((edge) => (
+              <button
+                key={edge.id}
+                type="button"
+                onClick={() => selectEdge(edge.id)}
+                className="flex items-center gap-1 rounded-sm px-1 text-left text-badge text-dim hover:bg-raised hover:text-fg"
+              >
+                <span className="shrink-0 text-faint">{edge.kind === 'recovery' ? '⚡' : '→'}</span>
+                <span className="text-fg">{describeAction(edge.actionSpec, true)}</span>
+                <span className="text-faint">当 {describeCondition(edge)}</span>
+              </button>
+            ))}
+        </div>
+      )}
     </div>
   );
 }

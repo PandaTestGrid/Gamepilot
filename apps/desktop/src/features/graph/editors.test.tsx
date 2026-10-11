@@ -87,6 +87,7 @@ describe('节点编辑器', () => {
     expect(screen.getByText('节点 launcher')).toBeInTheDocument();
     expect(screen.getByDisplayValue('桌面')).toBeInTheDocument();
     expect(screen.getByText('删除节点')).toBeInTheDocument();
-    expect(screen.getByText(/拖节点右侧的小圆点/)).toBeInTheDocument();
+    // 点节点要看得到"这个界面的逻辑"和出去的操作
+    expect(screen.getByText(/界面判定/)).toBeInTheDocument();
   });
 });

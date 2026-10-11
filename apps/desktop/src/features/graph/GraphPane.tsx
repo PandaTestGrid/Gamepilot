@@ -36,6 +36,7 @@ import { RunButton } from '@/layout/RunButton';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { toGraphData } from '@/lib/graph-adapter';
+import { edgeLabel } from '@/lib/graph-logic';
 import { devLog, graphGet, graphSave } from '@/lib/rpc';
 import { useGraphStore } from '@/stores/graph.store';
 
@@ -163,7 +164,8 @@ export function GraphPane(): ReactNode {
           source: edge.from ?? '',
           target: edge.to ?? '',
           type: 'smoothstep',
-          label: `${recovery ? '⚡ ' : ''}${edge.when}`,
+          // 标签先显示"这一步做什么"，比只显示识别器标签直观得多
+          label: edgeLabel(edge, graph),
           animated: false,
           style: {
             stroke: color,
