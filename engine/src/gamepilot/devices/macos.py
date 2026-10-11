@@ -307,11 +307,7 @@ class MacWindowController(Controller):
     def screenshot(self) -> np.ndarray:
         if self._target is None:
             raise RuntimeError("窗口控制器未连接")
-        # 窗口可能被用户挪动/改尺寸：刷新一次几何信息
-        for item in list_windows(include_own=True):
-            if item.handle == self._target.handle:
-                self._target = item
-                break
+        self._refresh_geometry()
         frame = self._capture()
         self._last_frame = frame
         self._frame_seq += 1
@@ -361,9 +357,20 @@ class MacWindowController(Controller):
         event = quartz.CGEventCreateMouseEvent(None, kind, (px, py), button)
         self._post(event)
 
+    def _refresh_geometry(self) -> None:
+        """窗口可能被用户挪动/改尺寸 —— 手势开始时刷一次，整段手势都用同一套坐标。"""
+        if self._target is None:
+            return
+        for item in list_windows(include_own=True):
+            if item.handle == self._target.handle:
+                self._target = item
+                return
+
     def touch(self, phase: str, x: float, y: float) -> None:
         quartz = _quartz()
         assert quartz is not None
+        if phase == "down":
+            self._refresh_geometry()  # 只在这一段手势开始时刷新，拖到一半移动窗口也不会算错
         mapping = {
             "down": quartz.kCGEventLeftMouseDown,
             "move": quartz.kCGEventLeftMouseDragged,
