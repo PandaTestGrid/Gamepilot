@@ -19,7 +19,7 @@ import {
   workspaceTree,
   type TreeProject,
 } from '@/lib/rpc';
-import { cn } from '@/lib/utils';
+import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
 
 export function WorkspaceTree(): ReactNode {
@@ -27,6 +27,10 @@ export function WorkspaceTree(): ReactNode {
   const switchProject = useSessionStore((state) => state.switchProject);
   const [groups, setGroups] = useState<TreeProject[]>([]);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const busy = useLibraryStore((state) => state.loading);
+  const duplicate = useLibraryStore((state) => state.duplicate);
+  const rename = useLibraryStore((state) => state.rename);
+  const remove = useLibraryStore((state) => state.remove);
 
   const load = async (): Promise<void> => {
     try {
@@ -115,24 +119,24 @@ export function WorkspaceTree(): ReactNode {
 
                 {!folded &&
                   (project.tasks ?? []).map((task) => {
-                    const active = task.root === currentRoot;
+                    const asScript: ProjectSummary = {
+                      name: task.name,
+                      root: task.root,
+                      nodes: task.nodes,
+                      edges: task.edges,
+                      recognizers: task.recognizers,
+                    };
                     return (
-                      <button
+                      <ScriptRow
                         key={task.root}
-                        type="button"
-                        onClick={() => void switchProject(task.root)}
-                        title={task.root}
-                        className={cn(
-                          'flex w-full items-center gap-1 py-0.5 pr-1 pl-5 text-left hover:bg-raised',
-                          active ? 'text-brand' : 'text-dim',
-                        )}
-                      >
-                        <span className="shrink-0">{active ? '●' : '○'}</span>
-                        <span className="min-w-0 flex-1 truncate">{task.name}</span>
-                        <span className="shrink-0 text-faint">
-                          {task.nodes} 界面 · {task.edges} 步
-                        </span>
-                      </button>
+                        item={asScript}
+                        current={task.root === currentRoot}
+                        busy={busy}
+                        onSwitch={() => void switchProject(task.root)}
+                        onDuplicate={(name) => void duplicate(task.root, name).then(load)}
+                        onRename={(name) => void rename(task.root, name).then(load)}
+                        onRemove={() => void remove(task.root).then(load)}
+                      />
                     );
                   })}
               </div>

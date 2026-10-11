@@ -14,7 +14,6 @@ import { type ReactNode, useEffect, useState } from 'react';
 import { ScriptNameForm } from '@/features/library/ScriptNameForm';
 import { ScriptRow } from '@/features/library/ScriptRow';
 import { WelcomeCard } from '@/features/script/WelcomeCard';
-import { WorkspaceTree } from '@/features/library/WorkspaceTree';
 import { GhostButton } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { isUnknownMethodError } from '@/lib/engine-methods';
