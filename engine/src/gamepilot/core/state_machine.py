@@ -24,7 +24,7 @@ from .frame import Detection, Frame
 from .graph import Edge, Graph
 from .recognizer import VoteFilter, perceive
 from .trace import TraceBuffer, TraceEvent
-from .variables import SET_ACTION, VariableStore, resolve_spec
+from .variables import CALL_ACTION, SET_ACTION, VariableStore, resolve_spec
 
 
 @dataclass
@@ -44,6 +44,7 @@ class Engine:
         controller: Controller,
         *,
         trace: TraceBuffer | None = None,
+        on_call: Callable[[str], None] | None = None,
         on_event: Callable[[TraceEvent], None] | None = None,
         vote: int | None = None,
         transition_timeout_ms: int | None = None,
@@ -69,6 +70,7 @@ class Engine:
         # 变量（"黑板"）：动作参数里的 {"$var": …} 在执行那一刻求值
         self.variables = VariableStore()
         # 断点（边的 id）：命中时暂停，等 run.resume —— 配合"单独执行这一步"逐段调试
+        self.on_call = on_call
         self.breakpoints: set[str] = set()
         self.paused_at: str | None = None
         # 本次访问在这个界面上已经停过的断点（避免恢复后又停在同一处）
@@ -356,6 +358,22 @@ class Engine:
         except ValueError as exc:
             self.stats["failed"] += 1
             self._emit("action_failed", node=self.current, edge=edge, message=str(exc))
+            return
+
+        # 「运行子脚本」：把另一份脚本挂上来继续跑（切换脚本目录），引擎不关心细节
+        if str(spec.get("type")) == CALL_ACTION:
+            script = str(spec.get("script") or "").strip()
+            if not script:
+                self.stats["failed"] += 1
+                self._emit("action_failed", node=self.current, edge=edge, message="运行子脚本没写脚本名")
+                return
+            if self.on_call is None:
+                self.stats["failed"] += 1
+                self._emit("action_failed", node=self.current, edge=edge, message=f"当前环境不支持运行子脚本: {script}")
+                return
+            self.on_call(script)
+            self.stats["actions"] += 1
+            self._emit("action_executed", node=self.current, edge=edge, message=f"运行子脚本 {script}")
             return
 
         # 赋值动作（蓝图里的 Set Value）：改运行期变量，然后就走完了

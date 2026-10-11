@@ -165,7 +165,7 @@ export function toParamPayload(value: ParamValue | undefined): unknown {
 function toAction(value: unknown, fallbackTarget: string): EdgeAction {
   const spec = (value ?? {}) as Record<string, unknown>;
   const type = str(spec.type, 'click');
-  const known = ['click', 'long_press', 'swipe', 'wait', 'key', 'text', 'set'];
+  const known = ['click', 'long_press', 'swipe', 'wait', 'key', 'text', 'set', 'call'];
   return {
     type: (known.includes(type) ? type : 'click') as EdgeAction['type'],
     target: typeof spec.target === 'string' ? spec.target : fallbackTarget,
@@ -177,6 +177,7 @@ function toAction(value: unknown, fallbackTarget: string): EdgeAction {
     durationMs: toParamValue(spec.duration_ms) ?? 300,
     seconds: toParamValue(spec.seconds) ?? 0.5,
     name: typeof spec.name === 'string' ? spec.name : undefined,
+    script: typeof spec.script === 'string' ? spec.script : undefined,
     assign: toParamValue(spec.value) !== undefined ? String(toParamValue(spec.value)) : undefined,
     value: typeof spec.value === 'string' ? spec.value : '',
   };
@@ -213,6 +214,10 @@ export function toConditionPayload(
 /** 界面模型 → graph.json 的 action */
 export function toActionPayload(action: EdgeAction): Record<string, unknown> {
   const out: Record<string, unknown> = { type: action.type };
+  if (action.type === 'call') {
+    out.script = action.assign ?? '';
+    return out;
+  }
   if (action.type === 'set') {
     out.name = action.name ?? '';
     out.value = action.assign ?? '0';

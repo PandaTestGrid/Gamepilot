@@ -79,6 +79,8 @@ class DeviceSession:
         self._input_seq = 0  # 手动控制事件的序号（事件栏按 seq 排序）
         self._touch_from: tuple[float, float] | None = None
         # 录制的上一条动作边：下次录新界面时自动把 to 接上
+        # 「运行子脚本」的回调（由 SessionManager 注入：切脚本目录要全局一致）
+        self.on_call_script: Callable[[str], None] | None = None
         self._pending_edge_id: str | None = None
         # 最近一次录制涉及的节点：刚录完模板马上点一下时，靠它定位这一步属于哪个界面
         self._last_node_id: str | None = None
@@ -629,13 +631,24 @@ class DeviceSession:
             self.reload_graph()
             return graph.to_dict()
 
+    def _on_call_script(self, script: str) -> None:
+        """「运行子脚本」：切到那份脚本继续跑（由 SessionManager 统一处理，保证多设备一致）。"""
+        if self.on_call_script is None:
+            raise RuntimeError("当前环境不支持运行子脚本")
+        self.on_call_script(script)
+
     def reload_graph(self) -> None:
         """换一份状态图但保留当前节点与运行态（录制完不该打断运行）。"""
         current = self.engine.current
         running = self.running
         self.graph = Graph.load(self.project.graph_path)
         self.engine = Engine(
-            self.graph, self.controller, trace=self.trace, on_event=self._on_engine_event, start_node=current
+            self.graph,
+            self.controller,
+            trace=self.trace,
+            on_event=self._on_engine_event,
+            start_node=current,
+            on_call=self._on_call_script,
         )
         self.engine.reset_variables()
         self.running = running

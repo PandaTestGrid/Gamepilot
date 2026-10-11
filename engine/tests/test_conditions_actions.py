@@ -352,3 +352,43 @@ def test_graph_omits_empty_variables_section() -> None:
     from gamepilot.core.graph import Graph
 
     assert "variables" not in Graph.from_dict({"nodes": [], "recognizers": {}, "edges": []}, base_dir=".").to_dict()
+
+
+def test_call_action_runs_sub_script() -> None:
+    """「运行子脚本」：动作触发回调（切脚本由上层负责），没写脚本名要报错。"""
+    from gamepilot.core.graph import Edge, Graph
+    from gamepilot.core.state_machine import Engine
+    from test_state_machine import ScriptedController
+
+    calls: list[str] = []
+    graph = Graph.from_dict(
+        {
+            "nodes": [{"id": "main", "name": "主界面", "enter": []}],
+            "recognizers": {},
+            "edges": [
+                {
+                    "id": "e_call",
+                    "when": "always",
+                    "from": "main",
+                    "condition": {"always": True},
+                    "action": {"type": "call", "script": "副本"},
+                }
+            ],
+        },
+        base_dir=".",
+    )
+    graph.validate()
+    engine = Engine(graph, ScriptedController(), on_call=calls.append)
+    engine._execute(graph.edges[0])
+    assert calls == ["副本"], "应该触发运行子脚本"
+
+    # 没有回调时报错但不崩
+    engine2 = Engine(graph, ScriptedController())
+    engine2._execute(graph.edges[0])
+    assert engine2.stats["failed"] >= 1
+
+    # 没写脚本名 → 保存时就拦下
+    bad = Graph()
+    bad.add_edge(Edge.from_dict({"id": "e1", "action": {"type": "call"}}))
+    with pytest.raises(ValueError, match="没写脚本名"):
+        bad.validate()

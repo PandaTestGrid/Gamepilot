@@ -56,7 +56,7 @@ export interface GraphVariable {
 export type ParamValue = number | string;
 
 export interface EdgeAction {
-  readonly type: 'click' | 'long_press' | 'swipe' | 'wait' | 'key' | 'text' | 'set';
+  readonly type: 'click' | 'long_press' | 'swipe' | 'wait' | 'key' | 'text' | 'set' | 'call';
   readonly target?: string;
   readonly toTarget?: string;
   /** 数字或 "$变量名"（引用变量） */
@@ -69,6 +69,8 @@ export interface EdgeAction {
   readonly value?: string;
   /** 赋值动作（type=set）：把哪个变量设成什么 */
   readonly name?: string;
+  /** 运行子脚本（type=call）：脚本名 */
+  readonly script?: string;
   readonly assign?: string;
 }
 

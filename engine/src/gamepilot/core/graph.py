@@ -15,7 +15,7 @@ from .actions import Action
 from .conditions import ALWAYS_LABEL, Condition
 from .geometry import Rect
 from .recognizer import Recognizer, build_recognizer
-from .variables import SET_ACTION, Variable, VariableRefs, parse_variables
+from .variables import CALL_ACTION, SET_ACTION, Variable, VariableRefs, parse_variables
 
 
 @dataclass
@@ -52,7 +52,7 @@ def _action_is_deferred(spec: object) -> bool:
     """
     if not isinstance(spec, dict):
         return False
-    if str(spec.get("type")) == SET_ACTION:
+    if str(spec.get("type")) in (SET_ACTION, CALL_ACTION):
         return True
     if VariableRefs.collect(spec).vars:
         return True
@@ -264,6 +264,8 @@ class Graph:
                 if target_name not in self.variables:
                     raise ValueError(f"边 {edge.id} 给未定义的变量赋值: {target_name}")
                 continue
+            if str(edge.action.get("type")) == CALL_ACTION and not str(edge.action.get("script") or "").strip():
+                raise ValueError(f"边 {edge.id} 的「运行子脚本」没写脚本名")
             if _action_is_deferred(edge.action):
                 # 带变量引用的动作：参数值要等运行时才知道，这里只校验引用本身
                 continue

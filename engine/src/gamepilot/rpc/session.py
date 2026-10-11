@@ -169,6 +169,13 @@ class SessionManager:
             "templates": len(templates),
         }
 
+    def _resolve_script(self, name: str) -> str:
+        """脚本名 → 目录：先按名字找同级脚本目录，找不到就当成路径。"""
+        candidate = os.path.join(os.path.dirname(self.project.root), name)
+        if os.path.isdir(candidate):
+            return candidate
+        return name
+
     def use_project(self, target: str) -> None:
         """切换脚本目录：重载所有已连接设备的状态图（保留它们的运行态）。"""
         path = os.path.abspath(os.path.expanduser(target))
@@ -238,6 +245,8 @@ class SessionManager:
             raise
 
         session = DeviceSession(device_id, controller, self.project, self.emit)
+        # 「运行子脚本」：切到指定脚本目录（名字可以是目录名或绝对路径）
+        session.on_call_script = lambda name: self.use_project(self._resolve_script(name))
         session.start()
         self.sessions[device_id] = session
         self.emit(

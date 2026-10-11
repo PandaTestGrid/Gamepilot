@@ -222,3 +222,5 @@ class VariableRefs:
 
 
 SET_ACTION = "set"
+# 「运行子脚本」：把另一份脚本挂上来继续跑
+CALL_ACTION = "call"

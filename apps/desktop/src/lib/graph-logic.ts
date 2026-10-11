@@ -49,6 +49,8 @@ export function describeAction(action: EdgeAction, compact = false): string {
     }
     case 'set':
       return `设置变量 ${action.name || '?'} = ${action.assign ?? '0'}`;
+    case 'call':
+      return `运行子脚本 ${action.script || '?'}`;
     case 'key':
       return `按键 ${action.value || action.target || '?'}`;
     case 'text':
