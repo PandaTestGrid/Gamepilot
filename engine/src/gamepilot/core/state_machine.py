@@ -65,7 +65,7 @@ class Engine:
         self.condition_timer = ConditionTimer()
         self.transition_timeout_ms = timeout
         # none_of（"否则"）分支的识别宽限期：刚进节点时还没识别结果，
-        # none_of 恒成立 → 会先走"不在"那条，脚本逻辑就反了（验收时抓到）
+        # none_of 恒成立 → 会先走"不在"那条，工作流逻辑就反了（验收时抓到）
         self.none_of_grace_ms = _as_int(graph.default("none_of_grace_ms", 900), 900)
         self.current: str | None = start_node
         self.pending: Pending | None = None
@@ -176,7 +176,7 @@ class Engine:
     def locate(self) -> str | None:
         """当前在哪个界面。
 
-        正在跑状态机时就是 `current`；没跑（录制脚本时）也能只看当前帧的识别结果判断，
+        正在跑状态机时就是 `current`；没跑（录制工作流时）也能只看当前帧的识别结果判断，
         这样"录下来的这一步属于哪个界面"才准。
         """
         if self.current:
@@ -210,7 +210,7 @@ class Engine:
         """
         if edge.id in self._fired_in_node and (edge.dst is None or edge.cooldown_ms <= 0):
             # 这次访问已经做过了：不再考虑它，也**不该再报"等待超时"**
-            # （真机跑脚本时踩到过：边执行完 1.5 秒后又多报一条 edge_timeout）
+            # （真机跑工作流时踩到过：边执行完 1.5 秒后又多报一条 edge_timeout）
             return False
         condition = edge.condition
         status = self.condition_timer.check(self.current, edge.id, condition.within_ms, time.time())
@@ -231,7 +231,7 @@ class Engine:
         if not condition.matches(self.detections):
             return False
         # "否则"分支（只有 none_of）要等识别稳定：刚进节点时还没识别结果，
-        # none_of 恒成立 → 会先走"不在"那条，脚本逻辑就反了（验收时抓到）
+        # none_of 恒成立 → 会先走"不在"那条，工作流逻辑就反了（验收时抓到）
         only_none = bool(condition.none_of) and not condition.all_of and not condition.any_of
         if only_none and time.time() - self._node_entered_at < self.none_of_grace_ms / 1000:
             return False
@@ -324,13 +324,13 @@ class Engine:
     def run_action(self, action: dict[str, Any]) -> str:
         """只执行一个动作（调试用"单独跑这一步"），不影响状态机当前位置。
 
-        复用 `_execute` 那一套（变量求值、识别器目标解析、等待、按键、赋值、子脚本…），
+        复用 `_execute` 那一套（变量求值、识别器目标解析、等待、按键、赋值、子工作流…），
         避免两处实现走偏 —— 而这里**真的走偏过**：以前是先 `Action.parse(action)` 再交给
         `_execute`，于是
 
         - 参数写成 `{"$var": "时长"}` 的动作（"把参数抽成变量"之后的样子）**没求值就解析**，
           直接报"动作参数必须是数字，收到: {'$var': '时长'}";
-        - `set`（赋值变量）/ `call`（运行子脚本）不在 `ACTION_TYPES` 里，
+        - `set`（赋值变量）/ `call`（运行子工作流）不在 `ACTION_TYPES` 里，
           报"未支持的动作类型: set" —— 明明 `_execute` 支持它们。
 
         所以现在：先求值（求值失败直接抛给用户，这是用户能改的错），
@@ -381,20 +381,22 @@ class Engine:
             self._emit("action_failed", node=self.current, edge=edge, message=str(exc))
             return
 
-        # 「运行子脚本」：把另一份脚本挂上来继续跑（切换脚本目录），引擎不关心细节
+        # 「运行子工作流」：把另一份工作流挂上来继续跑（切换工作流目录），引擎不关心细节
         if str(spec.get("type")) == CALL_ACTION:
             script = str(spec.get("script") or "").strip()
             if not script:
                 self.stats["failed"] += 1
-                self._emit("action_failed", node=self.current, edge=edge, message="运行子脚本没写脚本名")
+                self._emit("action_failed", node=self.current, edge=edge, message="运行子工作流没写工作流名")
                 return
             if self.on_call is None:
                 self.stats["failed"] += 1
-                self._emit("action_failed", node=self.current, edge=edge, message=f"当前环境不支持运行子脚本: {script}")
+                self._emit(
+                    "action_failed", node=self.current, edge=edge, message=f"当前环境不支持运行子工作流: {script}"
+                )
                 return
             self.on_call(script)
             self.stats["actions"] += 1
-            self._emit("action_executed", node=self.current, edge=edge, message=f"运行子脚本 {script}")
+            self._emit("action_executed", node=self.current, edge=edge, message=f"运行子工作流 {script}")
             return
 
         # 赋值动作（蓝图里的 Set Value）：改运行期变量，然后就走完了
@@ -531,7 +533,7 @@ class Engine:
         return {label: float(item.score) for label, item in self.detections.items()}
 
     def reset_variables(self) -> None:
-        """把运行期变量恢复成脚本里的默认值（每次 run.start／换图时调一次）。
+        """把运行期变量恢复成工作流里的默认值（每次 run.start／换图时调一次）。
 
         变量是"跑起来会被 set 改"的，不重置的话第二次运行会带着上次的残留值。
         """
@@ -577,14 +579,14 @@ def describe_action(spec: dict[str, Any]) -> str:
     """给「单独执行这一步」用的一句话描述（**已求值**的 spec）。
 
     `set` / `call` 没有进 `Action.parse` 的能力（它们在 `_execute` 里被特判：
-    赋值动作改黑板、子脚本动作切脚本目录），所以描述也得特判 ——
+    赋值动作改黑板、子工作流动作切工作流目录），所以描述也得特判 ——
     否则"单独执行"一个赋值步骤会报"未支持的动作类型: set"。
     """
     kind = str(spec.get("type") or "click")
     if kind == SET_ACTION:
         return f"设置变量 {spec.get('name')} = {spec.get('value')!r}"
     if kind == CALL_ACTION:
-        return f"运行子脚本 {spec.get('script')}"
+        return f"运行子工作流 {spec.get('script')}"
     return Action.parse(spec).describe()
 
 

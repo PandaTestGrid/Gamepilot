@@ -13,7 +13,8 @@ import { type ReactNode, useEffect, useState } from 'react';
 import { toActionPayload, toConditionPayload } from '@/lib/graph-adapter';
 import { conditionConflicts, type DetectionLike, evaluateEdge } from '@/lib/edge-status';
 import { extractParamsToVariables } from '@/lib/param-vars';
-import { actionRun, devLog, projectList, type ProjectSummary, setBreakpoint } from '@/lib/rpc';
+import { actionRun, devLog, setBreakpoint, workspaceTree, type WorkflowSummary } from '@/lib/rpc';
+import { toTree } from '@/features/library/workspace-tree';
 import { describeEdgeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
@@ -50,20 +51,40 @@ export function EdgeEditor({
 }): ReactNode {
   const saveEdge = useGraphStore((state) => state.saveEdge);
   const setVariables = useGraphStore((state) => state.setVariables);
-  // 「跳到任务」：列同工作区里的其它任务（不再手填名字）
+  // 「跳到工作流」：列**当前工作区**里的其它工作流（v4 只有两层，不再手填名字）
   const projectRoot = useSessionStore((state) => state.project?.root ?? '');
-  const [tasks, setTasks] = useState<ProjectSummary[]>([]);
-  const workspaceBase = projectRoot.replace(/\/[^/]+$/, '');
-  const currentTask = projectRoot.split('/').filter(Boolean).pop() ?? '';
+  /**
+   * 当前工作区里的工作流（`workspace.tree` 直接给）。
+   * 连 `root` 一起存：切工作流后旧数据立刻失效（渲染时直接判定），
+   * 不用在 effect 里同步 setState（那会多一次级联渲染）。
+   */
+  const [loaded, setLoaded] = useState<{ root: string; workflows: WorkflowSummary[] }>({
+    root: '',
+    workflows: [],
+  });
+  const workflows = loaded.root === projectRoot ? loaded.workflows : [];
+  const currentWorkflow = projectRoot.split('/').filter(Boolean).pop() ?? '';
 
   useEffect(() => {
-    if (!workspaceBase) {
+    if (!projectRoot) {
       return;
     }
-    void projectList(workspaceBase)
-      .then((result) => setTasks(result.items))
-      .catch(() => setTasks([]));
-  }, [workspaceBase]);
+    let alive = true;
+    void workspaceTree()
+      .then((result) => {
+        if (alive) {
+          setLoaded({ root: projectRoot, workflows: [...toTree(result).workflows] });
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setLoaded({ root: projectRoot, workflows: [] });
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [projectRoot]);
   const removeEdge = useGraphStore((state) => state.removeEdge);
   const [condition, setCondition] = useState<EdgeCondition>(edge.condition);
   const [action, setAction] = useState<EdgeAction>(edge.actionSpec);
@@ -348,21 +369,24 @@ export function EdgeEditor({
 
         {action.type === 'call' && (
           <label className="flex items-center gap-1 text-dim">
-            脚本名
+            工作流名
             <select
               value={action.script ?? ''}
               onChange={(event) => setAction({ ...action, script: event.target.value })}
               className="h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
             >
-              <option value="">（选一个任务）</option>
-              {tasks
-                .filter((item) => item.name !== currentTask)
+              <option value="">（选一个工作流）</option>
+              {workflows
+                .filter((item) => item.name !== currentWorkflow)
                 .map((item) => (
                   <option key={item.root} value={item.name}>
                     {item.name}
                   </option>
                 ))}
             </select>
+            {workflows.filter((item) => item.name !== currentWorkflow).length === 0 && (
+              <span className="text-faint">（这个工作区里还没有别的工作流）</span>
+            )}
           </label>
         )}
         {action.type === 'wait' && (

@@ -8,7 +8,7 @@
 import { type CSSProperties, type ReactNode, useEffect, useMemo } from 'react';
 
 import { cn } from '@/lib/utils';
-import { useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, useGraphStore } from '@/stores/graph.store';
 import { useUiStore } from '@/stores/ui.store';
 
 export function RecordOverlay({
@@ -23,7 +23,7 @@ export function RecordOverlay({
   const updateDraft = useUiStore((state) => state.updateDraft);
   const commitDraft = useUiStore((state) => state.commitDraft);
   const cancelDraft = useUiStore((state) => state.cancelDraft);
-  const graph = useGraphStore((state) => state.graphs[deviceId]);
+  const graph = useGraphStore((state) => graphForDevice(state, deviceId));
 
   const suggestion = useMemo(() => {
     const node = graph?.nodes.find((item) => item.id === graph.activeNodeId)?.id ?? 'main';

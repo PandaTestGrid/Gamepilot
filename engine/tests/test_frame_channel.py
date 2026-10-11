@@ -46,6 +46,9 @@ def test_frames_use_unix_socket_not_stdout(tmp_path: Path) -> None:
         **os.environ,
         "GAMEPILOT_LOG_LEVEL": "ERROR",
         "GAMEPILOT_PROJECT_DIR": str(project),
+        # 工作区也指到临时目录：子进程绝不能碰仓库里的 workspaces/
+        "GAMEPILOT_WORKSPACE_DIR": str(tmp_path / "workspaces" / "默认"),
+        "GAMEPILOT_CONFIG_DIR": str(tmp_path / "config"),
         "GAMEPILOT_FRAME_SOCKET": str(socket_path),
     }
     proc = subprocess.Popen(

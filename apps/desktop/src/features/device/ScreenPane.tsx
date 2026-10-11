@@ -20,6 +20,7 @@ import { Group, Panel, type PanelImperativeHandle, Separator, usePanelRef } from
 
 import { DeviceControls } from '@/features/device/DeviceControls';
 import { RecordOverlay } from '@/features/device/RecordOverlay';
+import { useScreenSurface } from '@/features/device/use-screen-surface';
 import { powerKeyFor } from '@/features/device/nav-keys';
 import { type GesturePoint, isSwipeGesture } from '@/features/device/touch-gesture';
 import { checkRecognizerName, trimRecognizerName } from '@/features/recognizers/recognizer-name';
@@ -31,10 +32,10 @@ import { type Box, canvasPointToPixels, canvasRectToPixels, containBox, pointToC
 import { devLog } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { activeDevice, connectedDevices, useDeviceStore } from '@/stores/device.store';
-import { useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, useGraphStore } from '@/stores/graph.store';
 import { useSessionStore, type FrameState } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
-import type { RecognizerView } from '@/types';
+import type { DeviceRuntime, RecognizerView, RecordDraft } from '@/types';
 
 /** 上一次记录的画面栏分支（只在变化时打日志） */
 let lastBranchKey = '';
@@ -65,7 +66,7 @@ export function ScreenPane(): ReactNode {
   const pressKey = useSessionStore((state) => state.pressKey);
   const isConnected = useSessionStore((state) => Boolean(state.ready[activeId]));
   const frame = useSessionStore((state) => state.frames[activeId]);
-  const graph = useGraphStore((state) => state.graphs[activeId]);
+  const graph = useGraphStore((state) => graphForDevice(state, activeId));
 
   const device = activeDevice(devices, activeId);
   const connected = useMemo(() => connectedDevices(devices), [devices]);
@@ -228,7 +229,9 @@ export function ScreenPane(): ReactNode {
                 <EmptyState onConnect={() => toggleDevicePopover(true)} />
               )}
             </div>
-            {device && device.status === 'connected' && (
+            {/* 多开时按键条跟着"当前设备那一格"走（见 GridTile），单画面才挂在投屏框下面
+                —— 整片网格里只允许有一条（用户反馈：挂外面看不出按的是哪台设备） */}
+            {!gridView && device && device.status === 'connected' && (
               <DeviceControls deviceId={device.id} deviceName={device.name} kind={device.kind} />
             )}
           </div>
@@ -703,7 +706,11 @@ function SingleScreen({
       {frame ? (
         <img
           ref={imgRef}
-          src={frame.imageUrl}
+          /*
+           * `imageUrl` 为空串时**必须传 undefined**：React 收到 `src=""` 会告警
+           * （空 src 会让浏览器把当前页面再下载一遍）。帧先到、blob URL 后到的那一瞬间就是这种状态。
+           */
+          src={frame.imageUrl || undefined}
           alt={`${deviceName} 实时画面`}
           className="pointer-events-none absolute inset-0 h-full w-full object-contain"
           draggable={false}
@@ -949,6 +956,8 @@ function ScreenGrid(): ReactNode {
   const connected = useMemo(() => connectedDevices(devices), [devices]);
   const columns = connected.length >= 4 ? 2 : 1;
   const gridRef = useRef<HTMLDivElement>(null);
+  // 这个订阅必须放在下面的早退**之前**：hooks 不能有条件地调用
+  const draft = useUiStore((state) => state.draft);
 
   // 每块瓦片的帧状态：多开看不到画面时，先分清是"没帧"还是"有帧但没渲染"
   useEffect(() => {
@@ -986,73 +995,165 @@ function ScreenGrid(): ReactNode {
     );
   }
 
+  // 草稿归属的设备这一屏里还有没有它的格子（掉线时没有 → 浮层要兜底，否则草稿摸不到）
+  const draftHasTile = Boolean(draft?.deviceId && connected.some((item) => item.id === draft.deviceId));
+
+  return (
+    <>
+      {/*
+        行高给**下限 132px**：当前设备那格多一条按键条（约 30px），头/脚栏又都是 shrink-0，
+        `minmax(0, 1fr)` 在面板矮的时候会把画面压到接近 0（"多开看不到画面"的第二形态）。
+        放不下就让它自己滚（overflow-auto），宁可滚动也不要压没画面。
+      */}
+      <div
+        ref={gridRef}
+        data-testid="screen-grid"
+        className="grid h-full min-h-0 gap-1 overflow-auto"
+        style={{
+          gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+          gridAutoRows: 'minmax(132px, 1fr)',
+          gridTemplateRows: `repeat(${Math.ceil(connected.length / columns)}, minmax(132px, 1fr))`,
+        }}
+      >
+        {connected.map((device) => (
+          <GridTile
+            key={device.id}
+            deviceId={device.id}
+            name={device.name}
+            kind={device.kind}
+            resolution={device.resolution}
+            frame={frames[device.id]}
+            link={links[device.id]}
+            active={device.id === activeId}
+            activeInGrid={connected.some((item) => item.id === activeId)}
+            onActivate={() => setActive(device.id)}
+            draft={draft?.deviceId === device.id ? draft : null}
+          />
+        ))}
+      </div>
+
+      {/* 草稿归属的设备掉线了（这一屏里没有它的格子）：浮层兜底挂在面板上，
+          保证"确定并写入状态图"始终有且只有一个入口，草稿不会卡在 store 里 */}
+      {draft && !draftHasTile && <RecordOverlay deviceId={draft.deviceId ?? activeId} />}
+    </>
+  );
+}
+
+/**
+ * 多开里的一格：**头栏 / 脚栏只切设备**，中间的画面区才是"操作这台设备"的地方
+ * （坐标换算与录制逻辑和单画面共用 `useScreenSurface`）。
+ *
+ * 为什么按键条（返回/桌面/最近任务）挂在**这一格里面**：挂整片网格外面时，
+ * 看不出按的是哪台设备、离画面也远（用户反馈）。
+ */
+function GridTile({
+  deviceId,
+  name,
+  kind,
+  resolution,
+  frame,
+  link,
+  active,
+  activeInGrid,
+  onActivate,
+  draft,
+}: {
+  deviceId: string;
+  name: string;
+  kind: DeviceRuntime['kind'];
+  resolution: readonly [number, number] | null;
+  frame: FrameState | undefined;
+  link: { channel: string; note: string } | undefined;
+  active: boolean;
+  activeInGrid: boolean;
+  onActivate: () => void;
+  draft: RecordDraft | null;
+}): ReactNode {
+  const { viewportRef, imgRef, imageBox, selection, selectionViewportRect, handlers } = useScreenSurface({
+    deviceId,
+    active,
+    activeInGrid,
+    frame,
+    onActivate,
+  });
+  const recoverImage = useSessionStore((state) => state.recoverImage);
+  const recordMode = useUiStore((state) => state.recordMode);
+  const controlMode = useUiStore((state) => state.controlMode);
+
   return (
     <div
-      ref={gridRef}
-      className="grid h-full min-h-0 gap-1"
-      style={{
-        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-        // 行高必须显式 1fr：默认 auto 行会被瓦片里绝对定位的 <img> 撑成 0 高度，
-        // 表现就是"多开看不到画面"（和单画面之前那个塌陷是同一类问题）
-        gridAutoRows: 'minmax(0, 1fr)',
-        gridTemplateRows: `repeat(${Math.ceil(connected.length / columns)}, minmax(0, 1fr))`,
-      }}
+      data-testid={`grid-tile-${deviceId}`}
+      // `@container`：按键条的文字在窄格子里要收成图标（`@[210px]:inline`）
+      className={cn(
+        '@container relative flex min-h-0 flex-col items-stretch border bg-[#0b0d12]',
+        active ? 'border-brand' : 'border-line',
+      )}
     >
-      {connected.map((device) => {
-        const frame = frames[device.id];
-        const link = links[device.id];
-        return (
-          <button
-            key={device.id}
-            type="button"
-            onClick={() => setActive(device.id)}
-            className={cn(
-              // items-stretch 必须显式写：<button> 的浏览器默认样式里有 align-items:center，
-              // 而瓦片中间层只有绝对定位的 <img>（内容宽度 0），居中布局下会被压成 0 宽
-              // —— 图加载成功却完全看不见，这就是"多开看不到设备投屏"的真凶
-              'relative flex min-h-0 flex-col items-stretch border bg-[#0b0d12] text-left',
-              device.id === activeId ? 'border-brand' : 'border-line hover:border-dim',
-            )}
-          >
-            <span className="flex h-6 shrink-0 items-center gap-2 border-b border-line bg-panel px-2">
-              <StatusDot tone="confirmed" />
-              <span className="text-body">{device.name}</span>
-              <span className="flex-1" />
-              <span className="text-badge text-faint">{frame ? `${frame.fps}fps` : '—'}</span>
-            </span>
-            <span className="relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden">
-              {frame ? (
-                <img
-                  src={frame.imageUrl}
-                  alt={`${device.name} 画面`}
-                  className="absolute inset-0 h-full w-full object-contain"
-                  draggable={false}
-                  onLoad={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    devLog(
-                      `多开瓦片 ${device.id} img 加载成功 ${event.currentTarget.naturalWidth}x${event.currentTarget.naturalHeight}` +
-                        ` 渲染尺寸 ${Math.round(rect.width)}x${Math.round(rect.height)}`,
-                    );
-                  }}
-                  onError={() => {
-                    devLog(`多开瓦片 ${device.id} img 加载失败 url=${frame.imageUrl.slice(0, 24) || '(空)'}`);
-                    void useSessionStore.getState().recoverImage(device.id);
-                  }}
-                />
-              ) : (
-                <span className="flex flex-col items-center gap-1 text-badge text-faint">
-                  <span>{device.name} · 等待首帧…</span>
-                  <span>通道 {link ? link.channel : '-'} · 若一直如此看顶部红条</span>
-                </span>
-              )}
-            </span>
-            <span className="flex h-5 shrink-0 items-center justify-between border-t border-line px-2 text-badge text-faint">
-              <span>{formatResolution(device.resolution)}</span>
-              <span>{frame ? `帧 #${frame.index} · ${frame.fps.toFixed(1)}fps` : '无帧'}</span>
-            </span>
-          </button>
-        );
-      })}
+      <button
+        type="button"
+        data-testid={`grid-head-${deviceId}`}
+        onClick={onActivate}
+        className="flex h-6 shrink-0 items-center gap-2 border-b border-line bg-panel px-2 text-left"
+      >
+        <StatusDot tone="confirmed" />
+        <span className="truncate text-body">{name}</span>
+        <span className="flex-1" />
+        <span className="shrink-0 text-badge text-faint">{frame ? `${frame.fps}fps` : '—'}</span>
+      </button>
+
+      <div
+        ref={viewportRef}
+        data-testid={`grid-screen-${deviceId}`}
+        {...handlers}
+        className={cn(
+          'relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden',
+          (recordMode !== 'off' || controlMode) && 'cursor-crosshair',
+        )}
+      >
+        {frame ? (
+          <img
+            ref={imgRef}
+            // 空串会给 React 告警（浏览器会把当前页面当成图片地址再拉一遍），传 undefined
+            src={frame.imageUrl || undefined}
+            alt={`${name} 画面`}
+            className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+            draggable={false}
+            onError={() => {
+              devLog(`多开瓦片 ${deviceId} img 加载失败 url=${frame.imageUrl.slice(0, 24) || '(空)'}`);
+              void recoverImage(deviceId);
+            }}
+          />
+        ) : (
+          <span className="flex flex-col items-center gap-1 text-badge text-faint">
+            <span>{name} · 等待首帧…</span>
+            <span>通道 {link ? link.channel : '-'} · 若一直如此看顶部红条</span>
+          </span>
+        )}
+
+        {/* 框选矩形：和单画面同一套换算（黑边不进选区） */}
+        {selection && (
+          <span
+            className="pointer-events-none absolute border border-dashed border-brand bg-brand/10"
+            style={canvasRectToPixels(imageBox, selection) ?? { left: 0, top: 0, width: 0, height: 0 }}
+          />
+        )}
+
+        {/* 录制草稿表单：只画在**草稿归属的那一格**里（切到别的格子看一眼也不搬家） */}
+        {draft && <RecordOverlay deviceId={deviceId} anchor={selectionViewportRect(draft.rect)} />}
+      </div>
+
+      <button
+        type="button"
+        data-testid={`grid-foot-${deviceId}`}
+        onClick={onActivate}
+        className="flex h-5 shrink-0 items-center justify-between border-t border-line px-2 text-badge text-faint"
+      >
+        <span>{formatResolution(resolution)}</span>
+        <span>{frame ? `帧 #${frame.index} · ${frame.fps.toFixed(1)}fps` : '无帧'}</span>
+      </button>
+
+      {/* 按键条跟着**当前设备**那一格走（整片网格里只有一条） */}
+      {active && <DeviceControls deviceId={deviceId} deviceName={name} kind={kind} />}
     </div>
   );
 }

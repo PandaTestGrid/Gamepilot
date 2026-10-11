@@ -53,6 +53,115 @@ def _node_ref(node: Node) -> str:
     return f"『{name}』（{node.id}）" if name != node.id else f"『{name}』"
 
 
+def _load_graph(project: Project) -> Graph:
+    """当前工作流的状态图；**没有选择工作流**时给一张"没有落盘位置"的空图（一等状态）。
+
+    `path=""` 很关键：让 `Graph.save()` 明确报「状态图没有保存路径」，
+    而不是把 graph.json 写进引擎的 cwd。
+    """
+    if not project.root:
+        return Graph.empty("", path="")
+    return Graph.load(project.graph_path)
+
+
+# --------------------------------------------------------------------------- #
+# 图编辑：**纯改动**（只动传进来的 Graph，不管落盘/重载）
+#
+# 会话路径（带 deviceId）和"直接改项目脚本"路径（不带 deviceId）共用这几段：
+# 状态图属于**项目**，设备只是"在哪台机器上跑"，两条路改的必须是同一份图。
+# --------------------------------------------------------------------------- #
+
+
+def next_node_id(graph: Graph) -> str:
+    """下一个可用的界面 id（`n_1`、`n_2`…）。
+
+    ⚠️ **不能**只算 `len(graph.nodes) + 1`：删过一个节点之后这个数就会撞上**还活着**的 id
+    （4 个节点删掉一个 → 3+1 = `n_4`，而 `n_4` 还在），`upsert_node` 按 id 覆盖 →
+    新建的界面直接把老界面**顶掉**（用户看到的是"新建界面变成了老界面 / 节点换脸"）。
+    规则：id 只增不减，删掉的 id 不再复用 —— 界面私有的坐标记忆是按 id 存的，
+    复用 id 等于把上一个界面的摆位/选中态也一起继承过来。
+    """
+    index = len(graph.nodes) + 1
+    while f"n_{index}" in graph.nodes:
+        index += 1
+    return f"n_{index}"
+
+
+def graph_node_add(graph: Graph, node_id: str | None, name: str | None, enter: list[str] | None) -> dict[str, Any]:
+    identifier = node_id or next_node_id(graph)
+    node = graph.nodes.get(identifier) or Node(id=identifier, name=name or identifier, enter=[])
+    if name:
+        node.name = name
+    for label in enter or []:
+        if label not in graph.recognizers:
+            raise ValueError(f"未定义的识别器: {label}")
+        if label not in node.enter:
+            node.enter.append(label)
+    graph.upsert_node(node)
+    graph.validate()
+    return {"nodeId": node.id, "graph": graph.to_dict()}
+
+
+def graph_node_update(graph: Graph, node_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    node = graph.nodes.get(node_id)
+    if node is None:
+        raise ValueError(f"没有这个节点: {node_id}")
+    if isinstance(patch.get("name"), str):
+        node.name = str(patch["name"])
+    if "enter" in patch:
+        enter = [str(item) for item in patch["enter"] or []]
+        for label in enter:
+            if label not in graph.recognizers:
+                raise ValueError(f"未定义的识别器: {label}")
+        node.enter = enter
+    if patch.get("timeout_ms") is not None:
+        node.timeout_ms = int(patch["timeout_ms"])
+    graph.upsert_node(node)
+    graph.validate()
+    return {"nodeId": node.id, "graph": graph.to_dict()}
+
+
+def graph_node_remove(graph: Graph, node_id: str) -> dict[str, Any]:
+    if node_id not in graph.nodes:
+        raise ValueError(f"没有这个节点: {node_id}")
+    del graph.nodes[node_id]
+    # 引用了这个节点的边一并删掉（否则图就不合法了）
+    graph.edges = [edge for edge in graph.edges if edge.src != node_id and edge.dst != node_id]
+    return {"removed": node_id, "graph": graph.to_dict()}
+
+
+def graph_edge_add(
+    graph: Graph,
+    *,
+    src: str | None,
+    dst: str | None,
+    when: str | None = None,
+    action: dict[str, Any] | None = None,
+    condition: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    label = when or ""
+    if not label and src and src in graph.nodes and graph.nodes[src].enter:
+        label = graph.nodes[src].enter[0]
+    edge_id = f"e_{label or 'new'}_{len(graph.edges) + 1}"
+    while any(edge.id == edge_id for edge in graph.edges):
+        edge_id = f"{edge_id}_x"
+    default_action = action or ({"type": "click", "target": label} if label else {"type": "wait", "seconds": 0.5})
+    edge = Edge.from_dict(
+        {
+            "id": edge_id,
+            "when": label or ALWAYS_LABEL,
+            "from": src,
+            "to": dst,
+            "cooldown_ms": 600,
+            "condition": condition or ({"all_of": [label]} if label else {"always": True}),
+            "action": default_action,
+        }
+    )
+    graph.add_edge(edge)
+    graph.validate()
+    return {"edgeId": edge_id, "graph": graph.to_dict()}
+
+
 class DeviceSession:
     def __init__(
         self,
@@ -78,7 +187,7 @@ class DeviceSession:
         self.jpeg_quality = jpeg_quality
 
         self.trace = TraceBuffer()
-        self.graph = Graph.load(project.graph_path)
+        self.graph = _load_graph(project)
         self.engine = Engine(self.graph, controller, trace=self.trace, on_event=self._on_engine_event)
         self.lock = threading.RLock()
         self.running = False  # 状态机是否在跑
@@ -91,7 +200,7 @@ class DeviceSession:
         self._input_seq = 0  # 手动控制事件的序号（事件栏按 seq 排序）
         self._touch_from: tuple[float, float] | None = None
         # 录制的上一条动作边：下次录新界面时自动把 to 接上
-        # 「运行子脚本」的回调（由 SessionManager 注入：切脚本目录要全局一致）
+        # 「运行子工作流」的回调（由 SessionManager 注入：切工作流目录要全局一致）
         self.on_call_script: Callable[[str], None] | None = None
         self._pending_edge_id: str | None = None
         # 最近一次录制涉及的节点：刚录完模板马上点一下时，靠它定位这一步属于哪个界面
@@ -361,8 +470,14 @@ class DeviceSession:
     # 录制与调参
     # ------------------------------------------------------------------ #
 
+    def _require_workflow(self) -> None:
+        """写盘类操作的前置检查：没有选择工作流时报中文错误（契约 §2.4），不崩、不写到 cwd。"""
+        if not self.project.root:
+            raise ValueError("还没有选择工作流")
+
     def record_action(self, action: dict[str, Any], *, to: str | None = None) -> dict[str, Any]:
-        """把手动操作录成脚本里的一步（一条边）。
+        self._require_workflow()
+        """把手动操作录成工作流里的一步（一条边）。
 
         语义：在当前所处界面上做这个动作 —— 所以条件默认是"当前节点的进入识别器"，
         没有识别器就退化成"无条件（进节点就做）"。
@@ -374,7 +489,7 @@ class DeviceSession:
             # 这一步挂在哪个界面上？按"能录就录"的顺序找：
             #   ① 当前帧能确认在哪个界面（最准）
             #   ② 本会话内最近录过的界面（刚录完模板就点一下的常见场景）
-            #   ③ 脚本里最后一个界面（应用重启后 _last_node_id 会丢，但 graph.json 还在）
+            #   ③ 工作流里最后一个界面（应用重启后 _last_node_id 会丢，但 graph.json 还在）
             #   ④ 一个都没有 → 自动用当前画面建一个界面，别让用户卡在"录不了"
             # 刚录过模板（2 分钟内）时，用户下一步的意图就是"在这个界面上做"，
             # 优先用它：否则自动建的界面（模板就取自当前画面，必然匹配）会把归属抢走
@@ -392,7 +507,7 @@ class DeviceSession:
                         "ts": time.time(),
                         "type": "node_auto_created",
                         "node": created_for_recording,
-                        "message": f"脚本里还没有界面，已用当前画面自动建了「{created_for_recording}」",
+                        "message": f"工作流里还没有界面，已用当前画面自动建了「{created_for_recording}」",
                     },
                 )
             when = ""
@@ -436,18 +551,16 @@ class DeviceSession:
             return {"edgeId": edge_id, "graph": self.graph.to_dict()}
 
     def _latest_node_id(self) -> str | None:
-        """脚本里最后一个界面（dict 保序，所以就是最后加进去的那个）。"""
+        """工作流里最后一个界面（dict 保序，所以就是最后加进去的那个）。"""
         return next(reversed(self.graph.nodes), None) if self.graph.nodes else None
 
     def _auto_create_node_for_recording(self) -> tuple[str, str | None]:
         """当前画面还没对应界面时，自动建一个（顺手用画面中部做模板，好让状态机能认出它）。"""
         if self.last_frame is None:
             raise RuntimeError("还没有可用画面：先连接设备、等到画面出来，再开「录操作」")
-        index = len(self.graph.nodes) + 1
-        node_id = f"n_{index}"
-        while node_id in self.graph.nodes:
-            index += 1
-            node_id = f"n_{index}"
+        # id 分配走同一个 helper：这里的 index 还要拿来起名字（`界面3`），所以自己算一遍序号
+        node_id = next_node_id(self.graph)
+        index = int(node_id.removeprefix("n_"))
         name = f"界面{index}"
 
         # 用画面中部 60% 当模板：避开状态栏时钟/通知这类一直在变的地方
@@ -471,53 +584,28 @@ class DeviceSession:
         return node_id, name
 
     def graph_node_add(self, node_id: str | None, name: str | None, enter: list[str] | None) -> dict[str, Any]:
+        self._require_workflow()
         with self.lock:
-            identifier = node_id or f"n_{len(self.graph.nodes) + 1}"
-            node = self.graph.nodes.get(identifier) or Node(id=identifier, name=name or identifier, enter=[])
-            if name:
-                node.name = name
-            for label in enter or []:
-                if label not in self.graph.recognizers:
-                    raise ValueError(f"未定义的识别器: {label}")
-                if label not in node.enter:
-                    node.enter.append(label)
-            self.graph.upsert_node(node)
-            self.graph.validate()
+            result = graph_node_add(self.graph, node_id, name, enter)
             self.graph.save()
             self.reload_graph()
-            return {"nodeId": node.id, "graph": self.graph.to_dict()}
+            return result
 
     def graph_node_update(self, node_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        self._require_workflow()
         with self.lock:
-            node = self.graph.nodes.get(node_id)
-            if node is None:
-                raise ValueError(f"没有这个节点: {node_id}")
-            if isinstance(patch.get("name"), str):
-                node.name = str(patch["name"])
-            if "enter" in patch:
-                enter = [str(item) for item in patch["enter"] or []]
-                for label in enter:
-                    if label not in self.graph.recognizers:
-                        raise ValueError(f"未定义的识别器: {label}")
-                node.enter = enter
-            if patch.get("timeout_ms") is not None:
-                node.timeout_ms = int(patch["timeout_ms"])
-            self.graph.upsert_node(node)
-            self.graph.validate()
+            result = graph_node_update(self.graph, node_id, patch)
             self.graph.save()
             self.reload_graph()
-            return {"nodeId": node.id, "graph": self.graph.to_dict()}
+            return result
 
     def graph_node_remove(self, node_id: str) -> dict[str, Any]:
+        self._require_workflow()
         with self.lock:
-            if node_id not in self.graph.nodes:
-                raise ValueError(f"没有这个节点: {node_id}")
-            del self.graph.nodes[node_id]
-            # 引用了这个节点的边一并删掉（否则图就不合法了）
-            self.graph.edges = [edge for edge in self.graph.edges if edge.src != node_id and edge.dst != node_id]
+            result = graph_node_remove(self.graph, node_id)
             self.graph.save()
             self.reload_graph()
-            return {"removed": node_id, "graph": self.graph.to_dict()}
+            return result
 
     def graph_edge_add(
         self,
@@ -528,32 +616,12 @@ class DeviceSession:
         action: dict[str, Any] | None = None,
         condition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._require_workflow()
         with self.lock:
-            label = when or ""
-            if not label and src and src in self.graph.nodes and self.graph.nodes[src].enter:
-                label = self.graph.nodes[src].enter[0]
-            edge_id = f"e_{label or 'new'}_{len(self.graph.edges) + 1}"
-            while any(edge.id == edge_id for edge in self.graph.edges):
-                edge_id = f"{edge_id}_x"
-            default_action = action or (
-                {"type": "click", "target": label} if label else {"type": "wait", "seconds": 0.5}
-            )
-            edge = Edge.from_dict(
-                {
-                    "id": edge_id,
-                    "when": label or ALWAYS_LABEL,
-                    "from": src,
-                    "to": dst,
-                    "cooldown_ms": 600,
-                    "condition": condition or ({"all_of": [label]} if label else {"always": True}),
-                    "action": default_action,
-                }
-            )
-            self.graph.add_edge(edge)
-            self.graph.validate()
+            result = graph_edge_add(self.graph, src=src, dst=dst, when=when, action=action, condition=condition)
             self.graph.save()
             self.reload_graph()
-            return {"edgeId": edge_id, "graph": self.graph.to_dict()}
+            return result
 
     def record_template(
         self,
@@ -565,8 +633,16 @@ class DeviceSession:
         as_action_target: bool = True,
         node_id: str | None = None,
         node_name: str | None = None,
+        allocate_node_id: bool = False,
     ) -> dict[str, Any]:
-        """从当前帧裁剪模板 → 落盘 → 注册识别器（并按需建节点/边）。"""
+        """从当前帧裁剪模板 → 落盘 → 注册识别器（并按需建节点/边）。
+
+        `allocate_node_id`：「这是**新**界面，id 由引擎分配」。
+        界面上的 `nodeId` 是本地序号（`node_1`、`node_2`…），应用一重启就从 1 重新数，
+        传下来必然撞上**上一次会话**建的界面 —— 引擎按 id 取到那个老节点，于是"我新录的界面"
+        变成了老界面（用户看到的"换脸"）。所以"新建"这条路只能让引擎分配。
+        """
+        self._require_workflow()
         with self.lock:
             if self.last_frame is None:
                 raise RuntimeError("还没有可用画面，请先连接设备并等待首帧")
@@ -604,14 +680,18 @@ class DeviceSession:
             self.graph.add_recognizer(label, spec)
 
             created_node = None
-            if as_enter and node_id:
-                node = self.graph.nodes.get(node_id) or Node(id=node_id, name=node_name or node_id, enter=[])
-                if label not in node.enter:
-                    node.enter.append(label)
-                self.graph.upsert_node(node)
-                created_node = node.id
-                self._last_node_id = node.id
-                self._last_node_at = time.time()
+            if as_enter:
+                if allocate_node_id:
+                    # "新建界面"：id 由引擎分配，绝不复用还活着的界面（见 docstring）
+                    node_id = next_node_id(self.graph)
+                if node_id:
+                    node = self.graph.nodes.get(node_id) or Node(id=node_id, name=node_name or node_id, enter=[])
+                    if label not in node.enter:
+                        node.enter.append(label)
+                    self.graph.upsert_node(node)
+                    created_node = node.id
+                    self._last_node_id = node.id
+                    self._last_node_at = time.time()
             # 录制流程自动接链：上一步录的动作边 → 指向这个新界面
             if created_node and self._pending_edge_id:
                 for item in self.graph.edges:
@@ -635,10 +715,14 @@ class DeviceSession:
                 "mode": mode,  # template | color（纯色区域会自动降级成颜色识别器）
                 "template": f"templates/{filename}",
                 "rect": rect.clamp().to_list(),
+                # 这次挂到哪个界面上了（可能是引擎刚分配的）：界面拿它去选中/提示，
+                # 不用自己猜"我传的 id 生效了没"
+                "nodeId": created_node,
                 "graph": self.graph.to_dict(),
             }
 
     def rename_recognizer(self, old: str, new: str) -> dict[str, Any]:
+        self._require_workflow()
         """给识别器改名（级联所有引用），落盘 → 热重载。
 
         和 `remove_recognizer` 相反：改名是**可以**在还被引用时做的 ——
@@ -654,9 +738,10 @@ class DeviceSession:
             return {"from": old, "to": label, "refs": refs, "graph": self.graph.to_dict()}
 
     def remove_recognizer(self, label: str) -> dict[str, Any]:
+        self._require_workflow()
         """删掉一个模板/识别器。
 
-        被别处引用时**拒绝删除**并说清被谁用了 —— 直接删会让脚本变成"引用了不存在的东西"，
+        被别处引用时**拒绝删除**并说清被谁用了 —— 直接删会让工作流变成"引用了不存在的东西"，
         跑起来才发现（比删不掉更糟）。
         """
         with self.lock:
@@ -688,6 +773,7 @@ class DeviceSession:
             return {"removed": label, "graph": self.graph.to_dict()}
 
     def set_threshold(self, label: str, threshold: float) -> dict[str, Any]:
+        self._require_workflow()
         with self.lock:
             self.graph.set_threshold(label, threshold)
             self.graph.save()
@@ -695,6 +781,7 @@ class DeviceSession:
             return {"label": label, "threshold": threshold}
 
     def save_graph(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_workflow()
         with self.lock:
             graph = Graph.from_dict(payload, base_dir=self.project.root, path=self.project.graph_path)
             graph.save()
@@ -702,16 +789,16 @@ class DeviceSession:
             return graph.to_dict()
 
     def _on_call_script(self, script: str) -> None:
-        """「运行子脚本」：切到那份脚本继续跑（由 SessionManager 统一处理，保证多设备一致）。"""
+        """「运行子工作流」：切到那份工作流继续跑（由 SessionManager 统一处理，保证多设备一致）。"""
         if self.on_call_script is None:
-            raise RuntimeError("当前环境不支持运行子脚本")
+            raise RuntimeError("当前环境不支持运行子工作流")
         self.on_call_script(script)
 
     def reload_graph(self) -> None:
         """换一份状态图但保留当前节点与运行态（录制完不该打断运行）。"""
         current = self.engine.current
         running = self.running
-        self.graph = Graph.load(self.project.graph_path)
+        self.graph = _load_graph(self.project)
         self.engine = Engine(
             self.graph,
             self.controller,

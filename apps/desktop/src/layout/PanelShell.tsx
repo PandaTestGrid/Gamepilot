@@ -5,12 +5,18 @@ import { cn } from '@/lib/utils';
 /** 面板壳：28px 面板头 + 内容区。扁平化——1px 描边分层，不用卡片、不用阴影。 */
 export function PanelShell({
   title,
+  tabs,
   actions,
   children,
   footer,
   className,
 }: {
-  title: string;
+  title: ReactNode;
+  /**
+   * 有标签条时**占掉标题的位置**（IDE 编辑器那样：一栏里开着好几份东西，
+   * 标题让位给"现在开的是哪一份"）。标签多了横向滚，不换行、不压缩。
+   */
+  tabs?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   footer?: ReactNode;
@@ -26,8 +32,18 @@ export function PanelShell({
         min-h-7 保证窄的时候长高，宽的时候还是 28px。
       */}
       <div className="flex min-h-7 shrink-0 flex-wrap items-center gap-x-1 gap-y-0.5 border-b border-line px-2 py-0.5">
-        <span className="shrink-0 text-panelhead font-medium">{title}</span>
-        <div className="min-w-2 flex-1" />
+        {tabs ? (
+          // 标签条：`min-w-0` 才能被压缩、`overflow-x-auto` 才不会把按钮顶到下一行；
+          // 滚动条本身在 28px 的头里太吵，隐藏掉（触控板横滑 / Shift+滚轮照样能用）
+          <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {tabs}
+          </div>
+        ) : (
+          <>
+            <span className="shrink-0 text-panelhead font-medium">{title}</span>
+            <div className="min-w-2 flex-1" />
+          </>
+        )}
         {actions}
       </div>
       {/*

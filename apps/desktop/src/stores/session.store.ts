@@ -41,7 +41,7 @@ import {
 import { toGraphData } from '@/lib/graph-adapter';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
-import { useGraphStore } from '@/stores/graph.store';
+import { SCRIPT_SCOPE, useGraphStore } from '@/stores/graph.store';
 import { useLogStore } from '@/stores/log.store';
 import { setPositionScope } from '@/lib/node-positions';
 import { clearTemplateCache } from '@/stores/template.store';
@@ -119,7 +119,8 @@ interface SessionState {
 }
 
 function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState): void {
-  useGraphStore.getState().setGraph(deviceId, toGraphData(deviceId, payload, live));
+  // raw 一起存：编辑脚本时要拿"原始 JSON"回写（界面模型有损），没有它就改不动
+  useGraphStore.getState().setGraph(deviceId, toGraphData(deviceId, payload, live), payload);
 }
 
 /** 每台设备一个拉帧定时器；framePollTick 是"当前已拉到的帧号"，避免重复拉取 */
@@ -415,12 +416,19 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         threshold: draft.threshold,
         nodeId: draft.targetMode === 'new' ? draft.newNodeId : (draft.targetNodeId ?? undefined),
         nodeName: draft.targetMode === 'new' ? draft.newNodeName : undefined,
+        // 「新建界面」的 id 交给引擎分配：界面上那个 `node_${sequence}` 是本地序号，
+        // 应用一重启就从 1 重新数 → 必然撞上上次会话建的界面，录着录着把老界面"换了脸"。
+        allocateNodeId: draft.targetMode === 'new',
         asEnter: draft.asEnter,
         asActionTarget: draft.asActionTarget,
       });
       // 重新录同一张模板时是同名同路径、内容变了：必须清缓存，否则界面还在显示旧截图
       clearTemplateCache([result.label]);
       applyGraph(deviceId, result.graph, get().frames[deviceId]);
+      // 新建界面时 id 是引擎分配的：录完就把它选中，用户能立刻在画布/详情里看到"录到哪个界面上了"
+      if (result.nodeId) {
+        useGraphStore.getState().selectNode(result.nodeId);
+      }
       useEventStore.getState().append(deviceId, 'recognizer_added', {
         message: `+${result.label} (${result.mode})` + (result.template ? ` → ${result.template}` : ''),
       });
@@ -506,9 +514,10 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   refreshProject: async () => {
-    // 只回显信息，不动各设备的状态图（切换/库操作请用 applyProjectChange）
+    // 引擎刚起来 / 刚切了脚本：回显信息并把**脚本**装进画布（一台设备都没连也要有内容）
     try {
-      set({ project: await projectGet() });
+      set({ project: await projectGet(), error: null });
+      await get().applyProjectChange();
     } catch (error) {
       devLog(`project.get 失败: ${String(error)}`);
     }
@@ -530,12 +539,15 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       // 坐标是界面私有的：按脚本目录分开记，切换脚本不会把上一份脚本的摆位套过来
       setPositionScope(info.root);
       set({ project: info, error: null });
-      // 换脚本后每台设备的状态图都变了：重新拉一遍（引擎侧已热重载，当前节点与运行态保留）
+      // 换脚本后每台设备的状态图都变了：引擎侧已经热重载，界面只**拉一次脚本**（项目级），
+      // 再给每台在跑的设备各叠一份（各自当前节点/分数）——
+      // 顺带保证"一台设备都没连"时画布也有内容（脚本属于项目，不属于设备）。
+      const graph = await graphGet();
+      applyGraph(SCRIPT_SCOPE, graph);
       for (const deviceId of Object.keys(get().ready)) {
         if (!get().ready[deviceId]) {
           continue;
         }
-        const graph = await graphGet(deviceId);
         applyGraph(deviceId, graph, get().frames[deviceId]);
       }
     } catch (error) {

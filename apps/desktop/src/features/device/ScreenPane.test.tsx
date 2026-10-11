@@ -430,3 +430,20 @@ describe('画面左下角浮层：帧信息 + 运行态合成一条（曾经两�
     expect(overlay.textContent?.match(/fps/g)).toHaveLength(1);
   });
 });
+
+describe('帧还没有画面时不给 <img> 空 src', () => {
+  it('imageUrl 为空串时不传 src：React 会为 src="" 报警告（浏览器会把当前页面当成图片再拉一遍）', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      renderScreen();
+      act(() => {
+        useSessionStore.setState({ frames: { [DEVICE]: { ...frameAt(2), imageUrl: '' } } });
+      });
+
+      const warned = errors.mock.calls.some((call) => String(call[0]).includes('empty string'));
+      expect(warned, 'React 报了 src="" 的告警，说明空串被直接传给了 <img src>').toBe(false);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+});

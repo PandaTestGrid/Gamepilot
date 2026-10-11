@@ -29,36 +29,41 @@
 - 节点里的 store 选择器**不要写 `?? []`**：selector 每次返回新数组会让 `useSyncExternalStore`
   认为状态一直在变 → 无限重渲染（图还没加载完时必炸）。
 
-## 画布手势：左键框选、中键/空格平移
+## 画布手势：全用官方默认（不要再自己发明）
 
-用户反馈过两件事："鼠标一放上去就是个小手"、"怎么框选多个界面"。根因是同一个 ——
-**左键拖空白原来是平移**（xyflow 默认），所以画布常驻 `cursor: grab`（`.react-flow__pane.draggable`），
-而框选得靠 Shift+拖（没人知道）。现在：
+这条是**教训**，不是设计。前几版把左键改成框选、平移挪到右键/中键，还补了一套外壳光标
+（`.canvas-panning`）。结果：多选与拖动互相打架（拖一个动了别的）、选中计数乱跳、
+画布时不时报渲染错。根因都是"自己维护一份选中/手势状态，再和 xyflow 的内部状态对齐"。
+现在的规矩：**手势一条都不改，选中态只有 xyflow 一个真源。**
 
-| 操作 | 行为 |
+| 操作 | 行为（xyflow 默认） |
 |---|---|
-| 左键拖空白 | **框选**（`selectionOnDrag`），框选矩形用品牌色（`.react-flow__nodesselection-rect`） |
-| **滚动 / 双指滑动** | **平移画布**（`panOnScroll`）—— Mac 触控板没有中键，只靠空格太别扭 |
-| **⌘+滚动** | 缩放（`zoomOnScroll={false}` + xyflow 的 `zoomActivationKeyCode`，Mac 上默认 Meta）；捏合也能缩放 |
-| 中键拖 / **空格+拖动** | 平移（`panOnDrag={[1]}` + 默认 `panActivationKeyCode='Space'`） |
-| 右键 | 右键菜单 |
-| 点节点 | 选中（进下方编辑器）；`Shift/Meta/Ctrl` + 点 = 加选 |
-| `Delete` / `Backspace` | 删除选中的界面 / 边（`deleteKeyCode`，macOS 上 Delete 要 Fn+Backspace，所以两个都收） |
+| 左键拖空白 | **平移画布**（`panOnDrag` 默认 true，光标 grab/grabbing 由 xyflow 给） |
+| **Shift + 拖动** | **框选**（`selectionKeyCode` 默认 Shift，`selectionOnDrag` 保持默认 false） |
+| **滚动 / 双指滑动** | **缩放**（`zoomOnScroll` 默认 true，捏合也缩放） |
+| 中键拖 / **空格+拖动** | 平移（官方内置） |
+| **Control + 点节点** | **多选**（`multiSelectionKeyCode={['Control']}`：官方在 mac 上是 Meta，按要求统一成 Control） |
+| 点节点 / 点边 | 选中（进下方编辑器） |
+| `Delete` / `Backspace` | 删除选中的界面 / 边（macOS 上 Delete 要 Fn+Backspace，所以两个都收） |
 
 规则：
 
-- **`panOnDrag` 不能含 0**：含 0 时 xyflow 给 `.react-flow__pane` 加 `draggable` → `cursor: grab`
-  就是那个"小手"，同时也意味着左键做不了框选；
-- **`panOnDrag` 也不能含 2**（右键）：xyflow 的 `Pane.onContextMenu` 里，只要 `panOnDrag` 含 2 就
-  `preventDefault()` 然后 return —— **右键菜单会被整个吞掉**，两者不能共存。所以 `[1]` 只能是中键；
-- 多选状态（`GraphPane` 的 `selectedIds`）是**画布本地的临时状态**，不进 store：
-  它和"下方编辑器在编辑哪一个"（`graph.store.selectedNodeId`）是两件事，画边框时取并集。
-  但**必须喂回节点数据**（`selected`）并进 `nodeSignature` —— 引擎每帧推数据都会重建节点，
-  不带上的话框选结果下一次同步就没了；
+- **`panOnDrag` 不要传数组**：xyflow 的 `Pane.onContextMenu` 里，只要 `panOnDrag` 含 2（右键）
+  就 `preventDefault()` 然后 return —— 画布空白处的右键菜单会被整个吞掉。要右键菜单就别把右键给平移；
+- **选中态不要自己存一份**：xyflow 通过 `onNodesChange` 的 `select` 变更维护它，
+  落在 `rfNodes` 上（`GraphPane` 的 `selectedIds` 是 `useMemo` **读回来**的）。
+  自己存一份的两种下场都踩过：
+  - 和 xyflow 不同步 → 点了没反应/计数不对；
+  - 反过来喂进节点数据（`selected`）→ 回环：`selected` 变 → 重建节点 → 又报选中变化 → 计数乱跳；
+    而且 React Flow 的拖动是"把选中的一起拖"，假的选中标记就是**"拖一个、动了别的"**；
+- 官方 `onNodesChange`/`onSelectionChange` 交出来的 `nodes` 是**整份节点表**（各带 `selected`），
+  不是"被选中的那几个" —— 要的是 `.filter(node => node.selected)`；
+- 清选中态也走官方通道：发一串 `{ type: 'select', selected: false }`（`applyNodeChanges`），
+  不要自己 `setState`；
 - 删界面**逐个调** `graph.node.remove`：引擎会把它连着的边一起删（`session.py: graph_node_remove`），
   所以不用自己先删边；正被下方编辑器编辑的那个被删掉时要 `selectNode(null)` 收起编辑器；
-- 画布左下角的图例里写了"拖动空白 = 框选 · 空格/中键拖动 = 平移"，选中后还多一条
-  "已选 N 个界面 · 删除 / 取消选择"的工具条（不然没人知道左键不再是平移）。
+- 画布左下角的图例文案**必须和真实手势一致**（`graph-selection.test.tsx` 里有断言守着）：
+  "拖动空白 = 平移画布；Shift+拖动 = 框选；按住 Control 点 = 多选"。
 
 ## 画布上的模板截图与右键菜单
 
@@ -82,7 +87,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `lib/node-positions.ts` | 坐标记忆：引擎回包不覆盖用户摆位、按脚本目录存 localStorage |
+| `lib/node-positions.ts` | 坐标记忆：引擎回包不覆盖用户摆位、按**脚本目录**存 localStorage（不按设备） |
 | （官方）`MiniMap` / `Controls` | 右下角小地图 + 缩放/适配视图控件，直接用 xyflow 的 |
 
 规则：
@@ -90,17 +95,30 @@
 - **所有**引擎回包都必须走 `graph.store` 的 `placed(...)`（内部 `toGraphData` + 坐标套回）。
   单独调 `toGraphData` 再塞进 store，等于把用户的摆位冲掉 —— 以前有 8 处这么干，
   表现就是"拖动/建节点之后节点弹回网格（看起来像消失）"。
+- 坐标记忆**只按脚本目录**键：图是项目级的（`SCRIPT_SCOPE`），按设备分开记的话，
+  同一份脚本在 A 设备摆好、切到 B 设备就套用 B 的旧记忆 —— 用户看到的就是
+  "切换设备时流程图布局自己变了"。旧版本按设备存的键只读一次做迁移，不再写。
+- 多选**不需要**自己管"换设备要清掉"：选中态归 xyflow，切设备/切脚本时节点表整体重建，
+  `selected` 跟着一起重建（见上面「画布手势」那节的规则）。
 - 节点状态用**官方 `useNodesState`**，不要再自造"拖动表/尺寸表"：官方 `applyNodeChanges`
   会处理 position/dimensions/select，`measured` 也由它保管（自己实现容易漏掉尺寸回填，
   然后小地图画不出节点、`nodesInitialized` 反复 false）。
 - 同步 store → React Flow 时：**不在拖动中的节点坐标取 store**（"重新布局"才生效）；
   **正在拖动的节点（本地 `dragging === true`）坐标必须取本地** —— 拖动期间每帧的实时更新都会
   触发同步，用 store 的旧坐标覆盖就是"抖动 + 松手回原位"。
+  - ⚠️ **`dragging` 标记要自己维护**：官方 `applyNodeChanges` 对 `position` 变更**只改 `position`**，
+    不写 `dragging`（源码里那个分支只 spread 了 position）。所以只能在 `onNodesChange` 外面包一层
+    （`GraphPane` 的 `handleNodesChange`）把 xyflow 发的标记落进本地状态；不维护的话
+    "正在拖的节点用本地坐标"这条路永远不生效，画布上的节点每帧都被 store 按回去
+    （`graph-drag.test.tsx` 那条"拖动中被实时更新打断"就是守它的）。
+    测试桩里**别替官方补写这个标记**，否则这条 bug 永远测不出来。
   - ⚠️ 重建节点时 `dragging` 标记要**一起带回去**：丢了它，下一次同步就会覆盖正在拖的节点（抖动根源）。
   - ⚠️ 写回坐标读**本地最新坐标**（`nodesRef` 镜像本地数组），别用 `onNodeDragStop` 回调参数里的
     `node.position`：它可能落后一帧，写回旧值 = "停下来弹回原位"。
-  - 拖动中每 90ms 节流写一次 store 兜底（画面跟手仍由 React Flow 本地负责），松手把
-    React Flow 报上来的**所有**被拖节点一次写全（多选拖动）。
+  - 拖动中每 90ms 节流写一次 store 兜底（画面跟手仍由 React Flow 本地负责）。这一笔要把
+    **所有 `dragging === true` 的节点**都写回（`nodesRef.current` 里数），不能只写回调里那一个：
+    多选拖动时漏写的那个在 store 里还是旧坐标，下一次每帧同步就把**它**按回原位
+    （表现："拖着这个，另一个自己跳回去"）。松手再把 React Flow 报上来的所有节点写全。
   - **尺寸沿用本地**（别重新测量），`data` 每次重建。
 - 连线必须用 `ConnectionMode.Strict`：Loose 允许从 target 圆点起拖并交换方向，
   会出现"从左圆点拖，结果连成了反向边"。

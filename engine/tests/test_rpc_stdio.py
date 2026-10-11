@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator
 from typing import Any
 
@@ -20,6 +21,8 @@ MODULE = "gamepilot.rpc"
 
 
 def _spawn() -> subprocess.Popen[str]:
+    # 当前脚本与工作区都指到临时目录：子进程绝不能碰仓库里的 workspaces/
+    scratch = tempfile.mkdtemp(prefix="gamepilot-stdio-")
     return subprocess.Popen(
         [sys.executable, "-m", MODULE],
         stdin=subprocess.PIPE,
@@ -27,7 +30,13 @@ def _spawn() -> subprocess.Popen[str]:
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        env={**os.environ, "GAMEPILOT_LOG_LEVEL": "WARNING"},
+        env={
+            **os.environ,
+            "GAMEPILOT_LOG_LEVEL": "WARNING",
+            "GAMEPILOT_PROJECT_DIR": os.path.join(scratch, "default"),
+            "GAMEPILOT_WORKSPACE_DIR": os.path.join(scratch, "workspaces", "默认"),
+            "GAMEPILOT_CONFIG_DIR": os.path.join(scratch, "config"),
+        },
     )
 
 

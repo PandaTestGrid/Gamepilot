@@ -234,7 +234,17 @@ pub async fn engine_rpc(
     match received {
         Ok(payload) => {
             if let Some(error) = payload.get("error") {
-                return Err(format!("引擎返回错误: {error}"));
+                // 只把 `message` 给人看。
+                // 之前整块 `{code, message}` 打过去，界面上就是一坨 JSON：
+                // `引擎返回错误: {"code":-32603,"message":"RuntimeError: 『相机』还在被使用…"}`
+                // —— 重点（被哪个界面引用了）全被埋住了。
+                // `code` / `data` 留在日志里排查用，不进用户可见的文案。
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| error.to_string());
+                return Err(format!("引擎返回错误: {message}"));
             }
             Ok(payload.get("result").cloned().unwrap_or(Value::Null))
         }

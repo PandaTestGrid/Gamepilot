@@ -28,13 +28,13 @@ describe('错误条', () => {
     const restart = vi.fn(() => Promise.resolve());
     useEngineStore.setState({
       status: 'ready',
-      missingMethods: ['project.create', 'project.rename'],
+      missingMethods: ['workflow.create', 'workflow.rename'],
       restart,
     });
     render(<ErrorBanner />);
 
     expect(screen.getByText(/引擎是旧进程/)).toBeInTheDocument();
-    expect(screen.getByText(/project\.create/)).toBeInTheDocument();
+    expect(screen.getByText(/workflow\.create/)).toBeInTheDocument();
 
     await user.click(screen.getByText('重启引擎'));
     expect(restart).toHaveBeenCalledTimes(1);
@@ -45,7 +45,7 @@ describe('错误条', () => {
     const restart = vi.fn(() => Promise.resolve());
     useEngineStore.setState({ status: 'ready', missingMethods: [], restart });
     useSessionStore.setState({
-      error: '引擎返回错误: {"code":-32601,"message":"未知方法: project.create"}',
+      error: '引擎返回错误: {"code":-32601,"message":"未知方法: workflow.create"}',
     });
     render(<ErrorBanner />);
 

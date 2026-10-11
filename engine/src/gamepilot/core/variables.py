@@ -1,9 +1,9 @@
 """变量（"黑板"）与参数引用。
 
 蓝图里最有用的东西不是连线本身，而是**把值抽出来共享**：一个坐标、一个阈值、
-一个重试次数，写在变量里，改一处全脚本生效。
+一个重试次数，写在变量里，改一处全工作流生效。
 
-`graph.json` 增量长这样（老脚本不带这段，一样能跑）：
+`graph.json` 增量长这样（老工作流不带这段，一样能跑）：
 
     "variables": {
       "点击X":   {"type": "number", "value": 0.5},
@@ -18,7 +18,7 @@
 
 - `$var`  取变量当前值
 - `$expr` 对变量做简单算术/比较（只支持 + - * / 和比较，不引入表达式语言）
-- 求值发生在**执行那一刻**，所以变量的运行期取值不会影响脚本文件的干净
+- 求值发生在**执行那一刻**，所以变量的运行期取值不会影响工作流文件的干净
 
 变量分两层：**默认值**（存在 graph.json 里）和**运行时值**（跑起来后被 `set` 改），
 每次 run.start 会把运行期值重置成默认值。
@@ -82,7 +82,7 @@ def parse_variables(payload: object) -> dict[str, Variable]:
 
 
 class VariableStore:
-    """运行期变量值（默认值来自脚本，跑起来后可被 set 改）。"""
+    """运行期变量值（默认值来自工作流，跑起来后可被 set 改）。"""
 
     def __init__(self, defaults: dict[str, Variable] | None = None) -> None:
         self._defaults: dict[str, Variable] = dict(defaults or {})
@@ -222,5 +222,5 @@ class VariableRefs:
 
 
 SET_ACTION = "set"
-# 「运行子脚本」：把另一份脚本挂上来继续跑
+# 「运行子工作流」：把另一份工作流挂上来继续跑
 CALL_ACTION = "call"

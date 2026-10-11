@@ -414,6 +414,14 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
    官方示例都走 `useNodesState` 那一套，我们漏了这一步，表现就是"按住拖动画面不动"。
    本项目的做法：回调里把拖动中的坐标记进组件本地表（`dragging`），合进 `nodes` 让画面跟手；
    真源仍是状态图 store，落盘只走 `onNodeDragStop` 一次（不要每移动一像素写一次图表）。
+9. **单行状态条（底栏 28px）里绝不能靠换行/压扁适配窄窗口**。flex 子项默认 `min-width:auto`
+   且可压缩，窗口一窄就会：全角括号那类可断行的地方折成两行（`link dvt（慢）` 的 `（慢）`
+   掉到第二行、盖在抽屉上），中文按钮被挤成竖排文字。做法是——指标与按钮一律
+   `shrink-0 + whitespace-nowrap`，右侧事件摘要 `min-w-0 truncate` **先让位**（它可压缩，
+   指标区 `shrink-0`，谁先被饿死要写死，否则 flex 按比例一起缩，`run` 会被截掉半截），
+   真挤不下时按重要性用容器查询（`@container` + `@max-[...]`）**整枚收起**：
+   查的是状态条自己的宽度，不是窗口宽度（窗口宽还要减掉右边的按钮组）。
+   见 `layout/StatusBar.tsx`。
 
 ## 13. 已知环境坑
 
@@ -432,3 +440,4 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 | 日期 | 版本 | 变更 |
 |---|---|---|
 | — | v1 | 初版：依赖方向、命名、风格、坐标铁律、契约版本、测试矩阵、依赖准入、提交规范、扩展点 SOP、DoD |
+| 2026-10-11 | v1.1 | §12.6-9：单行状态条（底栏）窄窗口下不换行/不压扁，按优先级整枚收起；规则同步 DESIGN §4.2 E |

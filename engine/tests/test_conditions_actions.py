@@ -355,7 +355,7 @@ def test_graph_omits_empty_variables_section() -> None:
 
 
 def test_call_action_runs_sub_script() -> None:
-    """「运行子脚本」：动作触发回调（切脚本由上层负责），没写脚本名要报错。"""
+    """「运行子工作流」：动作触发回调（切工作流由上层负责），没写工作流名要报错。"""
     from gamepilot.core.graph import Edge, Graph
     from gamepilot.core.state_machine import Engine
     from test_state_machine import ScriptedController
@@ -380,17 +380,17 @@ def test_call_action_runs_sub_script() -> None:
     graph.validate()
     engine = Engine(graph, ScriptedController(), on_call=calls.append)
     engine._execute(graph.edges[0])
-    assert calls == ["副本"], "应该触发运行子脚本"
+    assert calls == ["副本"], "应该触发运行子工作流"
 
     # 没有回调时报错但不崩
     engine2 = Engine(graph, ScriptedController())
     engine2._execute(graph.edges[0])
     assert engine2.stats["failed"] >= 1
 
-    # 没写脚本名 → 保存时就拦下
+    # 没写工作流名 → 保存时就拦下
     bad = Graph()
     bad.add_edge(Edge.from_dict({"id": "e1", "action": {"type": "call"}}))
-    with pytest.raises(ValueError, match="没写脚本名"):
+    with pytest.raises(ValueError, match="没写工作流名"):
         bad.validate()
 
 

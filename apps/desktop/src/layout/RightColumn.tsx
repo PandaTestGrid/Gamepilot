@@ -13,7 +13,7 @@ import { type ReactNode } from 'react';
 import { ScriptLibraryPane } from '@/features/library/ScriptLibraryPane';
 import { RecognizerPane } from '@/features/recognizers/RecognizerPane';
 import { cn } from '@/lib/utils';
-import { useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, useGraphStore } from '@/stores/graph.store';
 import { useDeviceStore } from '@/stores/device.store';
 import { useUiStore } from '@/stores/ui.store';
 import type { RightTab } from '@/types';
@@ -31,7 +31,7 @@ export function RightColumn(): ReactNode {
   const tab = useUiStore((state) => state.rightTab);
   const setTab = useUiStore((state) => state.setRightTab);
   const activeId = useDeviceStore((state) => state.activeId);
-  const recognizerCount = useGraphStore((state) => state.graphs[activeId]?.recognizers.length ?? 0);
+  const recognizerCount = useGraphStore((state) => graphForDevice(state, activeId)?.recognizers.length ?? 0);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-panel">

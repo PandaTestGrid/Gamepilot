@@ -24,7 +24,7 @@ INTERNAL_ERROR = -32603
 NOTIFY_READY = "engine.ready"
 NOTIFY_DEVICE_CONNECTING = "device.connecting"
 NOTIFY_DEVICE_CONNECTED = "device.connected"
-# 脚本目录切换（界面顶栏跟着变）
+# 当前工作流切换（界面顶栏跟着变）
 NOTIFY_PROJECT_CHANGED = "project.changed"
 NOTIFY_DEVICE_DISCONNECTED = "device.disconnected"
 NOTIFY_DEVICE_FAILED = "device.failed"
@@ -52,23 +52,22 @@ METHOD_DEVICE_TAP = "device.tap"
 METHOD_DEVICE_SWIPE = "device.swipe"
 METHOD_DEVICE_KEY = "device.key"
 
-# 状态图
-# 工程（脚本目录）与素材
+# 工作区层（= 项目，同一个东西；可以有多个，用户自己选文件夹，最近使用列表 + 显示名
+# 持久化在 config.json）：工作区 › 工作流，契约见 docs/WORKSPACE-CONTRACT.md v4
+METHOD_WORKSPACE_LIST = "workspace.list"
+METHOD_WORKSPACE_ADD = "workspace.add"
+METHOD_WORKSPACE_REMOVE = "workspace.remove"
+METHOD_WORKSPACE_TREE = "workspace.tree"
+# 工作流层：工作流 = 一张状态图（工作区根下的直接子目录）
+METHOD_WORKFLOW_CREATE = "workflow.create"
+METHOD_WORKFLOW_DUPLICATE = "workflow.duplicate"
+METHOD_WORKFLOW_RENAME = "workflow.rename"
+METHOD_WORKFLOW_DELETE = "workflow.delete"
+# 当前工作流的读取 / 切换（RPC 名字按契约保留 project.*，跟已取消的「项目」层级无关）
 METHOD_PROJECT_GET = "project.get"
 METHOD_PROJECT_SET = "project.set"
-METHOD_PROJECT_LIST = "project.list"
-METHOD_WORKSPACE_LIST = "workspace.list"
-METHOD_WORKSPACE_TREE = "workspace.tree"
-METHOD_WORKSPACE_MKDIR = "workspace.mkdir"
-METHOD_WORKSPACE_MIGRATE = "workspace.migrate"  # 老布局 → 工作区>任务  # 在项目下建工作区目录  # 项目>工作区>任务 三层目录树  # 列出工作区（库根）
-METHOD_WORKSPACE_CREATE = "workspace.create"  # 新建工作区
-# 脚本库（多状态图）：一个目录 = 一个状态图；四个方法成功都返回 {items, current}
-METHOD_PROJECT_CREATE = "project.create"
-METHOD_PROJECT_DUPLICATE = "project.duplicate"
-METHOD_PROJECT_RENAME = "project.rename"
-METHOD_PROJECT_DELETE = "project.delete"
 METHOD_TEMPLATE_IMAGE = "template.image"
-# 录制：把手动操作变成脚本里的一步
+# 录制：把手动操作变成工作流里的一步
 METHOD_RECORD_ACTION = "record.action"
 # 图编辑器：加/改/删节点与边
 METHOD_GRAPH_NODE_ADD = "graph.node.add"
@@ -85,7 +84,7 @@ METHOD_RECOGNIZER_REMOVE = "recognizer.remove"
 METHOD_RECOGNIZER_RENAME = "recognizer.rename"
 
 # 运行控制
-# 变量（"黑板"）：改运行期变量值（不写回脚本）
+# 变量（"黑板"）：改运行期变量值（不写回工作流）
 METHOD_VARIABLE_SET = "variable.set"
 # 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置
 METHOD_ACTION_RUN = "action.run"

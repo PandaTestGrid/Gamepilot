@@ -1,19 +1,23 @@
-"""脚本库：一个目录 = 一个状态图（多状态图 = 一个库里的多个目录）。
+"""工作流目录：一个目录 = 一个工作流（= 一张状态图）。
 
-目录布局（契约见 docs/rpc.md「脚本库（多状态图）」）：
+层级见 docs/WORKSPACE-CONTRACT.md v4：**工作区（= 用户选的一个文件夹）› 工作流**，
+工作流是工作区根下的**直接子目录**：
 
-    <库根>/
-    ├── <脚本名>/
-    │   ├── graph.json      状态图（唯一真源）
-    │   └── templates/      识别器模板 PNG
-    └── .trash/             删除的脚本：<名字>-<YYYYmmdd-HHMMSS>/（可恢复）
+    <工作区根>/
+    ├── .trash/                 ← 删掉的工作流（可恢复，不做真删除）
+    ├── 斗技/                    ← 工作流
+    │   ├── graph.json          ← 状态图（唯一真源）
+    │   └── templates/          ← 识别器模板 PNG
+    └── 御魂/
+        └── ...
 
 本模块是**纯文件系统逻辑**，不认识 RPC、不碰 stdout：
 
 - 名称规则统一走 `validate_name`（长度 1~64、禁止 `/ \\ : * ? " < > |`、
   不以 `.` 开头或结尾），错误信息是中文、可直接显示给用户；
-- 列举脚本时跳过 `.trash` 与没有 `graph.json` 的目录；
-- 删除一律是**移动到 `.trash/`，不做真删除**（用户后悔时能捞回来）。
+- 列举工作流时只认**直接子目录 + 含 `graph.json`**，隐藏目录（`.` 开头）一律不算；
+- 删除一律是**移动到回收站，不做真删除**：回收站在哪由调用方定（`trash_into`），
+  工作区里的工作流进 `<工作区>/.trash`（见 `workspace`）。
 
 副作用：所有写操作都会在磁盘上建/改/移目录。
 """
@@ -27,18 +31,26 @@ from typing import Any
 
 from .core.graph import Graph
 
-SCRIPT_FILE = "graph.json"
+GRAPH_FILE = "graph.json"
 TRASH_DIR = ".trash"
 MAX_NAME_LEN = 64
 
-# Windows/macOS 上都非法的文件名字符（含路径分隔符，避免逃出库根）
+# Windows/macOS 上都非法的文件名字符（含路径分隔符，避免逃出工作区根）
 _INVALID_CHARS = '/\\:*?"<>|'
 _TRASH_STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
+def norm_path(path: str) -> str:
+    """统一路径：展开 `~`、绝对化、**解析符号链接**。
+
+    macOS 上 `/var/...` 是 `/private/var/...` 的软链：引擎回给前端的路径必须
+    和 `Path.resolve()` 一致，否则前端拿它当 key 会对不上。
+    """
+    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+
 def _abs(path: str) -> str:
-    """用户给的路径统一成绝对路径（支持 `~`）。"""
-    return os.path.abspath(os.path.expanduser(path))
+    return norm_path(path)
 
 
 def _same_dir(left: str, right: str) -> bool:
@@ -56,22 +68,17 @@ def _require_dir(path: str, what: str) -> str:
     return resolved
 
 
-def library_root(current_root: str) -> str:
-    """库根 = 当前脚本目录的父目录。"""
-    return os.path.dirname(_abs(current_root))
-
-
-def validate_name(name: str) -> str:
-    """校验脚本名，合法时原样返回；非法时抛中文 ValueError（可直接给用户看）。"""
+def validate_name(name: str, what: str = "工作流名") -> str:
+    """校验名字（工作流名等），合法时原样返回；非法时抛中文 ValueError（可直接给用户看）。"""
     if not name:
-        raise ValueError("脚本名不能为空")
+        raise ValueError(f"{what}不能为空")
     if len(name) > MAX_NAME_LEN:
-        raise ValueError(f"脚本名太长：最多 {MAX_NAME_LEN} 个字符（当前 {len(name)} 个）")
+        raise ValueError(f"{what}太长：最多 {MAX_NAME_LEN} 个字符（当前 {len(name)} 个）")
     bad = sorted({char for char in name if char in _INVALID_CHARS})
     if bad:
-        raise ValueError(f"脚本名不能包含这些字符：{' '.join(bad)}")
+        raise ValueError(f"{what}不能包含这些字符：{' '.join(bad)}")
     if name.startswith(".") or name.endswith("."):
-        raise ValueError("脚本名不能以 . 开头或结尾")
+        raise ValueError(f"{what}不能以 . 开头或结尾")
     return name
 
 
@@ -83,62 +90,79 @@ def _count_templates(root: str) -> int:
         return sum(1 for entry in entries if entry.is_file())
 
 
-def list_scripts(base: str) -> list[dict[str, Any]]:
-    """列出库根下的脚本目录（含 `graph.json` 的子目录），按 name 排序。
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
 
-    - 跳过 `.trash`（回收站不是脚本）与没有 `graph.json` 的目录；
-    - `base` 不是目录时返回空列表（列表接口不该因为库还没建就报错）；
-    - 每项：`{name, root, nodes, edges, recognizers, templates}`，
-      其中 `templates` 是 `templates/` 里的**文件数**。
+
+def workflow_modified(root: str) -> int:
+    """工作流最近一次改动（epoch 秒，整数）：`max(graph.json mtime, 工作流目录 mtime)`。
+
+    面板里显示「10 分钟」这种相对时间就是拿它算的。
+    """
+    return int(max(_mtime(root), _mtime(os.path.join(root, GRAPH_FILE))))
+
+
+def list_workflows(base: str) -> list[dict[str, Any]]:
+    """列出**工作区根** `base` 下的工作流（含 `graph.json` 的直接子目录），按 name 排序。
+
+    - 隐藏目录（`.` 开头，含 `.trash`）与没有 `graph.json` 的目录都不算工作流；
+    - `base` 不是目录时返回空列表（列表接口不该因为工作区还没建就报错）；
+    - 每项：`{name, root, nodes, edges, recognizers, templates, modified}`，
+      其中 `templates` 是 `templates/` 里的**文件数**、`modified` 见 `workflow_modified`。
     """
     root = _abs(base)
     if not os.path.isdir(root):
         return []
     with os.scandir(root) as entries:
-        names = sorted(entry.name for entry in entries if entry.is_dir() and entry.name != TRASH_DIR)
+        names = sorted(entry.name for entry in entries if entry.is_dir() and not entry.name.startswith("."))
     items: list[dict[str, Any]] = []
     for name in names:
-        script_root = os.path.join(root, name)
-        if not os.path.isfile(os.path.join(script_root, SCRIPT_FILE)):
+        workflow_root = os.path.join(root, name)
+        graph_path = os.path.join(workflow_root, GRAPH_FILE)
+        if not os.path.isfile(graph_path):
             continue
-        graph = Graph.load(os.path.join(script_root, SCRIPT_FILE))
+        graph = Graph.load(graph_path)
         items.append(
             {
                 "name": name,
-                "root": script_root,
+                "root": workflow_root,
                 "nodes": len(graph.nodes),
                 "edges": len(graph.edges),
                 "recognizers": len(graph.recognizers),
-                "templates": _count_templates(script_root),
+                "templates": _count_templates(workflow_root),
+                "modified": workflow_modified(workflow_root),
             }
         )
     return items
 
 
-def create_script(base: str, name: str) -> str:
-    """新建空脚本目录（空 `graph.json` + `templates/`），返回新 root。"""
+def create_workflow(base: str, name: str) -> str:
+    """在工作区根 `base` 下新建空工作流（空 `graph.json` + `templates/`），返回新 root。"""
     validate_name(name)
-    root = _require_dir(base, "库目录")
+    root = _require_dir(base, "工作区目录")
     target = os.path.join(root, name)
     if os.path.exists(target):
-        raise ValueError(f"同库里已经有叫「{name}」的脚本了")
+        raise ValueError(f"已经有叫「{name}」的工作流了")
     os.makedirs(os.path.join(target, "templates"))
-    Graph.empty(target).save(os.path.join(target, SCRIPT_FILE))
+    Graph.empty(target).save(os.path.join(target, GRAPH_FILE))
     return target
 
 
-def duplicate_script(src_root: str, base: str, name: str) -> str:
-    """复制一个已有脚本（`graph.json` + 整个 `templates/`）到新名字，返回新 root。"""
+def duplicate_workflow(src_root: str, base: str, name: str) -> str:
+    """复制一个已有工作流（`graph.json` + 整个 `templates/`）到新名字，返回新 root。"""
     validate_name(name)
     source = _abs(src_root)
-    if not os.path.isfile(os.path.join(source, SCRIPT_FILE)):
-        raise ValueError(f"脚本不存在或缺少 {SCRIPT_FILE}: {source}")
-    root = _require_dir(base, "库目录")
+    if not os.path.isfile(os.path.join(source, GRAPH_FILE)):
+        raise ValueError(f"工作流目录不存在: {source}")
+    root = _require_dir(base, "工作区目录")
     target = os.path.join(root, name)
     if os.path.exists(target):
-        raise ValueError(f"同库里已经有叫「{name}」的脚本了")
+        raise ValueError(f"已经有叫「{name}」的工作流了")
     os.makedirs(target)
-    shutil.copy2(os.path.join(source, SCRIPT_FILE), os.path.join(target, SCRIPT_FILE))
+    shutil.copy2(os.path.join(source, GRAPH_FILE), os.path.join(target, GRAPH_FILE))
     source_templates = os.path.join(source, "templates")
     target_templates = os.path.join(target, "templates")
     if os.path.isdir(source_templates):
@@ -148,45 +172,50 @@ def duplicate_script(src_root: str, base: str, name: str) -> str:
     return target
 
 
-def rename_script(root: str, name: str) -> str:
-    """重命名脚本目录（同库内改名），返回新 root。"""
+def rename_workflow(root: str, name: str) -> str:
+    """重命名工作流目录（同工作区内改名），返回新 root。"""
     validate_name(name)
-    source = _require_dir(root, "脚本目录")
+    source = _require_dir(root, "工作流目录")
     target = os.path.join(os.path.dirname(source), name)
     if os.path.exists(target) and not _same_dir(source, target):
-        raise ValueError(f"同库里已经有叫「{name}」的脚本了")
+        raise ValueError(f"已经有叫「{name}」的工作流了")
     os.rename(source, target)
     return target
 
 
-def trash_script(root: str) -> str:
-    """把脚本移进 `<父目录>/.trash/<名字>-<YYYYmmdd-HHMMSS>/`（**不做真删除**）。
+def trash_into(root: str, trash: str, what: str = "目录") -> str:
+    """把目录 `root` 移进指定的回收站 `trash`：`<trash>/<名字>-<YYYYmmdd-HHMMSS>/`。
 
-    返回回收站里的路径；同一秒内删两个同名脚本时追加序号，不覆盖前一个。
+    **不做真删除**，返回回收站里的路径；同一秒内删两个同名目录时追加序号，不覆盖前一个。
+    调用方决定回收站在哪：工作区里的工作流进 `<工作区>/.trash`（见 `workspace`）。
+    `what` 只影响报错文案（工作流目录 / 工作区目录……）。
     """
-    source = _require_dir(root, "脚本目录")
-    script_name = os.path.basename(source)
-    trash_dir = os.path.join(os.path.dirname(source), TRASH_DIR)
-    os.makedirs(trash_dir, exist_ok=True)
+    source = _require_dir(root, what)
+    # 回收站路径按调用方给的写法保留（`<配置目录>/.trash` 不解析符号链接，
+    # 返回值要和它一致）；源目录仍然取 realpath，保证等价路径也能删。
+    destination = os.path.abspath(os.path.expanduser(trash))
+    os.makedirs(destination, exist_ok=True)
+    name = os.path.basename(source)
     stamp = time.strftime(_TRASH_STAMP_FORMAT, time.localtime())
-    target = os.path.join(trash_dir, f"{script_name}-{stamp}")
+    target = os.path.join(destination, f"{name}-{stamp}")
     index = 2
     while os.path.exists(target):
-        target = os.path.join(trash_dir, f"{script_name}-{stamp}-{index}")
+        target = os.path.join(destination, f"{name}-{stamp}-{index}")
         index += 1
     shutil.move(source, target)
     return target
 
 
 __all__ = [
+    "GRAPH_FILE",
     "MAX_NAME_LEN",
-    "SCRIPT_FILE",
     "TRASH_DIR",
-    "create_script",
-    "duplicate_script",
-    "library_root",
-    "list_scripts",
-    "rename_script",
-    "trash_script",
+    "create_workflow",
+    "duplicate_workflow",
+    "list_workflows",
+    "norm_path",
+    "rename_workflow",
+    "trash_into",
     "validate_name",
+    "workflow_modified",
 ]

@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 import pytest
@@ -104,6 +105,8 @@ def test_mock_device_shape() -> None:
 
 
 def _call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    # 当前脚本与工作区都指到临时目录：子进程绝不能碰仓库里的 workspaces/
+    scratch = tempfile.mkdtemp(prefix="gamepilot-discovery-")
     proc = subprocess.Popen(
         [sys.executable, "-m", MODULE],
         stdin=subprocess.PIPE,
@@ -111,7 +114,13 @@ def _call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        env={**os.environ, "GAMEPILOT_LOG_LEVEL": "WARNING"},
+        env={
+            **os.environ,
+            "GAMEPILOT_LOG_LEVEL": "WARNING",
+            "GAMEPILOT_PROJECT_DIR": os.path.join(scratch, "default"),
+            "GAMEPILOT_WORKSPACE_DIR": os.path.join(scratch, "workspaces", "默认"),
+            "GAMEPILOT_CONFIG_DIR": os.path.join(scratch, "config"),
+        },
     )
     try:
         assert proc.stdout is not None

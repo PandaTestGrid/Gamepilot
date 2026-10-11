@@ -41,6 +41,15 @@ Rust 桥的调度规则：
 { "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "未知方法: foo", "data": { "known": ["engine.ping"] } } }
 ```
 
+**错误文案怎么走到界面**（踩过：错误条上显示一整坨 JSON）：
+
+- 引擎的 `error.message` 是 `f"{异常类名}: {原因}"`（例如 `RuntimeError: 『相机』还在被使用，先改掉再删：…`），
+  `data` 是给排查用的附加信息，**都不该原样糊到界面上**；
+- Rust 桥只取 `error.message` 拼成 `引擎返回错误: …`（`src-tauri/src/engine.rs`）；
+- 前端 `lib/rpc.ts: rpc()` 是**唯一出口**：把 reject 值统一成 message 清理过的 `Error`
+  （拆信封 → 去掉 Python 异常类名前缀 → 去掉 `KeyError` 的引号，原始值挂在 `cause` 上）。
+  所以调用方只管 `error.message`，不用各自拆信封；文案规则的单测在 `lib/rpc.test.ts`。
+
 通知（引擎 → 前端，无 `id`）：
 
 ```json
@@ -193,9 +202,15 @@ Rust 桥的调度规则：
 
 ### `graph.get` / `graph.save`
 
-- `graph.get`：`{ deviceId }` → 状态图 JSON
-- `graph.save`：`{ deviceId, graph }` → **校验后**写盘并热重载；
-  校验失败返回 `-32603`，错误信息指明是哪个节点/边/识别器的问题
+**状态图属于项目（脚本），不属于设备**：`deviceId` 一律**可选**。
+
+- `graph.get`：`{}` → 项目里 `graph.json` 的内容（**没连设备也能读**，画布就用它）；
+  `{ deviceId }` → 那台设备会话里的那份（带它的运行态），老调用方仍然可用
+- `graph.save`：`{ graph }` → **校验后**写盘，并让**所有已连接会话热重载**
+  （各自当前节点与运行态保留）—— 所以在 A 设备上录的流程，B 设备连上就能跑；
+  `{ deviceId, graph }` → 只写那台设备会话那份（兼容旧路径）
+- 校验失败返回 `-32603`，错误信息指明是哪个节点/边/识别器的问题
+- 没有当前脚本时报「还没有选择脚本（工作流）」，不会悄悄写到引擎的 cwd
 
 ### `record.template`
 
@@ -208,11 +223,16 @@ Rust 桥的调度规则：
   "label": "center",
   "threshold": 0.8,
   "nodeId": "home", "nodeName": "首页",
+  "allocateNodeId": false,
   "asEnter": true, "asActionTarget": true
 }
 ```
 
-- result：`{ "label", "mode": "template" | "color", "template", "rect", "graph" }`
+- `allocateNodeId: true` = 「这是**新**界面，id 由引擎分配」：界面上的 `nodeId` 是本地序号
+  （`node_1`、`node_2`…），应用一重启就从 1 重新数，传下来必然撞上**上一次会话**建的界面 ——
+  引擎按 id 取到那个老节点，用户看到的是"我新录的界面变成了老界面"。走这条路时忽略传下来的 `nodeId`
+- result：`{ "label", "mode": "template" | "color", "template", "rect", "nodeId", "graph" }`
+  （`nodeId` = 这次模板挂到了哪个界面上，可能是引擎刚分配的）
 - **纯色区域自动降级成颜色识别器**（`mode: "color"`）：纯色模板在归一化互相关里是退化的，
   会在画面任意位置给满分；宁可换算法也不报假命中
 - 设备还没出帧时报「还没有可用画面」，不会写出空模板
@@ -220,6 +240,29 @@ Rust 桥的调度规则：
 ### `recognizer.threshold`
 
 `{ deviceId, label, threshold }` → 写回阈值并热重载（阈值滑块拖动时调用）。
+
+### `recognizer.rename`
+
+`{ deviceId, label, to }` → `{ from, to, refs: { nodes, edges, scores }, graph }`
+
+- 给识别器改名，**所有引用一起改**：节点 `enter` / 边 `when`·`condition`（all_of / any_of /
+  none_of）/ 动作 `target`·`to_target` / 动作里 `$score` 引用到的标签。
+  少改一处，`validate()` 就会在保存时报"引用了未定义的识别器"
+- `refs` 是改动处数，界面用来说明"顺带更新了几处引用"
+- **模板文件不跟着改名**：spec 里存的是相对路径（`templates/x.png`），文件叫什么对匹配没影响
+- 名字校验（`core/graph.py: validate_recognizer_label`）：非空、≤48 字符、不能带 `/` `\`
+  或控制字符、不能用保留名 `always`（"无条件边"的哨兵值）、不能和现有识别器重名
+- 前端在输入框里做了同一套规则的即时校验（`features/recognizers/recognizer-name.ts`），
+  但**引擎才是权威**：它拦下来（重名、写盘失败）的原因照样会出现在错误条与事件栏
+
+### `recognizer.remove`
+
+`{ deviceId, label }` → `{ removed, graph }`；被节点/边引用时**拒绝删除**并列出被谁用了
+（改名不需要这道限制：引用会跟着改）。
+
+- 删的不只是 spec：`templates/<label>.png` 也会一起清掉。颜色识别器（纯色区域降级来的）
+  spec 里没有 `template` 字段，但录制时同样写了那个文件 —— 只按 spec 删会留下它，
+  用户会以为"没删干净"
 
 ### `run.start` / `run.stop`
 
@@ -264,7 +307,12 @@ URI 里用 `udid`（`pymobiledevice3 usbmux list` 的 `Identifier`）。
 
 ### `graph.node.add` / `graph.node.update` / `graph.node.remove` / `graph.edge.add`（图编辑器）
 
-- `graph.node.add { name?, nodeId?, enter? }` → `{ nodeId, graph }`（不传 nodeId 自动生成）
+这四个方法的 `deviceId` 也**可选**：不带 = 直接改**项目脚本**（`graph.json`）并让所有会话热重载，
+带 = 只改那台设备会话里的图（兼容旧路径）。
+
+- `graph.node.add { name?, nodeId?, enter? }` → `{ nodeId, graph }`（不传 nodeId 时**分配一个没用过的 id**：
+  `n_1`、`n_2`… 只增不减 —— 删过节点之后不能再用 `len(nodes)+1` 现算，那会撞上还活着的 id，
+  把老界面顶掉，见 `session.next_node_id`。传了 nodeId 就是"往这个已有界面上加"）
 - `graph.node.update { nodeId, patch: { name?, enter?, timeout_ms? } }` → `{ nodeId, graph }`
 - `graph.node.remove { nodeId }` → `{ graph }`；**引用它的边会一起删掉**（否则图不合法）
 - `graph.edge.add { from?, to?, when?, action? }` → `{ edgeId, graph }`；
@@ -275,34 +323,48 @@ URI 里用 `udid`（`pymobiledevice3 usbmux list` 的 `Identifier`）。
 > 界面在 `engine.ready` / `engine.info` 里拿到方法表做能力校验（`apps/desktop/src/lib/engine-methods.ts`），
 > 缺方法就把顶栏标成「引擎旧进程 · 重启」并给出一键重启 —— **新增前端会调用的方法时，把那行加进那张清单**。
 
-### `project.get` / `project.set` / `project.list`（脚本目录）
+### `project.get` / `project.set`（当前工作流）
 
-一个目录 = 一个脚本：`graph.json`（状态图真源）+ `templates/`（录制的模板截图）。
+一个工作流 = 一个目录：`graph.json`（状态图真源）+ `templates/`（录制的模板截图）。
 
-- `project.get` → `{ root, graphPath, nodes, edges, recognizers, templates }`
+- `project.get` → `{ root, graphPath, nodes, edges, recognizers, templates }`。
+  **「没有当前工作流」是一等状态**：没选过工作流时 `root` 为空字符串（不伪造路径、不偷偷建目录），
+  界面据此显示欢迎卡片。
 - `project.set { dir }` → 切到该目录（不存在就创建），**热重载所有已连接设备的状态图**
   （保留各自当前节点与运行态），并广播 `project.changed`
-- `project.list { base? }` → 列出该目录下所有像工程的子目录（含 `graph.json` 的）：
-  `{ items: [{ name, root, nodes, edges, recognizers, templates }] }`（按 name 排序，不含 `.trash`）
 
-### 脚本库（多状态图）：`project.create` / `project.duplicate` / `project.rename` / `project.delete`
+### 工作区 › 工作流（目录）
 
-多状态图 = **多个脚本目录**（一个目录一份 `graph.json` + 自己的 `templates/`），互相隔离。
-四个方法都作用在"库"上（默认库根 = 当前脚本目录的父目录，可用 `base` 指定），
-**成功后统一返回 `{ items, current }`**（刷新后的整份列表 + 当前脚本 root），前端一次调用即可重绘。
+层级：**工作区（用户选的文件夹，可以有多个；工作区就是项目）› 工作流（= 一张状态图）**。
 
-| 方法 | 参数 | 语义 |
+| 方法 | 参数 | 返回 |
 |---|---|---|
-| `project.create` | `{ name, base? }` | 新建空脚本目录（空 `graph.json` + `templates/`），**并切换过去** |
-| `project.duplicate` | `{ dir, name }` | 复制一个已有脚本（`graph.json` + 整个 `templates/`）到新名字，**并切换过去** |
-| `project.rename` | `{ dir, name }` | 重命名脚本目录；若它正是当前脚本，当前脚本跟着改 |
-| `project.delete` | `{ dir }` | **移到 `<base>/.trash/<名字>-<时间戳>/`（可恢复，不做真删除）**；若删的是当前脚本，自动切到列表里剩下的第一个（一个都不剩则回到 `default`） |
+| `workspace.list` | `{}` | `{ active, recommended, trashRoot, items: [{ name, root, active, exists }] }` |
+| `workspace.add` | `{ dir, name?, create? }` | `{ root, name, tree, current, items, trashRoot }` |
+| `workspace.remove` | `{ dir, deleteFiles? }` | `{ active, items, tree, current, trashed, trashRoot }` |
+| `workspace.tree` | `{}` | `{ root, workflows: [{ name, root, nodes, edges, recognizers, templates, modified }] }` |
+| `workflow.create` | `{ name }` | `{ created, current, items }`（**name 必填**，界面会先弹输入框让你起名） |
+| `workflow.duplicate` | `{ dir, name? }` | `{ created, current, items }` |
+| `workflow.rename` | `{ dir, name }` | `{ root, current, items }` |
+| `workflow.delete` | `{ dir }` | `{ trashed, current, items }` |
 
-名称规则（引擎校验，错误信息要能直接给用户看）：
+要点：
 
-- 长度 1~64；不允许 `/` `\` `:` `*` `?` `"` `<` `>` `|`；不允许以 `.` 开头或结尾
-- 不允许与同库中已有脚本重名
-- `base` 默认为当前脚本的父目录；`base` 不存在时报错
+- **工作区 = 用户自己选的文件夹**（任意绝对路径），记在 `<配置目录>/config.json` 的
+  `{ active, workspaces, names }` 里，按最近使用排序；`names` 是"显示名"（界面上输的名字，
+  可以是 `我的工作区` 而目录仍叫 `game-a`）；`GAMEPILOT_CONFIG_DIR` 换配置目录，
+  `GAMEPILOT_WORKSPACE_DIR` 直接覆盖当前工作区（测试逃生口，跳过配置文件）。
+- **接入一个空文件夹时什么都不建**：没有默认工作流、没有默认目录，等用户点「＋」（新建会话）。
+- 工作流 = 工作区根下**含 `graph.json` 的直接子目录**；隐藏目录（含 `.trash`）不算。
+- 工作流摘要：`{ name, root, nodes, edges, recognizers, templates }`；`modified` 是 epoch 秒，
+  界面用来显示「10 分钟」这种相对时间。
+- **删除一律可恢复**：工作流 → `<工作区>/.trash/<名字>-<时间戳>/`；
+  整个工作区（`deleteFiles: true`）→ `<配置目录>/.trash/`（**不是 rm -rf**）。
+  `deleteFiles: false` 只从工作区列表移除，磁盘一个字节不动。
+- 删的是当前工作流就自动切到剩下的第一个；一个都不剩就保持"没有当前工作流"。
+
+界面侧规矩（浮层面板、⌘O、原生选目录 + 手输兜底、添加工作区要输名字、行内二次确认、
+禁止 `window.prompt`）见 **[docs/WORKSPACE-CONTRACT.md](./WORKSPACE-CONTRACT.md)** —— 那份是完整事实来源。
 
 ### `template.image`
 

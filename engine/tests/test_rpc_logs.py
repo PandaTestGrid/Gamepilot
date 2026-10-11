@@ -95,6 +95,9 @@ def test_install_attaches_to_root_logger_and_pushes_to_the_protocol_stream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("GAMEPILOT_PROJECT_DIR", str(tmp_path / "default"))
+    # 工作区与配置目录也隔离：测试不碰仓库 workspaces/、也不碰用户真实配置
+    monkeypatch.setenv("GAMEPILOT_WORKSPACE_DIR", str(tmp_path / "workspaces" / "默认"))
+    monkeypatch.setenv("GAMEPILOT_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("GAMEPILOT_LOG_LEVEL", "WARNING")
     out = io.StringIO()
     server = RpcServer(io.StringIO(), out)

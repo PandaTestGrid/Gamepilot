@@ -189,6 +189,8 @@ export interface RecordResult {
   readonly mode: 'template' | 'color';
   readonly template: string;
   readonly rect: readonly [number, number, number, number];
+  /** 这次模板挂在哪个界面上：`allocateNodeId` 时是**引擎分配**的 id，不一定是传下去的那个 */
+  readonly nodeId?: string | null;
   readonly graph: GraphPayload;
 }
 
@@ -342,8 +344,15 @@ export async function disconnectDevice(deviceId: string): Promise<void> {
   await rpc('device.disconnect', { deviceId });
 }
 
-export function graphGet(deviceId: string): Promise<GraphPayload> {
-  return rpc<GraphPayload>('graph.get', { deviceId });
+/**
+ * 读当前脚本的图。
+ *
+ * `deviceId` **可选**：传了 = 那台设备会话里的那份（带它的运行态）；
+ * 不传 = 直接读项目里的 `graph.json` —— 没连设备也能看脚本
+ * （状态图属于项目，设备只是"在哪台机器上跑"）。
+ */
+export function graphGet(deviceId?: string): Promise<GraphPayload> {
+  return rpc<GraphPayload>('graph.get', deviceId ? { deviceId } : {});
 }
 
 /** 调试：给一条边设/清断点（走到这里暂停） */
@@ -425,26 +434,35 @@ export function recordAction(
 }
 
 export function graphNodeAdd(
-  deviceId: string,
   params: { nodeId?: string; name?: string; enter?: string[] } = {},
+  deviceId?: string,
 ): Promise<{ nodeId: string; graph: GraphPayload }> {
-  return rpc<{ nodeId: string; graph: GraphPayload }>('graph.node.add', { deviceId, ...params });
+  return rpc<{ nodeId: string; graph: GraphPayload }>('graph.node.add', {
+    ...(deviceId ? { deviceId } : {}),
+    ...params,
+  });
 }
 
 export function graphNodeUpdate(
-  deviceId: string,
   nodeId: string,
   patch: { name?: string; enter?: string[]; timeout_ms?: number },
+  deviceId?: string,
 ): Promise<{ nodeId: string; graph: GraphPayload }> {
-  return rpc<{ nodeId: string; graph: GraphPayload }>('graph.node.update', { deviceId, nodeId, patch });
+  return rpc<{ nodeId: string; graph: GraphPayload }>('graph.node.update', {
+    ...(deviceId ? { deviceId } : {}),
+    nodeId,
+    patch,
+  });
 }
 
-export function graphNodeRemove(deviceId: string, nodeId: string): Promise<{ graph: GraphPayload }> {
-  return rpc<{ graph: GraphPayload }>('graph.node.remove', { deviceId, nodeId });
+export function graphNodeRemove(nodeId: string, deviceId?: string): Promise<{ graph: GraphPayload }> {
+  return rpc<{ graph: GraphPayload }>('graph.node.remove', {
+    ...(deviceId ? { deviceId } : {}),
+    nodeId,
+  });
 }
 
 export function graphEdgeAdd(
-  deviceId: string,
   params: {
     from?: string | null;
     to?: string | null;
@@ -452,8 +470,12 @@ export function graphEdgeAdd(
     action?: Record<string, unknown>;
     condition?: Record<string, unknown>;
   },
+  deviceId?: string,
 ): Promise<{ edgeId: string; graph: GraphPayload }> {
-  return rpc<{ edgeId: string; graph: GraphPayload }>('graph.edge.add', { deviceId, ...params });
+  return rpc<{ edgeId: string; graph: GraphPayload }>('graph.edge.add', {
+    ...(deviceId ? { deviceId } : {}),
+    ...params,
+  });
 }
 
 /** 模板截图（识别器录的是什么，界面要显示出来） */
@@ -469,7 +491,7 @@ export function templateImage(label: string, grayscale = false): Promise<Templat
   return rpc<TemplateImage>('template.image', { label, grayscale });
 }
 
-/** 脚本（工程）目录：当前在哪、有哪些、切换过去 */
+/** 当前工作流：在哪、图里有什么（`project.get` / `project.set` 的返回，语义不变）。 */
 export interface ProjectInfo {
   readonly root: string;
   readonly graphPath: string;
@@ -479,18 +501,47 @@ export interface ProjectInfo {
   readonly templates: number;
 }
 
-export interface ProjectSummary {
+/* ------------------------------------------------------------------ *
+ * 工作区（= 项目，同一个东西）› 工作流（契约：docs/WORKSPACE-CONTRACT.md **v4**）
+ *
+ * 层级只有两层（v4 §0）：
+ *   工作区 = 用户选的一个文件夹（可以有多个，列表按最近使用排序）
+ *   └── 工作流 = 一张流程图 = `graph.json` + `templates/`（可以有多个）
+ *
+ * 「项目」那一层已经取消：项目层的四个写方法（list/create/rename/delete）全部下线，
+ * 只剩 `project.get` / `project.set`（当前工作流的读取/切换）。
+ * 「脚本」也不当层级名，统一叫**工作流**（内部类型名 `Workflow*`）。
+ * ------------------------------------------------------------------ */
+
+/** 工作区列表里的一项：`name` = 用户起的名字（默认是目录名），`exists` = 目录还在不在。 */
+export interface WorkspaceSummary {
+  readonly name: string;
+  readonly root: string;
+  readonly active: boolean;
+  readonly exists: boolean;
+}
+
+/** 工作流摘要（树、面板、「跳到工作流」都用它）。 */
+export interface WorkflowSummary {
   readonly name: string;
   readonly root: string;
   readonly nodes: number;
   readonly edges: number;
   readonly recognizers: number;
   readonly templates: number;
+  /** 最新一次改动时间（epoch 秒，0 = 不知道）—— 面板里显示「10 分钟」用它 */
+  readonly modified: number;
 }
 
-/** 库操作（新建/复制/重命名/删除）的统一返回：刷新后的整份列表 + 当前脚本 root。 */
-export interface ScriptLibrary {
-  readonly items: ProjectSummary[];
+/** 整棵树：工作区根（标题行显示它的 basename）+ 这个工作区里的所有工作流。 */
+export interface WorkspaceTreePayload {
+  readonly root: string;
+  readonly workflows: readonly WorkflowSummary[];
+}
+
+/** 工作流写操作（workflow.*）的统一返回：刷新后的工作流列表 + 当前工作流 root。 */
+export interface WorkflowLibrary {
+  readonly items: WorkflowSummary[];
   readonly current: string;
 }
 
@@ -502,80 +553,111 @@ export function projectSet(dir: string): Promise<ProjectInfo> {
   return rpc<ProjectInfo>('project.set', { dir });
 }
 
-/** 工作区 = 一个"库根"目录，里面每个子目录是一个任务（脚本） */
-export interface WorkspaceSummary {
-  readonly name: string;
+/* ---------------------- 工作区层：workspace.* ---------------------- */
+
+/** `workspace.list`：当前工作区 + 最近使用过的列表 + 系统推荐目录 + 全局回收站。 */
+export interface WorkspaceListResult {
+  /** 当前工作区 root；`null` = 还没选过任何一个 */
+  readonly active: string | null;
+  /** 系统推荐目录（面板底部「默认工作区」用它） */
+  readonly recommended: string;
+  readonly items: readonly WorkspaceSummary[];
+  /** 全局回收站绝对路径（`<配置目录>/.trash`）—— 移除工作区时界面要显示它 */
+  readonly trashRoot: string;
+}
+
+/** 前端只靠这一个方法就能画出整棵树（`workflows[]` 就是每一行要的数）。 */
+export function workspaceTree(): Promise<WorkspaceTreePayload> {
+  return rpc<WorkspaceTreePayload>('workspace.tree', {});
+}
+
+/** 最近用过的工作区列表（面板那个浮层用它；树用 `workspace.tree`）。 */
+export function workspaceList(): Promise<WorkspaceListResult> {
+  return rpc<WorkspaceListResult>('workspace.list', {});
+}
+
+/** 工作区写操作（add/remove）的统一返回：列表 + 当前工作区的整棵树 + 当前工作流 root。 */
+export interface WorkspaceMutation {
+  readonly items: readonly WorkspaceSummary[];
+  readonly tree: WorkspaceTreePayload;
+  readonly current: string;
+  /** 全局回收站绝对路径（引擎给了就显示绝对路径，拿不到时界面降级说明） */
+  readonly trashRoot: string;
+}
+
+export interface WorkspaceAdded extends WorkspaceMutation {
   readonly root: string;
-  readonly exists: boolean;
-}
-
-export function workspaceList(): Promise<{ items: WorkspaceSummary[] }> {
-  return rpc<{ items: WorkspaceSummary[] }>('workspace.list', {});
-}
-
-/** 新建工作区（在仓库根 workspaces/<名字>/，不覆盖同名） */
-export function workspaceCreate(name: string): Promise<{ items: WorkspaceSummary[] }> {
-  return rpc<{ items: WorkspaceSummary[] }>('workspace.create', { name });
-}
-
-/** 三层目录树：项目 > 工作区 > 任务（任务 = 一张状态图） */
-export interface TreeTask {
+  /** 登记后列表里显示的名字（用户输的，或退回的目录名） */
   readonly name: string;
-  readonly root: string;
-  readonly nodes: number;
-  readonly edges: number;
-  readonly recognizers: number;
 }
 
-export interface TreeWorkspace {
-  readonly name: string;
-  readonly root: string;
-  readonly tasks: readonly TreeTask[];
+export interface WorkspaceRemoved extends WorkspaceMutation {
+  /** 移掉的是当前工作区时这里是新的当前工作区；列表空了就是 null */
+  readonly active: string | null;
+  /** 真删的情况下 = 它被移到的回收站路径（`deleteFiles:false` 时为空） */
+  readonly trashed: string;
 }
 
-export interface TreeProject {
-  readonly name: string;
-  readonly root: string;
-  readonly workspaces: readonly TreeWorkspace[];
+/**
+ * 登记一个工作区并切过去。
+ *
+ * - `name`：用户输的名字（界面第二步输的，默认预填目录名）；省略/空白 → 引擎退回 `basename(dir)`。
+ * - `create` 默认 true（目录不存在就建）；false 且不存在 → 引擎报「工作区目录不存在」。
+ * - 同一个 `dir` 再加一次是**幂等**的：提到最前、设为当前，**名字更新成这次传的**。
+ * - **不建任何目录内容**（v4 §2.1：空文件夹保持空着，连一个默认子目录都不建）。
+ */
+export function workspaceAdd(dir: string, name?: string, create = true): Promise<WorkspaceAdded> {
+  return rpc<WorkspaceAdded>('workspace.add', {
+    dir,
+    ...(name && name.trim() ? { name: name.trim() } : {}),
+    create,
+  });
 }
 
-/** 在某个项目（库根）下建工作区目录 */
-export function workspaceMkdir(
-  project: string,
-  name: string,
-): Promise<{ created: string; projects: TreeProject[] }> {
-  return rpc<{ created: string; projects: TreeProject[] }>('workspace.mkdir', { project, name });
+/**
+ * 移除一个工作区。
+ *
+ * `deleteFiles: true`（默认）= 把整个目录**移到全局回收站**（可恢复，不是 rm -rf）；
+ * `deleteFiles: false` = 只从列表移除，磁盘一个字节不动。界面必须把这两种差别说清楚。
+ */
+export function workspaceRemove(dir: string, deleteFiles: boolean): Promise<WorkspaceRemoved> {
+  return rpc<WorkspaceRemoved>('workspace.remove', { dir, deleteFiles });
 }
 
-export function workspaceTree(): Promise<{ projects: TreeProject[] }> {
-  return rpc<{ projects: TreeProject[] }>('workspace.tree', {});
+/* ---------------------- 工作流层：workflow.* ---------------------- */
+
+/**
+ * 新建工作流并切过去。**`name` 必填**（v4 §2.2）：界面会弹输入框，省略时引擎报「缺少参数 name」。
+ * 建在**当前工作区根**下；没有当前工作区 → 引擎报「请先选择工作区」。
+ */
+/** 新建工作流并切过去（`name` 必填：界面弹输入框让你起名，引擎不会替你起） */
+export function workflowCreate(name: string): Promise<WorkflowLibrary & { created: string }> {
+  return rpc<WorkflowLibrary & { created: string }>('workflow.create', { name });
 }
 
-export function projectList(base?: string): Promise<{ items: ProjectSummary[] }> {
-  return rpc<{ items: ProjectSummary[] }>('project.list', base ? { base } : {});
+export function workflowRename(dir: string, name: string): Promise<WorkflowLibrary & { root: string }> {
+  return rpc<WorkflowLibrary & { root: string }>('workflow.rename', { dir, name });
 }
 
-/** 新建空脚本目录并切过去（多状态图 = 多个目录，见 docs/rpc.md「脚本库」）。 */
-export function projectCreate(name: string, base?: string): Promise<ScriptLibrary> {
-  return rpc<ScriptLibrary>('project.create', base ? { name, base } : { name });
+/** 复制一个已有工作流（graph.json + templates/）到新名字并切过去；`name` 省略 = 引擎自动「<原名>-副本」。 */
+export function workflowDuplicate(
+  dir: string,
+  name?: string,
+): Promise<WorkflowLibrary & { created: string }> {
+  return rpc<WorkflowLibrary & { created: string }>('workflow.duplicate', {
+    dir,
+    ...(name && name.trim() ? { name: name.trim() } : {}),
+  });
 }
 
-/** 复制一个已有脚本（graph.json + templates/）到新名字，并切过去。 */
-export function projectDuplicate(dir: string, name: string): Promise<ScriptLibrary> {
-  return rpc<ScriptLibrary>('project.duplicate', { dir, name });
+/** 工作流目录移进当前工作区的 `.trash/`（可恢复）。 */
+export function workflowDelete(dir: string): Promise<WorkflowLibrary & { trashed: string }> {
+  return rpc<WorkflowLibrary & { trashed: string }>('workflow.delete', { dir });
 }
 
-export function projectRename(dir: string, name: string): Promise<ScriptLibrary> {
-  return rpc<ScriptLibrary>('project.rename', { dir, name });
-}
-
-/** 移到 <库根>/.trash/（可恢复，引擎不做真删除）。 */
-export function projectDelete(dir: string): Promise<ScriptLibrary> {
-  return rpc<ScriptLibrary>('project.delete', { dir });
-}
-
-export function graphSave(deviceId: string, graph: GraphPayload): Promise<GraphPayload> {
-  return rpc<GraphPayload>('graph.save', { deviceId, graph });
+/** 保存当前脚本的图；不带 deviceId = 直接落项目里的 `graph.json`（引擎会让所有会话热重载）。 */
+export function graphSave(graph: GraphPayload, deviceId?: string): Promise<GraphPayload> {
+  return rpc<GraphPayload>('graph.save', deviceId ? { deviceId, graph } : { graph });
 }
 
 export function recordTemplate(params: {
@@ -585,6 +667,8 @@ export function recordTemplate(params: {
   threshold: number;
   nodeId?: string;
   nodeName?: string;
+  /** 「录一个新界面」→ 让引擎分配 id：界面上的 `node_N` 是本地序号，重启会重号（会撞上老界面） */
+  allocateNodeId?: boolean;
   asEnter?: boolean;
   asActionTarget?: boolean;
 }): Promise<RecordResult> {

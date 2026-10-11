@@ -68,7 +68,7 @@ NAMED_BUTTONS: dict[str, tuple[int, int]] = {
     "volume_down": (0x0C, 0xEA),
     "mute": (0x0C, 0xE2),
     "siri": (0x0C, 0xCF),
-    # iOS 没有安卓那几个键，这里做个映射，脚本两边都能用
+    # iOS 没有安卓那几个键，这里做个映射，工作流两边都能用
     "back": (0x0C, 0x40),  # 用 Home 代替"返回"
     "recents": (0x0C, 0x40),
     "enter": (0x0C, 0x28),

@@ -9,7 +9,7 @@
  * 用 Mock 设备，所以 CI 里不需要真机。
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -18,10 +18,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   graphSave,
-  projectCreate,
-  projectDelete,
-  projectList,
-  projectRename,
+  workflowCreate,
+  workflowDelete,
+  workflowDuplicate,
+  workflowRename,
+  workspaceTree,
   type GraphPayload,
 } from '@/lib/rpc';
 import { useDeviceStore } from '@/stores/device.store';
@@ -42,11 +43,25 @@ class EngineBridge {
   frameRequests = 0;
   streamRequests = 0;
 
-  start(projectDir: string): void {
+  /**
+   * 起一个真实引擎进程。
+   *
+   * 三个环境变量都钉在**临时目录**里（契约 v3 §1 的逃生口）：
+   *   - `GAMEPILOT_PROJECT_DIR` → 当前脚本（录制/运行都落在这里）
+   *   - `GAMEPILOT_WORKSPACE_DIR` → 当前工作区（project.* / script.* 都在这下面）
+   *   - `GAMEPILOT_CONFIG_DIR` → 配置目录（**绝不能读/写用户真实的 config.json**）
+   */
+  start(projectDir: string, workspaceDir: string, configDir: string): void {
     const engineDir = path.resolve(process.cwd(), '..', '..', 'engine');
     const child = spawn(path.join(engineDir, '.venv', 'bin', 'python'), ['-m', 'gamepilot.rpc'], {
       cwd: engineDir,
-      env: { ...process.env, GAMEPILOT_LOG_LEVEL: 'WARNING', GAMEPILOT_PROJECT_DIR: projectDir },
+      env: {
+        ...process.env,
+        GAMEPILOT_LOG_LEVEL: 'WARNING',
+        GAMEPILOT_PROJECT_DIR: projectDir,
+        GAMEPILOT_WORKSPACE_DIR: workspaceDir,
+        GAMEPILOT_CONFIG_DIR: configDir,
+      },
     });
     this.child = child;
 
@@ -148,12 +163,32 @@ async function waitFor(condition: () => boolean, timeout = 8000, step = 50): Pro
 
 describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
   let projectDir = '';
+  /** v4：当前工作区也是一个临时目录（工作流那一段直接建在它下面） */
+  let workspaceDir = '';
+  /** 引擎侧并行改名中：方法表里有没有 v4 的 workflow.*（没有就跳过那一条，但会吵一声） */
+  let engineV4 = false;
 
   beforeAll(async () => {
-    projectDir = mkdtempSync(path.join(tmpdir(), 'gamepilot-ui-'));
+    // realpath：引擎按契约返回解析过符号链接的路径（macOS /var → /private/var），
+    // 期望值也要用同一条路径，否则比的是两个等价写法
+    projectDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'gamepilot-ui-')));
+    workspaceDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'gamepilot-ws-')));
+    const configDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'gamepilot-cfg-')));
     const instance = new EngineBridge();
     bridge.current = instance;
-    instance.start(projectDir);
+    instance.start(projectDir, workspaceDir, configDir);
+
+    // v4 的方法表探一次：引擎还没落地 workflow.* 时，只跳过工作流那一条用例
+    const info = (await bridge.current.invoke('engine_rpc', {
+      method: 'engine.info',
+      params: {},
+    })) as { methods?: string[] };
+    engineV4 = info?.methods?.includes('workflow.create') === true;
+    if (!engineV4) {
+      console.warn(
+        '[session.engine.test] 引擎还没有 v4 的 workflow.* 方法 —— 工作流联调用例被跳过（引擎落地后重跑即可）',
+      );
+    }
 
     await useSessionStore.getState().init();
     // 设备列表启动时是空的（界面空态引导用户去扫描），这里模拟"打开设备面板"触发扫描
@@ -192,41 +227,73 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
   });
 
   it(
-    '脚本库（多状态图）：create → list → rename → delete 全部落到真实磁盘目录',
-    { timeout: 20000 },
-    async () => {
-      // 用一个**独立**的库根：系统临时目录里可能还躺着别的残留脚本，
-      // 混在一起会让"删掉当前脚本之后切到谁"变得不可预测
-      const libraryRoot = mkdtempSync(path.join(tmpdir(), 'gamepilot-lib-'));
+    '工作流（工作区 › 工作流）：建/切换/改名/复制/删除 全部落到真实磁盘（v4 只有两层）',
+    { timeout: 30000 },
+    async ({ skip }) => {
+      if (!engineV4) {
+        skip();
+        return;
+      }
+      /*
+       * 这一条走的是**新契约**（docs/WORKSPACE-CONTRACT.md v4 §2）：
+       *   工作区 = 用户选的文件夹；工作流 = 它下面一个含 graph.json 的直接子目录。
+       * 「项目」那一层已经取消，工作流建在**当前工作区根**下。
+       * 当前工作区就是本用例的临时目录（GAMEPILOT_WORKSPACE_DIR）。
+       */
+      const workspace = await workspaceTree();
+      expect(workspace.root).toBe(workspaceDir);
+      expect(workspace.workflows).toEqual([]);
 
-      // 新建：会在库根下建目录（graph.json + templates/），并切过去
-      const created = await projectCreate('日常任务', libraryRoot);
-      const createdItem = created.items.find((item) => item.name === '日常任务');
-      expect(createdItem?.root).toBe(path.join(libraryRoot, '日常任务'));
-      expect(created.current).toBe(createdItem?.root);
-      expect(existsSync(path.join(libraryRoot, '日常任务', 'graph.json'))).toBe(true);
-      expect(existsSync(path.join(libraryRoot, '日常任务', 'templates'))).toBe(true);
+      // 建两个工作流：建完切过去
+      const first = await workflowCreate('斗技');
+      const firstRoot = path.join(workspaceDir, '斗技');
+      expect(first.created).toBe(firstRoot);
+      expect(first.current).toBe(firstRoot);
+      expect(existsSync(path.join(firstRoot, 'graph.json'))).toBe(true);
+      expect(existsSync(path.join(firstRoot, 'templates'))).toBe(true);
 
-      // 列表：库里就这一个脚本（库根是独立的）
-      const listed = await projectList(libraryRoot);
-      expect(listed.items.map((item) => item.name)).toEqual(['日常任务']);
+      const second = await workflowCreate('御魂');
+      const secondRoot = path.join(workspaceDir, '御魂');
+      expect(second.current).toBe(secondRoot);
+      expect(second.items.map((item) => item.name)).toEqual(expect.arrayContaining(['斗技', '御魂']));
+      expect(second.items).toHaveLength(2);
 
-      // 重命名：目录真的改名了，且当前脚本跟着走
-      const renamed = await projectRename(createdItem!.root, '日常任务2');
-      const renamedItem = renamed.items.find((item) => item.name === '日常任务2');
-      expect(renamedItem?.root).toBe(path.join(libraryRoot, '日常任务2'));
-      expect(renamed.current).toBe(renamedItem?.root);
-      expect(existsSync(createdItem!.root)).toBe(false);
+      // 重命名**当前**工作流：目录真的改名，current 跟着走，返回的 root 是新路径
+      const renamed = await workflowRename(secondRoot, '御魂2');
+      const renamedRoot = path.join(workspaceDir, '御魂2');
+      expect(renamed.root).toBe(renamedRoot);
+      expect(renamed.current).toBe(renamedRoot);
+      expect(existsSync(renamedRoot)).toBe(true);
+      expect(existsSync(secondRoot)).toBe(false);
 
-      // 删除 = 移到 .trash/（可恢复），不是真删
-      const deleted = await projectDelete(renamedItem!.root);
-      expect(deleted.items.map((item) => item.name)).not.toContain('日常任务2');
-      expect(existsSync(renamedItem!.root)).toBe(false);
-      const trash = path.join(libraryRoot, '.trash');
-      expect(existsSync(trash)).toBe(true);
-      expect(readdirSync(trash).some((name) => name.startsWith('日常任务2-'))).toBe(true);
+      // 树：工作流摘要带 modified（面板的相对时间、前端树都读它）
+      const tree = await workspaceTree();
+      expect(tree.workflows.map((item) => item.name)).toEqual(expect.arrayContaining(['斗技', '御魂2']));
+      expect(tree.workflows[0]?.modified).toBeGreaterThan(0);
 
-      // 库操作会把"当前脚本"切走，后面的用例要用回本用例自己的目录。
+      // 复制另一个工作流：新目录（含 graph.json）并切过去
+      const copy = await workflowDuplicate(firstRoot, '斗技-副本');
+      const copyRoot = path.join(workspaceDir, '斗技-副本');
+      expect(copy.current).toBe(copyRoot);
+      expect(existsSync(path.join(copyRoot, 'graph.json'))).toBe(true);
+
+      // 删除工作流 = 移到工作区根的 .trash/（可恢复）；删的是当前工作流 → 切到剩下的一个
+      const removed = await workflowDelete(copyRoot);
+      expect(removed.items.map((item) => item.name)).not.toContain('斗技-副本');
+      expect(existsSync(copyRoot)).toBe(false);
+      expect(removed.items.map((item) => item.root)).toContain(removed.current);
+      expect(existsSync(removed.current)).toBe(true);
+      const trash = path.join(workspaceDir, '.trash');
+      expect(readdirSync(trash).some((name) => name.includes('斗技-副本'))).toBe(true);
+
+      // 删光所有工作流：没有当前工作流是一等状态（root 空串，不崩）
+      await workflowDelete(renamedRoot);
+      await workflowDelete(firstRoot);
+      await useSessionStore.getState().refreshProject();
+      expect(useSessionStore.getState().project?.root ?? '').toBe('');
+      expect((await workspaceTree()).workflows).toEqual([]);
+
+      // 工作流操作会把"当前工作流"切走，后面的用例要用回本用例自己的目录。
       // 切回来之后要**等通知落地**：project.changed 是异步推来的，不等就可能被上一条覆盖
       await useSessionStore.getState().switchProject(projectDir);
       await waitFor(() => useSessionStore.getState().project?.root === projectDir);
@@ -234,8 +301,12 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     },
   );
 
-  it('非法脚本名：引擎拒绝并给出可直接显示的中文原因', { timeout: 20000 }, async () => {
-    await expect(projectCreate('日常/任务', projectDir)).rejects.toThrow(/不能包含/);
+  it('非法工作流名：引擎拒绝并给出可直接显示的中文原因', { timeout: 20000 }, async ({ skip }) => {
+    if (!engineV4) {
+      skip();
+      return;
+    }
+    await expect(workflowCreate('日常/任务')).rejects.toThrow(/不能包含/);
   });
 
   it('录制模板：真裁剪落盘 + 识别器进状态图 + 后续帧带出分数', async () => {
@@ -249,7 +320,9 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
       targetMode: 'new',
       targetNodeId: null,
       newNodeName: '主界面',
-      newNodeId: 'main',
+      // 只是界面侧的占位：真实 id 由**引擎分配**（界面这个序号重启就重号，
+      // 传下去会撞上老界面 —— 见 session.store.record 的 allocateNodeId）
+      newNodeId: 'node_1',
     };
     // 录制写的是"当前脚本目录"，先确认它真的回到了本用例的目录（上一条库用例会切走）
     expect(useSessionStore.getState().project?.root).toBe(projectDir);
@@ -258,7 +331,10 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     expect(existsSync(path.join(projectDir, 'templates', 'logo.png'))).toBe(true);
     const graph = useGraphStore.getState().graphs[DEVICE_ID];
     expect(graph?.recognizers.map((item) => item.label)).toContain('logo');
-    expect(graph?.nodes.map((item) => item.id)).toContain('main');
+    // 「新建」时 id 由引擎给（n_1、n_2…），不是界面传下去的 node_1
+    expect(graph?.nodes.map((item) => item.id)).toEqual(['n_1']);
+    expect(graph?.nodes[0]?.name).toBe('主界面');
+    expect(useGraphStore.getState().selectedNodeId).toBe('n_1'); // 录完就选中，知道录到哪个界面上
 
     // 引擎持续推帧：识别器面板的分数应当被真实数据刷新
     await waitFor(() => {
@@ -271,12 +347,15 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
 
   it('运行状态机：引擎事件进入事件栏，且真的产生了点击动作', async () => {
     const saved = JSON.parse(readFileSync(path.join(projectDir, 'graph.json'), 'utf-8')) as GraphPayload;
+    // 边从这里**已存在**的界面出发（id 是引擎上一步分配的，别写死）
+    const source = saved.nodes[0]?.id;
+    expect(source).toBeTruthy();
     const withEdge: GraphPayload = {
       ...saved,
       edges: [
         {
           id: 'e_tap',
-          from: 'main',
+          from: source,
           when: 'logo',
           cooldown_ms: 300,
           action: { type: 'click', target: 'logo' },
@@ -284,7 +363,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
       ],
     };
     // 走前端的 RPC 路径写回（等价于画布上连线后保存）
-    await graphSave(DEVICE_ID, withEdge);
+    await graphSave(withEdge, DEVICE_ID);
 
     await useSessionStore.getState().startRun(DEVICE_ID);
     expect(useSessionStore.getState().running[DEVICE_ID]).toBe(true);
@@ -312,7 +391,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     const result = await useSessionStore.getState().renameRecognizer(DEVICE_ID, 'logo', '游戏标题');
 
     expect(result).not.toBeNull();
-    expect(result?.refs.nodes).toBeGreaterThanOrEqual(1); // 界面 main 的进入条件
+    expect(result?.refs.nodes).toBeGreaterThanOrEqual(1); // 界面的进入条件
     expect(result?.refs.edges).toBeGreaterThanOrEqual(1); // e_tap 的 when / 动作目标
 
     // 界面里的图：新名字在、旧名字没了（改名不能留下两个）
@@ -324,7 +403,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     const saved = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
     expect(Object.keys(saved.recognizers)).toContain('游戏标题');
     expect(Object.keys(saved.recognizers)).not.toContain('logo');
-    expect(saved.nodes.find((node) => node.id === 'main')?.enter).toContain('游戏标题');
+    expect(saved.nodes[0]?.enter).toContain('游戏标题');
     const tapEdge = saved.edges.find((edge) => edge.id === 'e_tap');
     expect(tapEdge?.when).toBe('游戏标题');
     expect((tapEdge?.action as { target?: string } | undefined)?.target).toBe('游戏标题');
@@ -347,7 +426,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
 
   it('删除识别器：被引用时拒绝并说清被谁用了；没人用才真删（连模板文件）', { timeout: 20000 }, async () => {
     const graphPath = path.join(projectDir, 'graph.json');
-    // 上一条用例改成"游戏标题"了，且 main 的进入条件 + e_tap 的 when/动作都引用它
+    // 上一条用例改成"游戏标题"了，且界面的进入条件 + e_tap 的 when/动作都引用它
     const before = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
     expect(Object.keys(before.recognizers)).toContain('游戏标题');
 

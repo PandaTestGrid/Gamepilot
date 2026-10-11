@@ -21,6 +21,7 @@ serde_json = "1.0"
 log = "0.4"
 tauri = { version = "2.12.1", features = [] }
 tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
 
 # 发布构建按 Tauri 官方建议做体积与性能取舍
 [profile.release]

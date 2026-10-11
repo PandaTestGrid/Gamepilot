@@ -53,13 +53,14 @@ class RpcServer:
         self._register_builtin()
         # 延迟导入：devices 方法模块需要 RpcServer 的类型，反过来运行时依赖 stdio
         from . import devices as device_methods
-        from . import projects as project_methods
         from . import session as session_methods
+        from . import workflows as workflow_methods
 
         device_methods.register(self)
         self.sessions = session_methods.register(self)
-        # project.* 集中在 projects 模块里（脚本库的库操作），显式传入 manager 而不是全局
-        project_methods.register(self, self.sessions)
+        # workspace.* / workflow.* / project.get|set 集中在 workflows 模块里，
+        # 显式传入 manager 而不是全局
+        workflow_methods.register(self, self.sessions)
 
     # ------------------------------------------------------------------ #
     # 注册与分发

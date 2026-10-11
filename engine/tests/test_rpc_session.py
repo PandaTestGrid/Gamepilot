@@ -25,7 +25,7 @@ DEVICE_ID = "mock:mock-1"
 
 
 class EngineProcess:
-    def __init__(self, project_dir: str) -> None:
+    def __init__(self, project_dir: str, workspace_dir: str | None = None) -> None:
         self.proc = subprocess.Popen(
             [sys.executable, "-m", MODULE],
             stdin=subprocess.PIPE,
@@ -33,7 +33,14 @@ class EngineProcess:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
-            env={**os.environ, "GAMEPILOT_LOG_LEVEL": "WARNING", "GAMEPILOT_PROJECT_DIR": project_dir},
+            env={
+                **os.environ,
+                "GAMEPILOT_LOG_LEVEL": "WARNING",
+                "GAMEPILOT_PROJECT_DIR": project_dir,
+                # 工作区也指到临时目录：project.* / script.* 一个字节都不碰仓库
+                "GAMEPILOT_WORKSPACE_DIR": workspace_dir or os.path.join(project_dir, "workspaces", "默认"),
+                "GAMEPILOT_CONFIG_DIR": os.path.join(project_dir, "config"),
+            },
         )
         self.next_id = 0
         # 读过的所有消息：RPC 等待响应时会顺手消费掉通知，靠这个才能事后断言
@@ -291,10 +298,15 @@ def test_project_directory_switch_and_template_image(engine: EngineProcess, tmp_
     back = engine.call("project.set", {"dir": before["root"]})
     assert back["recognizers"] == 1
 
-    # 列目录：能看到这个工程
-    listing = engine.call("project.list", {"base": str(Path(before["root"]).parent)})
-    names = [item["name"] for item in listing["items"]]
-    assert Path(before["root"]).name in names
+    # 看树 / 列工作区：契约 v4 的返回形状
+    # （工作区、配置目录都指到临时目录，仓库里的 workspaces/ 与用户真实配置都不受影响）
+    tree = engine.call("workspace.tree")
+    assert set(tree) == {"root", "workflows"}
+    assert Path(tree["root"]).name == "默认", "树根就是当前工作区目录"
+    assert tree["workflows"] == [], "这个临时工作区里还没有工作流"
+    workspaces = engine.call("workspace.list")
+    assert set(workspaces) == {"active", "recommended", "items", "trashRoot"}
+    assert workspaces["items"] == [{"name": "默认", "root": str(Path(tree["root"])), "active": True, "exists": False}]
 
     # 不存在的识别器要报错
     request_id = engine.send("template.image", {"label": "不存在"})

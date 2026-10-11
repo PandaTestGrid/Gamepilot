@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils';
 import { activeDevice, useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
 import { useEventStore } from '@/stores/event.store';
-import { useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
 
 /**
@@ -42,7 +42,7 @@ export function StatusBar(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
   const running = useSessionStore((state) => Boolean(state.running[activeId]));
-  const graph = useGraphStore((state) => state.graphs[activeId]);
+  const graph = useGraphStore((state) => graphForDevice(state, activeId));
   const events = useEventStore((state) => state.events[activeId]);
   const engineStatus = useEngineStore((state) => state.status);
   const frame = useSessionStore((state) => state.frames[activeId]);

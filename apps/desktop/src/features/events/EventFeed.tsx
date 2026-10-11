@@ -60,7 +60,13 @@ export function EventFeed(): ReactNode {
         {rows.length === 0 && <div className="px-3 py-6 text-center text-badge text-faint">没有事件</div>}
         {rows.map((event) => (
           <div
-            key={`${event.deviceId}-${event.seq}`}
+            /*
+             * key 里必须带 `type`：seq 是"引擎/界面各自发号"的，会和另一路撞号
+             * （界面的 `append` 用本地计数、引擎的 `appendEngineEvent` 用引擎的 seq），
+             * 只按 `设备-seq` 做键会撞出 `Encountered two children with the same key`。
+             * store 里对 `(seq, type)` 去重，所以这三段拼起来是唯一的。
+             */
+            key={`${event.deviceId}-${event.seq}-${event.type}`}
             className="flex h-[26px] items-center gap-2 px-2 hover:bg-raised"
           >
             <span className="w-16 shrink-0 text-badge text-faint">

@@ -13,7 +13,7 @@
 import { useCallback } from 'react';
 
 import { activeDevice, useDeviceStore } from '@/stores/device.store';
-import { useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
 
 export interface RunControl {
@@ -30,7 +30,7 @@ export interface RunControl {
 export function useRunControl(): RunControl {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
-  const nodeCount = useGraphStore((state) => state.graphs[activeId]?.nodes.length ?? 0);
+  const nodeCount = useGraphStore((state) => graphForDevice(state, activeId)?.nodes.length ?? 0);
   const running = useSessionStore((state) => Boolean(state.running[activeId]));
   const startRun = useSessionStore((state) => state.startRun);
   const stopRun = useSessionStore((state) => state.stopRun);

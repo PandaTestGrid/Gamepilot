@@ -1,13 +1,14 @@
 /**
- * 画布框选 + 多选删除。
+ * 画布多选 + 删除。
  *
- * 背景（用户反馈）：
- *   1. "鼠标放上去为啥默认是个小手" —— 左键拖空白原来是**平移**，xyflow 因此给画布常驻
- *      `cursor: grab`；框选只能靠 Shift+拖（没人知道）；
- *   2. "怎么框选多个节点删除" —— 没有多选，删除只能一个个右键。
+ * 选中态**只有一个真源：React Flow**。它通过 `onNodesChange` 的 `select` 变更维护选中集，
+ * 落在我们的 `rfNodes` 上；图例工具条（「已选 N 个界面」/ 删除）只是把它**读回来**。
  *
- * 现在：左键拖空白 = 框选（`selectionOnDrag`），平移给中键 / 空格+拖动（`panOnDrag={[1]}`），
- * Delete / Backspace 或工具条上的「删除」都能删选中项。
+ * 为什么不再自己存一份"选中 id 数组"（走过的弯路）：
+ *   - 那份数组喂进节点数据形成回环 → 点一个节点显示「已选 4 个界面」、计数乱跳
+ *     （官方 `onSelectionChange` 交出来的是**整份** nodeLookup，不是"被选中的那几个"）；
+ *   - 而 React Flow 的拖动语义是"把选中的一起拖"，假的选中标记会让"拖一个、动了别的"。
+ * 现在手势也用官方默认：Shift+拖动框选、Control 点多选、左键拖空白平移、Shift 拖动框选。
  *
  * 这里把 ReactFlow 换成探针，直接检查交互配置和回调 → store 的那条链路。
  */
@@ -26,14 +27,15 @@ interface ProbeNode {
 
 const probe = vi.hoisted(() => ({
   props: null as null | {
-    selectionOnDrag?: boolean;
+    selectionKeyCode?: string | string[] | null;
+    multiSelectionKeyCode?: string | string[] | null;
     panOnDrag?: boolean | number[];
+    selectionOnDrag?: boolean;
     panOnScroll?: boolean;
     zoomOnScroll?: boolean;
     deleteKeyCode?: string | string[] | null;
-    multiSelectionKeyCode?: string | string[] | null;
     nodes: ProbeNode[];
-    onSelectionChange?: (params: { nodes: ProbeNode[] }) => void;
+    onNodesChange?: (changes: Array<Record<string, unknown>>) => void;
     onNodesDelete?: (nodes: ProbeNode[]) => void;
     onEdgesDelete?: (edges: Array<{ id: string }>) => void;
     onPaneContextMenu?: (event: unknown) => void;
@@ -53,10 +55,29 @@ vi.mock('@xyflow/react', () => ({
   MarkerType: { ArrowClosed: 'arrowclosed' },
   ConnectionMode: { Strict: 'strict', Loose: 'loose' },
   BackgroundVariant: { Dots: 'dots' },
-  // 官方 useNodesState 的最小替身：本用例不测拖动，只要它把节点交回来
+  /**
+   * 官方 `useNodesState` 的最小替身：**真的处理 `select` / `position` 变更**
+   * （选中态是这条链路的结果，桩不处理就等于把被测行为抽掉了）。
+   */
   useNodesState: (initial: unknown[]) => {
     const [nodes, setNodes] = useState(initial as ProbeNode[]);
-    const onNodesChange = useCallback(() => undefined, []);
+    const onNodesChange = useCallback((changes: Array<Record<string, unknown>>) => {
+      setNodes((current) =>
+        current.map((node) => {
+          const change = changes.find((item) => item.id === node.id);
+          if (!change) {
+            return node;
+          }
+          if (change.type === 'select') {
+            return { ...node, selected: change.selected === true };
+          }
+          if (change.type === 'position' && change.position) {
+            return { ...node, position: change.position };
+          }
+          return node;
+        }),
+      );
+    }, []);
     return [nodes, setNodes, onNodesChange];
   },
 }));
@@ -102,43 +123,31 @@ function setup(): {
   return { removeNode, removeEdge };
 }
 
-/** 模拟"框选到这两个节点"（React Flow 的 onSelectionChange） */
+/** 模拟"点选/框选到这几个节点"：xyflow 发的是**逐节点的 select 变更**（官方通道） */
 function selectNodes(ids: string[]): void {
   act(() => {
-    probe.props?.onSelectionChange?.({ nodes: ids.map((id) => ({ id })) });
+    probe.props?.onNodesChange?.(
+      ['n_1', 'n_2', 'n_3'].map((id) => ({ id, type: 'select', selected: ids.includes(id) })),
+    );
   });
 }
 
-describe('画布手势：左键框选，不是拖动平移', () => {
+describe('画布手势：官方默认（左键平移、Shift 框选、Control 多选）', () => {
   beforeEach(() => {
     probe.props = null;
   });
 
-  it('左键拖空白 = 框选（selectionOnDrag），平移给中键 + 右键 + 滚动', () => {
+  it('平移/框选/缩放都不再自己改，只有多选键按要求固定成 Control', () => {
     setup();
 
-    expect(probe.props?.selectionOnDrag).toBe(true);
-    // 关键：panOnDrag 不含 0（左键）—— 左键要留给框选
-    expect(probe.props?.panOnDrag).toEqual([1, 2]);
-    expect(probe.props?.multiSelectionKeyCode).toEqual(['Shift', 'Meta', 'Control']);
-    // 滚动/双指滑动 = 平移，⌘+滚动 = 缩放（Mac 触控板没有中键）
-    expect(probe.props?.panOnScroll).toBe(true);
-    expect(probe.props?.zoomOnScroll).toBe(false);
-  });
-
-  /**
-   * 右键有两层含义，xyflow 原生分得开（源码 `createPanZoomEndHandler`）：
-   *   - 右键**拖动** → 平移（光标是小手，很多平台都这么做）
-   *   - 右键**只点不拖** → 弹菜单
-   * 之前以为"panOnDrag 含 2 就会吞掉右键菜单"，其实它只在"这次右键拖过"时才不弹。
-   */
-  it('右键拖动 = 平移（小手），右键只点 = 弹菜单；两者可以共存', () => {
-    setup();
-
-    const panOnDrag = probe.props?.panOnDrag;
-    expect(Array.isArray(panOnDrag) ? panOnDrag : []).toContain(2);
-    // 菜单入口仍在（真的吞掉的话，这个 prop 就没意义了）
-    expect(typeof probe.props?.onPaneContextMenu).toBe('function');
+    // 不传 = 官方默认：左键拖空白平移、Shift 拖动框选、滚动缩放
+    expect(probe.props?.panOnDrag).toBeUndefined();
+    expect(probe.props?.selectionOnDrag).toBeUndefined();
+    expect(probe.props?.selectionKeyCode).toBeUndefined();
+    expect(probe.props?.zoomOnScroll).toBe(true);
+    expect(probe.props?.panOnScroll ?? false).toBeFalsy();
+    // 多选 = Control（官方在 mac 上是 Meta；用户要求统一成 Control）
+    expect(probe.props?.multiSelectionKeyCode).toEqual(['Control']);
   });
 
   it('Delete 和 Backspace 都能删（macOS 键盘上 Delete 要按 Fn+Backspace）', () => {
@@ -148,21 +157,52 @@ describe('画布手势：左键框选，不是拖动平移', () => {
   });
 });
 
-describe('框选多个界面 → 删除', () => {
+describe('多选界面 → 删除', () => {
   beforeEach(() => {
     probe.props = null;
   });
 
-  it('框选 2 个：节点被标成选中，工具条报数', () => {
+  it('点一个节点 = 已选 1 个（选中态从 xyflow 的 select 变更读回来）', () => {
     setup();
 
     expect(screen.queryByTestId('selection-count')).toBeNull();
+    selectNodes(['n_3']);
+
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('已选 1 个界面');
+    const selected = (probe.props?.nodes ?? []).filter((node) => node.selected).map((node) => node.id);
+    expect(selected).toEqual(['n_3']);
+  });
+
+  it('框选 2 个：节点被标成选中，工具条报数', () => {
+    setup();
 
     selectNodes(['n_1', 'n_3']);
 
     expect(screen.getByTestId('selection-count')).toHaveTextContent('已选 2 个界面');
     const selected = (probe.props?.nodes ?? []).filter((node) => node.selected).map((node) => node.id);
     expect(selected).toEqual(['n_1', 'n_3']);
+  });
+
+  it('再点空白（全部取消）后工具条消失', () => {
+    setup();
+    selectNodes(['n_1', 'n_2']);
+    expect(screen.getByTestId('selection-count')).toBeInTheDocument();
+
+    selectNodes([]);
+
+    expect(screen.queryByTestId('selection-count')).toBeNull();
+  });
+
+  it('「取消选择」按钮把选中态交回官方通道清掉（不自己改状态）', () => {
+    setup();
+    selectNodes(['n_1', 'n_2']);
+
+    act(() => {
+      screen.getByText('取消选择').click();
+    });
+
+    expect(screen.queryByTestId('selection-count')).toBeNull();
+    expect((probe.props?.nodes ?? []).some((node) => node.selected)).toBe(false);
   });
 
   it('点「删除」：逐个让引擎删（引擎会把它连着的边一起删），并清掉选中态', async () => {
@@ -215,10 +255,11 @@ describe('框选多个界面 → 删除', () => {
     expect(removeEdge.mock.calls.map((call) => call[1])).toEqual(['e_1', 'e_2']);
   });
 
-  it('画布上写明了怎么框选 / 怎么平移（不然没人知道左键不再是平移）', () => {
+  it('画布上写明了怎么多选 / 怎么缩放 / 怎么平移（文案必须和真实手势一致）', () => {
     setup();
 
-    expect(screen.getByText(/拖动空白 = 框选多个界面/)).toBeInTheDocument();
-    expect(screen.getByText(/滚动 \/ 双指滑动 = 平移画布/)).toBeInTheDocument();
+    expect(screen.getByText(/拖动空白 = 平移画布；Shift\+拖动 = 框选/)).toBeInTheDocument();
+    expect(screen.getByText(/滚动 \/ 双指滑动 = 缩放画布/)).toBeInTheDocument();
+    expect(screen.getByText(/按住 Control 点 = 多选/)).toBeInTheDocument();
   });
 });

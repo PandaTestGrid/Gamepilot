@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import cv2
 
-from .. import library
+from .. import workspace
 from ..core.frame import Frame
 from ..core.geometry import Rect
 from ..core.graph import Graph
@@ -60,7 +60,16 @@ from ..protocol import (
     NOTIFY_DEVICE_FAILED,
     NOTIFY_PROJECT_CHANGED,
 )
-from ..session import DeviceSession
+from ..session import (
+    DeviceSession,
+    graph_edge_add,
+    graph_node_add,
+    graph_node_remove,
+    graph_node_update,
+)
+from ..session import (
+    _load_graph as load_session_graph,
+)
 
 if TYPE_CHECKING:  # 避免循环导入
     from .stdio import RpcServer
@@ -142,22 +151,42 @@ def parse_device_uri(uri: str) -> tuple[str, dict[str, Any]]:
 class SessionManager:
     def __init__(self, emit: Any) -> None:
         self.emit = emit
-        self.project = resolve_project()
+        # 工作区列表 + 当前工作区（持久化在 config.json；GAMEPILOT_WORKSPACE_DIR 时只在进程内）
+        self.workspaces = workspace.Workspaces()
+        # "没有当前工作流"是一等状态（契约 §2.4）：不伪造路径，也不偷偷建目录
+        self.project = Project()
         self.sessions: dict[str, DeviceSession] = {}
         # 每台设备一把连接锁：并发/重试的 connect 只会有一次真正建会话，
         # 否则前端一个重试循环能叠加出几十个 scrcpy 会话
         self._connect_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
-
-    # ---------- 连接 ----------
+        self._restore()
 
     # ------------------------------------------------------------------ #
-    # 工程（脚本目录）与素材
+    # 工作区 / 当前工作流
     # ------------------------------------------------------------------ #
+
+    def _restore(self) -> None:
+        """启动恢复：`GAMEPILOT_PROJECT_DIR`（逃生口）优先，否则当前工作区里第一个工作流。
+
+        **启动不建任何东西**（不建工作流、也不建目录）：没有就保持"什么都没选"（一等状态）。
+        这里不发通知 —— 服务还没 serve，前端此时还没订阅。
+        """
+        override = os.environ.get("GAMEPILOT_PROJECT_DIR")
+        if override:
+            self.project = resolve_project()  # 逃生口：只对显式指定的目录 ensure()
+            return
+        first = workspace.first_workflow()
+        self.project = Project(root=first).ensure() if first else Project()
 
     def project_info(self) -> dict[str, Any]:
-        """当前脚本目录的内容概览（界面顶栏显示、切换后回显）。"""
+        """当前工作流的内容概览（界面顶栏显示、切换后回显）。
+
+        没有当前工作流时是空串 + 全 0（一等状态），**绝不伪造磁盘上不存在的路径**。
+        """
         project = self.project
+        if not project.root:
+            return {"root": "", "graphPath": "", "nodes": 0, "edges": 0, "recognizers": 0, "templates": 0}
         graph = Graph.load(project.graph_path) if os.path.isfile(project.graph_path) else Graph.empty(project.root)
         templates = (
             sorted(name for name in os.listdir(project.templates_dir)) if os.path.isdir(project.templates_dir) else []
@@ -171,33 +200,79 @@ class SessionManager:
             "templates": len(templates),
         }
 
-    def _resolve_script(self, name: str) -> str:
-        """脚本名 → 目录：先按名字找同级脚本目录，找不到就当成路径。"""
+    def _resolve_workflow(self, name: str) -> str:
+        """工作流名 → 目录：先按名字找同一个工作区里的工作流，找不到就当成路径。"""
+        if not self.project.root:
+            return name
         candidate = os.path.join(os.path.dirname(self.project.root), name)
         if os.path.isdir(candidate):
             return candidate
         return name
 
-    def use_project(self, target: str) -> None:
-        """切换脚本目录：重载所有已连接设备的状态图（保留它们的运行态）。"""
-        path = os.path.abspath(os.path.expanduser(target))
-        self.project = Project(root=path).ensure()
-        logger.info("切换脚本目录: %s", self.project.root)
+    # ------------------------------------------------------------------ #
+    # 项目级状态图：**不带 deviceId** 的 graph.* 走这里
+    #
+    # 状态图属于项目（脚本），设备只是"在哪台机器上跑"：
+    # 没连设备也要能看、能编辑；改完让所有已连接会话热重载（连着的设备立刻拿到新脚本），
+    # 热重载保留各自的当前节点与运行态（`DeviceSession.reload_graph`）。
+    # ------------------------------------------------------------------ #
+
+    def _require_project(self) -> Project:
+        if not self.project.root:
+            raise ValueError("还没有选择脚本（工作流）")
+        return self.project
+
+    def project_graph(self) -> Graph:
+        """当前脚本的图（真源 = 项目目录里的 graph.json）。"""
+        return load_session_graph(self._require_project())
+
+    def save_project_graph(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project = self._require_project()
+        graph = Graph.from_dict(payload, base_dir=project.root, path=project.graph_path)
+        graph.save()
+        self.reload_graphs()
+        return graph.to_dict()
+
+    def mutate_project_graph(self, mutate: Any) -> dict[str, Any]:
+        """改一下项目里的图并落盘，然后让所有会话热重载。"""
+        graph = self.project_graph()
+        result = mutate(graph)
+        graph.save()
+        self.reload_graphs()
+        return dict(result)
+
+    def reload_graphs(self) -> None:
+        """让所有已连接设备重新读盘上的脚本（保留它们各自的当前节点与运行态）。"""
         for session in list(self.sessions.values()):
-            session.project = self.project
+            session.reload_graph()
+
+    def _set_project(self, project: Project) -> None:
+        """真正切当前工作流：更新所有会话 + 广播 `project.changed`（保留各设备运行态）。"""
+        self.project = project
+        logger.info("切换当前工作流: %s", project.root or "(无)")
+        for session in list(self.sessions.values()):
+            session.project = project
             session.reload_graph()
         self.emit(NOTIFY_PROJECT_CHANGED, self.project_info())
 
-    def list_projects(self, base: str | None = None) -> list[dict[str, Any]]:
-        """列出库根下所有脚本目录（含 `graph.json` 的）；实现在 `library`。
+    def use_project(self, target: str) -> None:
+        """切换当前工作流目录：不存在就建（`project.set` 语义，`{dir}` 不变）。"""
+        path = os.path.abspath(os.path.expanduser(target))
+        self._set_project(Project(root=path).ensure())
 
-        `project.*` 的库操作在 `rpc/projects.py`，这里只保留"当前脚本"的解析。
-        """
-        root = os.path.abspath(os.path.expanduser(base)) if base else library.library_root(self.project.root)
-        return library.list_scripts(root)
+    def switch_workspace(self, root: str | None) -> None:
+        """切到某个工作区：当前工作流 = 它里面第一个工作流；没有就清空（不建任何东西）。"""
+        first = workspace.first_workflow(root) if root else None
+        self._set_project(Project(root=first).ensure() if first else Project())
+
+    def reselect_workflow(self) -> None:
+        """树变了以后重新选当前工作流：当前工作区里第一个，一个都没有就清空。"""
+        self.switch_workspace(self.workspaces.active)
 
     def template_image(self, label: str, *, grayscale: bool = False) -> dict[str, Any]:
         """取模板截图（PNG，base64）。黑白模式返回灰度图，方便界面直接看匹配用的样子。"""
+        if not self.project.root:
+            raise ValueError("还没有选择工作流")
         graph = Graph.load(self.project.graph_path) if os.path.isfile(self.project.graph_path) else None
         spec = graph.specs.get(label) if graph is not None else None
         if spec is None:
@@ -247,8 +322,8 @@ class SessionManager:
             raise
 
         session = DeviceSession(device_id, controller, self.project, self.emit)
-        # 「运行子脚本」：切到指定脚本目录（名字可以是目录名或绝对路径）
-        session.on_call_script = lambda name: self.use_project(self._resolve_script(name))
+        # 「运行子工作流」（图上的 call 动作）：切到指定工作流目录（名字可以是目录名或绝对路径）
+        session.on_call_script = lambda name: self.use_project(self._resolve_workflow(name))
         session.start()
         self.sessions[device_id] = session
         self.emit(
@@ -402,7 +477,7 @@ def register(server: RpcServer) -> SessionManager:
 
     @server.method(METHOD_RECORD_ACTION)
     def _record_action(params: dict[str, Any]) -> dict[str, Any]:
-        """把手动操作录成脚本里的一步（画面栏开着「录操作」时调它）。"""
+        """把手动操作录成工作流里的一步（画面栏开着「录操作」时调它）。"""
         session = manager.get(_require_str(params, "deviceId"))
         action = params.get("action")
         if not isinstance(action, dict):
@@ -410,44 +485,63 @@ def register(server: RpcServer) -> SessionManager:
         to = params.get("to")
         return session.record_action(action, to=str(to) if to else None)
 
+    # ---- 图编辑：`deviceId` 可选（不带 = 直接改项目脚本，状态图属于项目而不是设备）----
+
+    def _graph_device(params: dict[str, Any]) -> str:
+        """`deviceId`：有就用那台设备会话的图，没有就改项目里的 `graph.json`。"""
+        device_id = params.get("deviceId")
+        return device_id if isinstance(device_id, str) and device_id else ""
+
     @server.method(METHOD_GRAPH_NODE_ADD)
     def _node_add(params: dict[str, Any]) -> dict[str, Any]:
-        session = manager.get(_require_str(params, "deviceId"))
         enter = params.get("enter")
-        return session.graph_node_add(
+        args = (
             str(params["nodeId"]) if params.get("nodeId") else None,
             str(params["name"]) if params.get("name") else None,
             [str(item) for item in enter] if isinstance(enter, list) else None,
         )
+        device_id = _graph_device(params)
+        if device_id:
+            return manager.get(device_id).graph_node_add(*args)
+        return manager.mutate_project_graph(lambda graph: graph_node_add(graph, *args))
 
     @server.method(METHOD_GRAPH_NODE_UPDATE)
     def _node_update(params: dict[str, Any]) -> dict[str, Any]:
-        session = manager.get(_require_str(params, "deviceId"))
         patch = params.get("patch")
         if not isinstance(patch, dict):
             raise ValueError("缺少 patch 参数")
-        return session.graph_node_update(_require_str(params, "nodeId"), patch)
+        node_id = _require_str(params, "nodeId")
+        device_id = _graph_device(params)
+        if device_id:
+            return manager.get(device_id).graph_node_update(node_id, patch)
+        return manager.mutate_project_graph(lambda graph: graph_node_update(graph, node_id, patch))
 
     @server.method(METHOD_GRAPH_NODE_REMOVE)
     def _node_remove(params: dict[str, Any]) -> dict[str, Any]:
-        session = manager.get(_require_str(params, "deviceId"))
-        return session.graph_node_remove(_require_str(params, "nodeId"))
+        node_id = _require_str(params, "nodeId")
+        device_id = _graph_device(params)
+        if device_id:
+            return manager.get(device_id).graph_node_remove(node_id)
+        return manager.mutate_project_graph(lambda graph: graph_node_remove(graph, node_id))
 
     @server.method(METHOD_GRAPH_EDGE_ADD)
     def _edge_add(params: dict[str, Any]) -> dict[str, Any]:
-        session = manager.get(_require_str(params, "deviceId"))
         action = params.get("action")
-        return session.graph_edge_add(
-            src=str(params["from"]) if params.get("from") else None,
-            dst=str(params["to"]) if params.get("to") else None,
-            when=str(params["when"]) if params.get("when") else None,
-            action=action if isinstance(action, dict) else None,
-            condition=params.get("condition") if isinstance(params.get("condition"), dict) else None,
-        )
+        args: dict[str, Any] = {
+            "src": str(params["from"]) if params.get("from") else None,
+            "dst": str(params["to"]) if params.get("to") else None,
+            "when": str(params["when"]) if params.get("when") else None,
+            "action": action if isinstance(action, dict) else None,
+            "condition": params.get("condition") if isinstance(params.get("condition"), dict) else None,
+        }
+        device_id = _graph_device(params)
+        if device_id:
+            return manager.get(device_id).graph_edge_add(**args)
+        return manager.mutate_project_graph(lambda graph: graph_edge_add(graph, **args))
 
     @server.method(METHOD_VARIABLE_SET)
     def _variable_set(params: dict[str, Any]) -> dict[str, Any]:
-        """改运行期变量值（黑板面板上直接试参数用；不写回脚本）。"""
+        """改运行期变量值（黑板面板上直接试参数用；不写回工作流）。"""
         session = manager.get(_require_str(params, "deviceId"))
         name = _require_str(params, "name")
         value = params.get("value")
@@ -475,15 +569,31 @@ def register(server: RpcServer) -> SessionManager:
 
     @server.method(METHOD_GRAPH_GET)
     def _graph_get(params: dict[str, Any]) -> dict[str, Any]:
-        return manager.get(_require_str(params, "deviceId")).graph.to_dict()
+        """读当前脚本的图。
+
+        `deviceId` **可选**：传了 = 那台设备会话里的那份（带它的运行态），
+        不传 = 直接读项目里的 `graph.json` —— 没连设备也能看脚本（状态图属于项目，不属于设备）。
+
+        **还没选脚本时给一张空图**（一等状态，不是错误）：界面刚起来还没选工作流是常态，
+        这里报错只会在日志里刷红字，画布那边什么也拿不到。
+        """
+        device_id = params.get("deviceId")
+        if isinstance(device_id, str) and device_id:
+            return manager.get(device_id).graph.to_dict()
+        if not manager.project.root:
+            return Graph.empty("", path="").to_dict()
+        return manager.project_graph().to_dict()
 
     @server.method(METHOD_GRAPH_SAVE)
     def _graph_save(params: dict[str, Any]) -> dict[str, Any]:
-        session = manager.get(_require_str(params, "deviceId"))
         payload = params.get("graph")
         if not isinstance(payload, dict):
             raise ValueError("缺少 graph 参数")
-        return session.save_graph(payload)
+        device_id = params.get("deviceId")
+        if isinstance(device_id, str) and device_id:
+            return manager.get(device_id).save_graph(payload)
+        # 项目级：落盘 + 让所有已连接会话热重载（连着的设备立刻拿到新脚本）
+        return manager.save_project_graph(payload)
 
     @server.method(METHOD_RECORD_TEMPLATE)
     def _record_template(params: dict[str, Any]) -> dict[str, Any]:
@@ -499,6 +609,8 @@ def register(server: RpcServer) -> SessionManager:
             as_action_target=bool(params.get("asActionTarget", True)),
             node_id=params.get("nodeId") if isinstance(params.get("nodeId"), str) else None,
             node_name=params.get("nodeName") if isinstance(params.get("nodeName"), str) else None,
+            # 「录一个新界面」：id 由引擎分配（界面传下来的 id 是本地序号，重启就重号，见 session.record_template）
+            allocate_node_id=bool(params.get("allocateNodeId", False)),
         )
 
     @server.method(METHOD_RECOGNIZER_THRESHOLD)

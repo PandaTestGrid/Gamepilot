@@ -11,13 +11,13 @@ import { StatusDot } from '@/layout/PanelShell';
 import { collectRecognizerUsage, describeRecognizerUsage } from '@/lib/recognizer-usage';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
-import { useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
 import type { RecognizerType } from '@/types';
 
 export function RecognizerPane(): ReactNode {
   const activeId = useDeviceStore((state) => state.activeId);
-  const graph = useGraphStore((state) => state.graphs[activeId]);
+  const graph = useGraphStore((state) => graphForDevice(state, activeId));
   const updateThreshold = useGraphStore((state) => state.updateRecognizerThreshold);
   const pushThreshold = useSessionStore((state) => state.setThreshold);
   const removeRecognizer = useSessionStore((state) => state.removeRecognizer);

@@ -8,6 +8,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { REQUIRED_ENGINE_METHODS } from '@/lib/engine-methods';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
 import { useSessionStore } from '@/stores/session.store';
@@ -34,7 +35,8 @@ describe('引擎 store', () => {
         return Promise.resolve({
           version: '0.0.1',
           protocol: 1,
-          methods: ['device.list', 'project.get', 'project.list', 'project.set'],
+          // 旧进程的方法表：只有项目当前值的读写（没有工作区层，也没有工作流层）
+          methods: ['device.list', 'project.get', 'project.set'],
         });
       }
       return Promise.resolve({});
@@ -56,7 +58,8 @@ describe('引擎 store', () => {
 
     const state = useEngineStore.getState();
     expect(state.status).toBe('ready'); // 进程是活的
-    expect(state.missingMethods).toContain('project.create'); // 但能力不够
+    expect(state.missingMethods).toContain('workspace.add'); // 工作区层
+    expect(state.missingMethods).toContain('workflow.create'); // 工作流层
   });
 
   it('重启：先 engine_stop 再 engine_start，最后重新握手', async () => {
@@ -70,7 +73,8 @@ describe('引擎 store', () => {
         return Promise.resolve({
           version: '0.0.1',
           protocol: 1,
-          methods: ['project.create', 'project.duplicate', 'project.rename', 'project.delete'],
+          // 新进程 = 能力清单齐全（跟着 REQUIRED_ENGINE_METHODS 走，契约变了这里自动跟上）
+          methods: [...REQUIRED_ENGINE_METHODS, 'device.list'],
         });
       }
       return Promise.resolve({});

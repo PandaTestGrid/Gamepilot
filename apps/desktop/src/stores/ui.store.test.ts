@@ -105,3 +105,44 @@ describe('草稿与设备的联动', () => {
     expect(useUiStore.getState().draft).not.toBeNull();
   });
 });
+
+describe('中间区域的 IDE 式标签（打开过的状态图）', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    useUiStore.setState({ openGraphs: [] });
+  });
+
+  it('打开一张多一个标签，按打开顺序排；重复打开只激活、不重复加也不重排', () => {
+    useUiStore.getState().openGraph('/p/甲/斗技');
+    useUiStore.getState().openGraph('/p/甲/百鬼');
+    expect(useUiStore.getState().openGraphs).toEqual(['/p/甲/斗技', '/p/甲/百鬼']);
+
+    useUiStore.getState().openGraph('/p/甲/斗技');
+    expect(useUiStore.getState().openGraphs).toEqual(['/p/甲/斗技', '/p/甲/百鬼']);
+  });
+
+  it('空 root 不进标签条（project 还没就绪时不该冒出一个空标签）', () => {
+    useUiStore.getState().openGraph('');
+    expect(useUiStore.getState().openGraphs).toEqual([]);
+  });
+
+  it('关标签只从列表里移除；关一个没开过的等于什么都没做', () => {
+    useUiStore.getState().openGraph('/p/甲/斗技');
+    useUiStore.getState().openGraph('/p/甲/百鬼');
+
+    useUiStore.getState().closeGraph('/p/甲/斗技');
+    expect(useUiStore.getState().openGraphs).toEqual(['/p/甲/百鬼']);
+
+    useUiStore.getState().closeGraph('/p/不存在');
+    expect(useUiStore.getState().openGraphs).toEqual(['/p/甲/百鬼']);
+  });
+
+  it('标签落 localStorage：重开应用时上次开着的那几张还在', () => {
+    useUiStore.getState().openGraph('/p/甲/斗技');
+    const saved = window.localStorage.getItem('gamepilot.open-graphs');
+    expect(JSON.parse(saved ?? 'null')).toEqual(['/p/甲/斗技']);
+
+    useUiStore.getState().closeGraph('/p/甲/斗技');
+    expect(JSON.parse(window.localStorage.getItem('gamepilot.open-graphs') ?? 'null')).toEqual([]);
+  });
+});

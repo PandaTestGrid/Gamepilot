@@ -9,22 +9,11 @@
  */
 
 /*
- * 空白画布：左键拖 = **框选**（不是平移），所以光标默认就是箭头，不能是"小手" ——
- * 那个 `cursor: grab` 是 xyflow 给"左键能平移"的画布加的（`.react-flow__pane.draggable`），
- * 用户反馈"鼠标一放上去就是个小手"就是它。平移现在是中键 / 空格+拖动，
- * 所以这里连 `.draggable` 都不会出现；框选进行中给个十字（比 xyflow 默认的 pointer 贴切）。
+ * 画布光标：**全用 xyflow 自己的**（左键拖空白 = 平移 → 它给 `.react-flow__pane.draggable`
+ * 的 grab、拖动中的 `.dragging` grabbing）。
+ * 这里不再自己接管：以前把左键改成框选、平移挪到右键/中键，才需要在外面补一套
+ * `.canvas-panning`，现在回到官方手势，那套补丁（连同"小手/十字"来回切的问题）一并删掉。
  */
-.react-flow__pane.selection {
-  cursor: crosshair;
-}
-/*
- * 平移进行中：光标换成"抓住"（右键/中键拖动时，要能看出自己在拖画布）。
- * ⚠️ 必须写在这条 `.selection` 之后：两者权重相同（都是两个类），靠源码顺序决胜 ——
- * xyflow 自带的 `.react-flow__pane.dragging{cursor:grabbing}` 是被我们这条 `.selection` 盖掉的。
- */
-.react-flow__pane.dragging {
-  cursor: grabbing;
-}
 
 /* 框选出来的矩形：用品牌色（xyflow 默认是浅蓝，在暗色主题上像系统高亮） */
 .react-flow__nodesselection-rect {

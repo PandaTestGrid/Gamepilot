@@ -43,6 +43,27 @@ function loadNodeScale(): NodeScale {
   }
 }
 
+/** 中间区域打开过的状态图：只记绝对路径；读不出来就当没开过（不拦启动）。 */
+const OPEN_GRAPHS_KEY = 'gamepilot.open-graphs';
+
+function loadOpenGraphs(): string[] {
+  try {
+    const raw = window.localStorage.getItem(OPEN_GRAPHS_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveOpenGraphs(roots: readonly string[]): void {
+  try {
+    window.localStorage.setItem(OPEN_GRAPHS_KEY, JSON.stringify(roots));
+  } catch {
+    // 记不住就算了，本次会话内照常生效
+  }
+}
+
 interface UiState {
   readonly recordMode: RecordMode;
   readonly draft: RecordDraft | null;
@@ -70,6 +91,19 @@ interface UiState {
   readonly setNodeScale: (scale: NodeScale) => void;
   /** 画面栏下半格（识别读数）是否展开：收起时只留一行标题，画面拿走全部高度 */
   readonly readoutOpen: boolean;
+  /**
+   * 中间区域打开过的状态图（IDE 式标签，绝对路径，按打开顺序）。
+   *
+   * 引擎同一时刻只加载一个任务目录（`switchProject` 会热重载所有设备的状态图），
+   * 所以"多标签"= 记住开过哪几张 + 点哪张就切哪张；关标签只从这份列表里移除，
+   * **不删文件、也不动引擎的当前目录**（关掉的那个正好是当前图时由 GraphTabs 切到相邻的）。
+   * 落 localStorage：重启后上午开着的那几张还在。
+   */
+  readonly openGraphs: readonly string[];
+  /** 打开一张状态图（已经在列表里就只激活，不重复加） */
+  readonly openGraph: (root: string) => void;
+  /** 关掉一个标签（只关界面） */
+  readonly closeGraph: (root: string) => void;
   /** 面板尺寸跟着它走（`Panel` 的 collapse/expand，见 ScreenPane） */
   readonly setReadoutOpen: (open: boolean) => void;
   readonly toggleDevicePopover: (open?: boolean) => void;
@@ -91,6 +125,7 @@ export const useUiStore = create<UiState>()((set, get) => ({
   readoutFilter: 'all',
   nodeScale: loadNodeScale(),
   readoutOpen: true,
+  openGraphs: loadOpenGraphs(),
   draft: null,
   devicePopoverOpen: false,
   deviceTab: 'all',
@@ -114,6 +149,24 @@ export const useUiStore = create<UiState>()((set, get) => ({
     set({ nodeScale });
   },
   setReadoutOpen: (readoutOpen) => set({ readoutOpen }),
+  openGraph: (root) =>
+    set((state) => {
+      if (!root || state.openGraphs.includes(root)) {
+        return state; // 已经开着：只激活，不重排（IDE 里点资源管理器也不会把标签挪位置）
+      }
+      const openGraphs = [...state.openGraphs, root];
+      saveOpenGraphs(openGraphs);
+      return { openGraphs };
+    }),
+  closeGraph: (root) =>
+    set((state) => {
+      if (!state.openGraphs.includes(root)) {
+        return state;
+      }
+      const openGraphs = state.openGraphs.filter((item) => item !== root);
+      saveOpenGraphs(openGraphs);
+      return { openGraphs };
+    }),
   toggleDevicePopover: (open) => set((state) => ({ devicePopoverOpen: open ?? !state.devicePopoverOpen })),
   setDeviceTab: (deviceTab) => set({ deviceTab }),
   setRightTab: (rightTab) => set({ rightTab }),
@@ -128,6 +181,9 @@ export const useUiStore = create<UiState>()((set, get) => ({
     set({
       sequence: sequence + 1,
       draft: {
+        // 草稿跟着**当前**设备走：之后用户在多开网格里切到别的格子，
+        // 确认时也仍然写进这一台的状态图（见 RecordDraft.deviceId 注释）
+        deviceId: useDeviceStore.getState().activeId || undefined,
         rect,
         label: '',
         threshold: DEFAULT_THRESHOLD,
@@ -137,6 +193,11 @@ export const useUiStore = create<UiState>()((set, get) => ({
         targetMode: 'new',
         targetNodeId: null,
         newNodeName: '新界面',
+        /*
+         * 这个 id 只在界面里用（草稿上的占位/临时素材名），**不是**最终节点 id：
+         * 序号每次开会话从 1 重数，落库时会撞上老界面，所以「新建」走
+         * `allocateNodeId`，由引擎分配真实 id（见 session.store.record）。
+         */
         newNodeId: `node_${sequence}`,
       },
     });
@@ -148,7 +209,9 @@ export const useUiStore = create<UiState>()((set, get) => ({
 
   commitDraft: () => {
     const { draft } = get();
-    const deviceId = useDeviceStore.getState().activeId;
+    // 落盘目标是**草稿自己的设备**（录制时记下的那台），不是"现在界面看的那台"：
+    // 多开时框完再点别的格子看一眼是常规操作，用 activeId 就会写错图
+    const deviceId = draft?.deviceId || useDeviceStore.getState().activeId;
     if (!draft || !deviceId) {
       return;
     }

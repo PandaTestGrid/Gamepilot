@@ -83,7 +83,7 @@ class Edge:
         return None if self.when in ("", ALWAYS_LABEL) else self.when
 
     def __post_init__(self) -> None:
-        # 直接构造 Edge（测试、脚本）时：没给条件就用 when 当 all_of，保持老语义。
+        # 直接构造 Edge（测试、手工拼数据）时：没给条件就用 when 当 all_of，保持老语义。
         # 否则空条件会被当成"永远成立"，恢复边会在第一帧就误触发。
         if not self.condition.labels and not self.condition.always and self.when:
             self.condition = Condition(all_of=(self.when,))
@@ -181,9 +181,11 @@ class Graph:
 
     @classmethod
     def empty(cls, base_dir: str, path: str | None = None) -> Graph:
+        # path="" 是合法入参：表示"还没有落盘位置"（没有选择工作流时的一等状态），
+        # 此时 save() 会明确报「状态图没有保存路径」，而不是往 cwd 里写一个 graph.json
         return cls(
             base_dir=base_dir,
-            path=path or os.path.join(base_dir, "graph.json"),
+            path=path if path is not None else os.path.join(base_dir, "graph.json"),
             defaults={"vote": 2, "tick_ms": 200, "transition_timeout_ms": 4000},
         )
 
@@ -204,7 +206,7 @@ class Graph:
             "edges": [edge.to_dict() for edge in self.edges],
         }
         if self.variables:
-            # 没有变量就不写这段（老脚本的文件保持干净）
+            # 没有变量就不写这段（老工作流的文件保持干净）
             out["variables"] = {name: var.to_dict() for name, var in self.variables.items()}
         return out
 
@@ -334,7 +336,7 @@ class Graph:
                     raise ValueError(f"边 {edge.id} 给未定义的变量赋值: {target_name}")
                 continue
             if str(edge.action.get("type")) == CALL_ACTION and not str(edge.action.get("script") or "").strip():
-                raise ValueError(f"边 {edge.id} 的「运行子脚本」没写脚本名")
+                raise ValueError(f"边 {edge.id} 的「运行子工作流」没写工作流名")
             if _action_is_deferred(edge.action):
                 # 带变量引用的动作：参数值要等运行时才知道，这里只校验引用本身
                 continue

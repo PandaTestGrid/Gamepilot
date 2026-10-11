@@ -1,23 +1,21 @@
 /**
- * 脚本目录（工程）菜单。
+ * 工作流菜单（顶栏）：手动切目录 + 列**当前工作区里的工作流**（v4 只有两层）。
  *
- * 一个目录 = 一个脚本：`graph.json`（状态图真源）+ `templates/`（录制下来的模板截图）。
- * 切换目录时引擎会热重载所有已连接设备的状态图，所以"换个游戏/换个账号的脚本"就是点一下。
+ * 一个工作流 = 一个目录：`graph.json`（状态图真源）+ `templates/`（录制下来的模板截图）。
+ * 切换目录时引擎会热重载所有已连接设备的状态图，所以"换个游戏/换个账号的工作流"就是点一下。
+ *
+ * 工作区由右栏的工作区面板管（可以有多个），这里**没有工作区下拉**；
+ * 新建工作流走内联表单（`WorkflowNameForm`，**要输名字**），不用 浏览器原生 prompt
+ * （Tauri 的 webview 里弹不出来）。
  */
 import { type ReactNode, useEffect, useState } from 'react';
 
 import { FolderOpen } from 'lucide-react';
 
+import { WorkflowNameForm } from '@/features/library/WorkflowNameForm';
+import { baseName, parentDir, toTree } from '@/features/library/workspace-tree';
 import { GhostButton } from '@/layout/PanelShell';
-import {
-  devLog,
-  projectCreate,
-  projectList,
-  type ProjectSummary,
-  workspaceCreate,
-  workspaceList,
-  type WorkspaceSummary,
-} from '@/lib/rpc';
+import { devLog, workflowCreate, workspaceTree, type WorkflowSummary } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useSessionStore } from '@/stores/session.store';
 
@@ -28,34 +26,44 @@ export function ProjectMenu(): ReactNode {
   const [open, setOpen] = useState(false);
   // null = 用户还没改过 → 直接跟随当前目录（派生值，不用 effect 同步）
   const [edited, setEdited] = useState<string | null>(null);
-  const [siblings, setSiblings] = useState<ProjectSummary[]>([]);
-  // 工作区（库根）与其中的任务（脚本）
-  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
-  const [picked, setPicked] = useState<string | null>(null);
+  /** 当前工作区里的工作流（点一下切换流程图） */
+  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
+  /** 内联新建工作流表单是否打开 */
+  const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** 增删改之后 +1，触发列表重拉 */
+  const [reload, setReload] = useState(0);
 
   const root = project?.root ?? '';
   const draft = edited ?? root;
+  /** 当前工作区（当前工作流的上一级目录）——「＋ 新建工作流」建在它下面 */
+  const workspaceName = baseName(parentDir(root)) || '未加载';
 
   useEffect(() => {
-    if (!root) {
-      return; // 引擎还没回话（或测试里的空响应）：别拿 undefined 当路径用
+    // 菜单没打开就不发 RPC（这个组件常驻顶栏，别让它一直打引擎）
+    if (!open) {
+      return;
     }
-    // 工作区列表（库根）+ 当前工作区里的任务
-    void workspaceList()
+    let alive = true;
+    // workspace.tree 给的就是"当前工作区里的工作流"（v4：没有项目那一层了）
+    void workspaceTree()
       .then((result) => {
-        setWorkspaces(result.items);
-        const parent = root.replace(/\/[^/]+$/, '');
-        const matched = result.items.find((item) => item.root === parent) ?? result.items[0];
-        setPicked((current) => current ?? matched?.name ?? null);
-        const base = result.items.find((item) => item.name === (picked ?? matched?.name))?.root ?? parent;
-        return projectList(base);
+        if (alive) {
+          setWorkflows([...toTree(result).workflows]);
+        }
       })
-      .then((result) => setSiblings(result.items))
-      .catch((error: unknown) => devLog(`工作区/任务列表失败: ${String(error)}`));
-  }, [root, open, picked]);
+      .catch((error: unknown) => {
+        devLog(`工作流列表失败: ${String(error)}`);
+        if (alive) {
+          setWorkflows([]);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, root, reload]);
 
-  const name = root ? (root.split('/').filter(Boolean).pop() ?? root) : '未加载';
+  const name = baseName(root) || '未加载';
 
   const apply = async (dir: string): Promise<void> => {
     setBusy(true);
@@ -64,12 +72,27 @@ export function ProjectMenu(): ReactNode {
     setOpen(false);
   };
 
+  const create = async (workflowName: string): Promise<void> => {
+    setBusy(true);
+    try {
+      // 建在当前工作区根下（引擎侧决定），建完自动切过去
+      await workflowCreate(workflowName);
+      await refreshProject();
+      setCreating(false);
+      setReload((value) => value + 1);
+    } catch (reason) {
+      devLog(`新建工作流失败: ${String(reason)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="relative">
       <GhostButton
         active={open}
         onClick={() => setOpen((value) => !value)}
-        title={root ? `脚本目录: ${root}` : '脚本目录还没加载'}
+        title={root ? `工作流目录: ${root}` : '工作流目录还没加载'}
       >
         <FolderOpen className="size-3" />
         {name}
@@ -83,8 +106,15 @@ export function ProjectMenu(): ReactNode {
       {open && (
         <div className="absolute top-7 left-0 z-30 w-[440px] rounded-sm border border-line bg-panel p-2 shadow-lg">
           <div className="mb-1 text-badge text-faint">
-            工作区 &gt; 任务（任务 = 一个脚本目录：graph.json + templates/）
-            <button type="button" className="ml-2 hover:text-fg" onClick={() => void refreshProject()}>
+            切工作流（一个工作流 = 一张流程图：graph.json + templates/）
+            <button
+              type="button"
+              className="ml-2 hover:text-fg"
+              onClick={() => {
+                void refreshProject();
+                setReload((value) => value + 1);
+              }}
+            >
               刷新
             </button>
           </div>
@@ -95,7 +125,7 @@ export function ProjectMenu(): ReactNode {
               onChange={(event) => setEdited(event.target.value)}
               spellCheck={false}
               className="h-6 min-w-0 flex-1 rounded-sm border border-line bg-canvas px-1.5 text-badge text-fg"
-              placeholder="~/Desktop/my-script 或任意绝对路径"
+              placeholder="~/Desktop/my-workflow 或任意绝对路径"
             />
             <button
               type="button"
@@ -107,73 +137,29 @@ export function ProjectMenu(): ReactNode {
             </button>
           </div>
 
-          <div className="mb-2 flex items-center gap-1 text-badge text-faint">
-            工作区
-            <select
-              value={picked ?? ''}
-              onChange={(event) => setPicked(event.target.value)}
-              className="h-6 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
-            >
-              {workspaces.map((item) => (
-                <option key={item.name} value={item.name}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              title="新建工作区（workspaces/<名字>/）"
-              onClick={() => {
-                const name = window.prompt('新工作区名字');
-                if (!name) {
-                  return;
-                }
-                void (async () => {
-                  try {
-                    const result = await workspaceCreate(name);
-                    setWorkspaces(result.items);
-                    setPicked(name);
-                  } catch (reason) {
-                    devLog(`新建工作区失败: ${String(reason)}`);
-                  }
-                })();
-              }}
-              className="h-6 rounded-sm border border-line px-1.5 hover:text-fg"
-            >
-              ＋ 新建工作区
+          <div className="mb-1 flex items-center gap-2 text-badge text-faint">
+            工作区：<span className="text-dim">{workspaceName}</span>
+            <button type="button" className="hover:text-fg" onClick={() => setCreating((value) => !value)}>
+              ＋ 新建工作流
             </button>
           </div>
 
-          <div className="max-h-40 overflow-auto">
-            <div className="mb-0.5 flex items-center gap-2 text-badge text-faint">
-              这个工作区里的任务（点一下切换状态图）
-              <button
-                type="button"
-                className="hover:text-fg"
-                onClick={() => {
-                  const name = window.prompt('新任务名字');
-                  if (!name) {
-                    return;
-                  }
-                  const base = workspaces.find((item) => item.name === picked)?.root;
-                  void (async () => {
-                    try {
-                      await projectCreate(name, base);
-                      await refreshProject();
-                      setSiblings((await projectList(base)).items);
-                    } catch (reason) {
-                      devLog(`新建任务失败: ${String(reason)}`);
-                    }
-                  })();
-                }}
-              >
-                ＋ 新建任务
-              </button>
+          {creating && (
+            <div className="mb-1">
+              <WorkflowNameForm
+                title="新建工作流（建完自动切过去）"
+                submitLabel="创建"
+                onSubmit={(workflowName) => void create(workflowName)}
+                onCancel={() => setCreating(false)}
+              />
             </div>
-            {siblings.length === 0 && (
-              <div className="px-1 py-1 text-badge text-faint">（这个工作区里还没有任务）</div>
+          )}
+
+          <div className="max-h-40 overflow-auto">
+            {workflows.length === 0 && (
+              <div className="px-1 py-1 text-badge text-faint">（这个工作区里还没有工作流）</div>
             )}
-            {siblings.map((item) => (
+            {workflows.map((item) => (
               <button
                 key={item.root}
                 type="button"

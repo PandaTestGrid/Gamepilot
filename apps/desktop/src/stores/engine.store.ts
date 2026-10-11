@@ -4,7 +4,7 @@
  * 唯一真正调用 Rust 命令的地方：`engine_start` / `engine_stop` + `engine.ping`。
  *
  * ⚠️ 引擎是应用启动时拉起的**独立进程**，会一直活着：代码更新后正在跑的那个仍是旧的，
- * 于是界面上会出现「未知方法: project.create」这类错误。引擎在 `engine.ready` / `engine.info`
+ * 于是界面上会出现「未知方法: workflow.create」这类错误。引擎在 `engine.ready` / `engine.info`
  * 里会报方法表，所以这里做两件事：
  *   1. 握手时对比能力清单（`lib/engine-methods.ts`），缺方法就置 `missingMethods`；
  *   2. 给出 `restart()`：停掉旧进程 → 拉起新进程 → 重新握手，并清掉设备/会话的连接态

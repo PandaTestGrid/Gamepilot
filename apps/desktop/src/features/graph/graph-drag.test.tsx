@@ -65,7 +65,13 @@ vi.mock('@xyflow/react', () => ({
   },
 }));
 
-/** 官方 applyNodeChanges 的最小实现：position / dimensions / select */
+/** 官方 applyNodeChanges 的最小实现：position / dimensions / select
+ *
+ * ⚠️ `position` 分支**不能**顺手把 `dragging` 也写上：官方只改 `position`（实测源码：
+ * `case 'position': { const position = { ...node.position, ...change.position }; ... }`）。
+ * 桩里替官方"补上"这个标记，会让"重建节点时丢了 dragging 标记"这类 bug 永远测不出来
+ * （测试里 `dragging` 永远是真的，而真机上它是被我们 `withDragging` 重新打上去的）。
+ */
 function applyChanges(nodes: never[], changes: Array<Record<string, unknown>>): unknown[] {
   let next = nodes as unknown as Array<Record<string, unknown>>;
   for (const change of changes) {
@@ -74,7 +80,8 @@ function applyChanges(nodes: never[], changes: Array<Record<string, unknown>>): 
         return node;
       }
       if (change.type === 'position' && change.position) {
-        return { ...node, position: change.position, dragging: change.dragging };
+        const position = change.position as { x: number; y: number };
+        return { ...node, position };
       }
       if (change.type === 'dimensions') {
         const size = change.dimensions as { width: number; height: number } | undefined;
@@ -91,6 +98,32 @@ function applyChanges(nodes: never[], changes: Array<Record<string, unknown>>): 
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve({})) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => undefined)) }));
+
+/**
+ * `graph.get` 的回包：**固定返回这两个界面**（而不是空图）。
+ *
+ * 为什么必须固定：GraphPane 挂载时会 `refreshGraph`（引擎回包会走 `placed()` 重建界面图）。
+ * 回空图的话，任何"等一会儿再断言 store"的用例都会被它清空（异步替换了测试 seed 的内容）——
+ * 那种 flaky 不是被测代码的问题，是夹具的问题。回包内容与 seed 一致，等待期间也稳定。
+ */
+const REFRESH_PAYLOAD = {
+  nodes: [
+    { id: 'n1', name: '主界面', enter: [] },
+    { id: 'n2', name: 'B', enter: [] },
+  ],
+  edges: [],
+  recognizers: {},
+  variables: {},
+};
+
+vi.mock('@/lib/rpc', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('@/lib/rpc');
+  return {
+    ...actual,
+    graphGet: vi.fn(() => Promise.resolve(REFRESH_PAYLOAD)),
+    devLog: vi.fn(),
+  };
+});
 
 function seed(): void {
   useDeviceStore.setState({
@@ -363,6 +396,70 @@ describe('状态图拖动', () => {
 
     const stored = useGraphStore.getState().graphs.dev?.nodes.find((node) => node.id === 'n1');
     expect(stored).toMatchObject({ x: 210, y: 160 });
+  });
+
+  it('多选拖动 + 拖动中每帧重建：两个节点都得守住本地坐标（不能只写回调里那一个）', async () => {
+    render(<GraphPane />);
+    /*
+     * ⚠️ 种子种在 render **之后**：GraphPane 挂载时会 `refreshGraph`（引擎回包），
+     * 这个用例里 mock 的 graphGet 回的是空图 —— 先种再挂会被它清掉。
+     */
+    act(() => {
+      useGraphStore.getState().setGraph('dev', {
+        deviceId: 'dev',
+        nodes: [
+          { id: 'n1', name: 'A', enter: [], x: 60, y: 40, visits: 0 },
+          { id: 'n2', name: 'B', enter: [], x: 260, y: 40, visits: 0 },
+        ],
+        edges: [],
+        variables: [],
+        recognizers: [],
+        activeNodeId: null,
+        pendingNodeId: null,
+      });
+    });
+
+    // 一起拖两个：xyflow 的 getDragItems 会把选中的都带上，两条 position(dragging) 一起发
+    act(() => {
+      probe.props?.onNodesChange([
+        { id: 'n1', type: 'position', position: { x: 120, y: 90 }, dragging: true },
+        { id: 'n2', type: 'position', position: { x: 320, y: 90 }, dragging: true },
+      ]);
+    });
+    expect(probe.props?.nodes.map((node) => node.position)).toEqual([
+      { x: 120, y: 90 },
+      { x: 320, y: 90 },
+    ]);
+
+    // 越过节流窗口（90ms）再触发一次节流回调：这一笔必须把**两个**都写回 store
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    act(() => {
+      probe.props?.onNodeDrag?.(null, { id: 'n1', position: { x: 120, y: 90 } });
+    });
+    const stored = useGraphStore.getState().graphs.dev?.nodes ?? [];
+    expect(
+      { n1: stored.find((n) => n.id === 'n1'), n2: stored.find((n) => n.id === 'n2') },
+      '只写了回调里那一个节点：另一个在 store 里还是旧坐标',
+    ).toMatchObject({ n1: { x: 120, y: 90 }, n2: { x: 320, y: 90 } });
+
+    // 拖动中的重建（引擎每帧都在推）：两个节点的画面坐标都不能被 store 按回去
+    act(() => {
+      useGraphStore.getState().updateLive('dev', {
+        node: 'n1',
+        pending: null,
+        detections: [{ label: '相机', score: 0.91, state: 'confirmed' }],
+      });
+      useGraphStore.getState().updateLive('dev', {
+        node: 'n2',
+        pending: null,
+        detections: [{ label: '相机', score: 0.93, state: 'confirmed' }],
+      });
+    });
+
+    expect(probe.props?.nodes.map((node) => node.position)).toEqual([
+      { x: 120, y: 90 },
+      { x: 320, y: 90 },
+    ]);
   });
 
   it('点节点是"选中"而不是开关：再点一次（含点节点里的东西）不该收起', () => {

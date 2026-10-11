@@ -31,6 +31,16 @@ assets/runtime/
 runs/
 *.log
 
+# 工作区（= 用户自己选的文件夹，里面是工作流的流程图与模板截图，属于用户数据）
+# 系统推荐位置在仓库内的 workspaces/默认；用户也可以把工作区选到仓库外的任何目录。
+workspaces/
+# 仓库根的准备区/暂存区（脚本和人工操作挪进来的东西，不入库）
+.trash/
+# 老布局，已废弃（工作区目录现在由用户选，记录在 config.json）
+projects/
+# 引擎的工作区列表配置（active + 最近使用）
+workspaces.json
+
 # ---------- 编辑器 / 系统 ----------
 .DS_Store
 .idea/

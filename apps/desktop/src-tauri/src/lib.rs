@@ -24,6 +24,10 @@ fn dev_log(message: String) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 原生"选文件夹"对话框（工作区面板的「添加工作区 ⌘O」用）。
+        // 前端是**动态 import + try/catch** 调的：拿不到原生对话框就退回手输绝对路径，
+        // 所以这个插件即使没装/没权限也不会让界面出现"点＋没反应"（见 features/library/native-dialog.ts）。
+        .plugin(tauri_plugin_dialog::init())
         .manage(Bridge::new())
         .invoke_handler(tauri::generate_handler![
             engine::engine_start,

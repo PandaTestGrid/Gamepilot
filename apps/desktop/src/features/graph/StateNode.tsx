@@ -25,7 +25,7 @@ import { toActionPayload } from '@/lib/graph-adapter';
 import { actionRun as runAction } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useEventStore } from '@/stores/event.store';
-import { useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, useGraphStore } from '@/stores/graph.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { useUiStore } from '@/stores/ui.store';
 import type { EdgeAction } from '@/types';
@@ -86,14 +86,16 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
   /*
    * ⚠️ selector 里**不能**写 `?? []`：那样每次 getSnapshot 都返回新数组，
    * useSyncExternalStore 会认为状态一直在变 → 无限重渲染（"Maximum update depth exceeded"，
-   * 图还没加载完时就会撞上）。先取稳定的 graph 对象，空值在组件里兜。
+   * 图还没加载完时就会撞上）。所以这里只取稳定的 graph 对象，空值在这一行外面兜。
    */
-  const graphVariables = useGraphStore((state) => state.graphs[String(data.deviceId)])?.variables ?? [];
+  const nodeGraph = useGraphStore((state) => graphForDevice(state, String(data.deviceId)));
+  const graphVariables = nodeGraph?.variables ?? [];
   // 双击就地改名：这是最常用的一次编辑，不该每次都跑到下面的面板
   const updateNode = useGraphStore((state) => state.updateNode);
   // 就地改"进入识别器"与加操作（不用每次都跑到下面的详情面板）
   const enterLabels = useGraphStore(
-    (state) => state.graphs[String(data.deviceId)]?.nodes.find((node) => node.id === data.sub)?.enter,
+    (state) =>
+      graphForDevice(state, String(data.deviceId))?.nodes.find((node) => node.id === data.sub)?.enter,
   );
   const selectEdge = useGraphStore((state) => state.selectEdge);
   const removeEdge = useGraphStore((state) => state.removeEdge);
@@ -113,12 +115,12 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
   const size = SIZES[scale];
   const thumb = size.thumb;
   /*
-   * 脚本库（"调用子脚本"的二级菜单要用）。
+   * 工作区里的工作流（"跳到某个工作流"的二级菜单要用）。
    * ⚠️ selector 里**不能** `.map()`：每次返回新数组 → useSyncExternalStore 认为状态一直在变
    * → 无限重渲染（"Maximum update depth exceeded"，和 graphVariables 那个坑同一个）。
    */
-  const scripts = useLibraryStore((state) => state.items);
-  const scriptNames = scripts.map((item) => item.name);
+  const workflows = useLibraryStore((state) => state.workflows);
+  const workflowNames = workflows.map((item) => item.name);
 
   const commit = (): void => {
     setEditing(false);
@@ -414,7 +416,7 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
                   ? buildActionMenu({
                       templates: data.allTemplates ?? [],
                       variables: graphVariables.map((item) => item.name),
-                      scripts: scriptNames,
+                      scripts: workflowNames,
                       create: createStep,
                     })
                   : [

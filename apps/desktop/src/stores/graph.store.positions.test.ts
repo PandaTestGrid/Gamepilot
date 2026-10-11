@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { GraphPayload } from '@/lib/rpc';
 import { setPositionScope } from '@/lib/node-positions';
+import { toGraphData } from '@/lib/graph-adapter';
 import { useGraphStore } from '@/stores/graph.store';
 
 const graphNodeAdd = vi.fn((..._args: unknown[]): Promise<{ nodeId: string; graph: GraphPayload }> =>
@@ -45,7 +46,7 @@ function nodeAt(id: string): { x: number; y: number } | undefined {
 describe('节点坐标记忆（store 层）', () => {
   beforeEach(() => {
     window.localStorage.clear();
-    setPositionScope('/repo/projects/test');
+    setPositionScope('/repo/workspaces/默认/斗技');
     useGraphStore.setState({ graphs: {}, raws: {}, selectedNodeId: null, selectedEdgeId: null });
     graphNodeAdd.mockReset();
   });
@@ -163,5 +164,26 @@ describe('节点坐标记忆（store 层）', () => {
     });
 
     expect(nodeAt('n1')).toEqual({ x: 333, y: 222 });
+  });
+
+  it('切设备不会换一套布局：记忆按脚本，不按设备', async () => {
+    useGraphStore.getState().setGraph(DEVICE, {
+      deviceId: DEVICE,
+      nodes: [{ id: 'n1', name: 'A', enter: [], x: 60, y: 40, visits: 0 }],
+      edges: [],
+      variables: [],
+      recognizers: [],
+      activeNodeId: null,
+      pendingNodeId: null,
+    });
+    useGraphStore.getState().moveNode(DEVICE, 'n1', 500, 360);
+    // 等节流落盘：切设备时读的就是这份记忆（以前键里带设备 id，B 设备读到的是另一份 → 布局自己变）
+    await new Promise((resolve) => setTimeout(resolve, 320));
+
+    const fromEngine = payload(['n1']);
+    useGraphStore.getState().setGraph('devB', toGraphData('devB', fromEngine), fromEngine);
+
+    const onB = useGraphStore.getState().graphs.devB?.nodes.find((item) => item.id === 'n1');
+    expect({ x: onB?.x, y: onB?.y }).toEqual({ x: 500, y: 360 });
   });
 });

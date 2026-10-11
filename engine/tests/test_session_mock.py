@@ -83,6 +83,47 @@ def test_textured_region_records_a_template_recognizer(session: DeviceSession) -
     assert detection.score >= 0.9, f"棋盘格目标的匹配分数不该这么低: {detection.score}"
 
 
+def test_record_new_node_never_reuses_a_living_node_id(session: DeviceSession) -> None:
+    """「录一个新界面」时 id 由引擎分配：界面传下来的 `node_N` 是本地序号，重启就重号。
+
+    真实踩过：应用重启后界面从 `node_1` 重新数，第二次录的界面撞上第一次录的那个 →
+    `graph.nodes.get(node_id)` 取到老节点，把新模板挂到老界面上（用户看到的"换脸"）。
+    """
+    first = session.record_template(
+        rect=Rect(*LOGO),
+        label="界面一",
+        node_id="node_1",
+        node_name="新界面",
+        allocate_node_id=True,
+    )
+    assert first["nodeId"] == "n_1"
+
+    # 重启应用后本地序号又从 node_1 开始：引擎必须另给一个 id，不能顶掉 n_1
+    second = session.record_template(
+        rect=Rect(*BUTTON),
+        label="界面二",
+        node_id="node_1",
+        node_name="新界面",
+        allocate_node_id=True,
+    )
+
+    assert second["nodeId"] == "n_2"
+    assert set(session.graph.nodes) == {"n_1", "n_2"}
+    assert session.graph.nodes["n_1"].enter == ["界面一"]
+    assert session.graph.nodes["n_2"].enter == ["界面二"]
+
+
+def test_record_into_existing_node_still_targets_that_node(session: DeviceSession) -> None:
+    """录到**已有**界面上（targetMode=existing）时 id 照旧生效：那条路不该被"分配 id"改掉。"""
+    session.record_template(rect=Rect(*LOGO), label="主界面", node_id="main", node_name="主界面")
+
+    again = session.record_template(rect=Rect(*BUTTON), label="血条", node_id="main")
+
+    assert again["nodeId"] == "main"
+    assert set(session.graph.nodes) == {"main"}
+    assert session.graph.nodes["main"].enter == ["主界面", "血条"]
+
+
 def test_remove_recognizer_deletes_its_template_file(session: DeviceSession, tmp_path: Path) -> None:
     """删除识别器要连素材文件一起删。
 

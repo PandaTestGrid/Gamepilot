@@ -145,6 +145,14 @@ export interface TraceEventView {
 
 /** 录制中：一次框选/点选产生的待确认草稿（DESIGN.md §4.4） */
 export interface RecordDraft {
+  /**
+   * 这一笔录制属于哪台设备（`beginDraft` 时按下哪一格就记哪一台）。
+   *
+   * 为什么必须记：确认时如果现取 `activeId`，多开网格里"在 A 上框完、又点了 B 那格看
+   * 一眼、再点确定"就会把 A 的选区写进 B 的状态图（真踩过）。草稿跟着设备走，
+   * 界面切到哪台都不影响它落盘到哪张图。
+   */
+  readonly deviceId?: string;
   /** 归一化选区 [x, y, w, h] */
   readonly rect: readonly [number, number, number, number];
   readonly label: string;
@@ -156,6 +164,11 @@ export interface RecordDraft {
   readonly targetMode: 'existing' | 'new';
   readonly targetNodeId: string | null;
   readonly newNodeName: string;
+  /**
+   * 「新建界面」时界面侧给的一个**占位** id（`node_${序号}`），不是最终 id：
+   * 序号每次开会话从 1 重数，落库时会撞上老界面，所以真实 id 由引擎分配
+   * （`record.template` 的 `allocateNodeId`，见 stores/session.store.ts）。
+   */
   readonly newNodeId: string;
 }
 

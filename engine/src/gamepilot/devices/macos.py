@@ -9,7 +9,7 @@
 - 控制：`CGEvent` 鼠标/键盘。坐标用**窗口原点的全局点坐标**（屏幕坐标，非像素），
   所以 Retina 缩放不影响映射。
   点按优先走**辅助功能 API**（`AXPress`）：完全后台执行，不动鼠标、不抢焦点 ——
-  适合"录好脚本后台回放"；目标没有可操作元素时（游戏、自绘界面）自动退回鼠标事件。
+  适合"录好工作流后台回放"；目标没有可操作元素时（游戏、自绘界面）自动退回鼠标事件。
 
   两种鼠标投递方式（`Mac:///?window=…&post=pid|global`）：
 
@@ -28,7 +28,7 @@
 `CGPreflightScreenCaptureAccess()` 可以预先判断有没有屏幕录制权限。
 
 Windows 侧同一套接口，换成 `EnumWindows` / `PrintWindow`+`BitBlt` / `SendInput` 即可，
-上层（设备列表、坐标映射、脚本）不用改。
+上层（设备列表、坐标映射、工作流）不用改。
 """
 
 from __future__ import annotations

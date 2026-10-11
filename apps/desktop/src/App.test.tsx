@@ -28,8 +28,9 @@ describe('主壳渲染', () => {
 
     expect(screen.getByText('画面')).toBeInTheDocument();
     expect(screen.getAllByText('状态图').length).toBeGreaterThan(0);
-    // 右栏 = Tab（脚本库 / 识别器）；事件流搬到了底部调试抽屉，Tab 名是「事件流」
-    expect(screen.getAllByText('项目').length).toBeGreaterThan(0);
+    // 右栏 = Tab（工作区 / 识别器）；事件流搬到了底部调试抽屉，Tab 名是「事件流」
+    // 「工作区」Tab 的整个内容区就是那一屏列表（常驻区域，不是浮层）
+    expect(screen.getByTestId('workspace-region')).toBeInTheDocument();
     expect(screen.getByText('识别器')).toBeInTheDocument();
     expect(screen.getByText('事件流')).toBeInTheDocument();
 
@@ -114,7 +115,7 @@ describe('可拖拽布局（回归：以前只有左右能拖，上下拖不动�
     }
   });
 
-  it('右栏 Tab：默认脚本库（多状态图入口），切到识别器看阈值', async () => {
+  it('右栏 Tab：默认落在脚本库（多状态图入口），切到识别器看阈值', async () => {
     const user = userEvent.setup({ applyAccept: false });
     render(<App />);
 

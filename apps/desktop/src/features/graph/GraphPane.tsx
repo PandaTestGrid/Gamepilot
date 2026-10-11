@@ -11,6 +11,9 @@ import {
   Background,
   BackgroundVariant,
   ConnectionMode,
+  type Connection,
+  type NodeChange,
+  type NodePositionChange,
   type ReactFlowInstance,
   MarkerType,
   Controls,
@@ -21,7 +24,16 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import '@/features/graph/graph.css';
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Component,
+  Fragment,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useNodesState } from '@xyflow/react';
 import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
@@ -29,6 +41,8 @@ import { EdgeEditor } from '@/features/graph/EdgeEditor';
 import { NodeEditor } from '@/features/graph/NodeEditor';
 import { DockBar } from '@/features/graph/DockBar';
 import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContextMenu';
+import { GraphTabs } from '@/features/graph/GraphTabs';
+import { taskName } from '@/features/graph/task-name';
 import { RunStatusStrip } from '@/features/graph/RunStatusStrip';
 import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
@@ -47,7 +61,7 @@ import { actionPins, summarizePins } from '@/lib/action-pins';
 import { type EdgeStatus, evaluateEdge, markShadowed } from '@/lib/edge-status';
 import { describeAction, edgeLabel } from '@/lib/graph-logic';
 import { devLog, graphGet, graphSave } from '@/lib/rpc';
-import { useGraphStore } from '@/stores/graph.store';
+import { SCRIPT_SCOPE, graphForDevice, rawFor, useGraphStore } from '@/stores/graph.store';
 
 const nodeTypes: NodeTypes = { state: StateNode };
 
@@ -59,11 +73,57 @@ const EDITOR_MIN_PX = 72;
 /** 节点大小档位的中文名（按钮上显示） */
 const NODE_SCALE_LABEL: Record<NodeScale, string> = { sm: '小', md: '中', lg: '大' };
 
+/**
+ * 画布兜底：画布这一格渲染期出错（典型的就是 xyflow 那条
+ * `Maximum update depth exceeded`）时，**只把画布换成"重建"**，不连累整个壳 ——
+ * 否则一次报错整个界面就废了，用户连"再试一次"的入口都没有（真发生过）。
+ * 重建 = 换 key 重挂子树，把坏掉的那棵 React Flow 扔掉重来。
+ */
+class CanvasBoundary extends Component<{ children: ReactNode }, { failed: boolean; generation: number }> {
+  override state = { failed: false, generation: 0 };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  override componentDidCatch(error: unknown): void {
+    devLog(`画布出错（已隔离，可重建）: ${String(error)}`);
+  }
+
+  override render(): ReactNode {
+    if (this.state.failed) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-2 text-badge text-faint">
+          <span>画布渲染出错了（已隔离，其它面板不受影响）</span>
+          <button
+            type="button"
+            onClick={() => {
+              this.setState((state) => ({ failed: false, generation: state.generation + 1 }));
+            }}
+            className="rounded-sm border border-line px-2 py-0.5 text-dim hover:bg-raised hover:text-fg"
+          >
+            重建画布
+          </button>
+        </div>
+      );
+    }
+    return <Fragment key={this.state.generation}>{this.props.children}</Fragment>;
+  }
+}
+
 export function GraphPane(): ReactNode {
   // 状态图 / 脚本：同一份数据的两种看法（一个看结构、一个看执行顺序）
   const [view, setView] = useState<'graph' | 'script' | 'variables'>('graph');
   const activeId = useDeviceStore((state) => state.activeId);
   const nodeScale = useUiStore((state) => state.nodeScale);
+  /*
+   * IDE 式标签：`openGraphs` 是"打开过哪几张"，当前是哪张以会话 store 为准（引擎的真源）。
+   * 任何切目录的动作（右栏点一下、欢迎卡片、启动恢复）都会让 `project.root` 变，
+   * 下面那个 effect 顺手把它加进标签条 —— 不用在每个调用点各写一遍。
+   */
+  const openGraphs = useUiStore((state) => state.openGraphs);
+  const openGraph = useUiStore((state) => state.openGraph);
+  const projectRoot = useSessionStore((state) => state.project?.root ?? '');
   // 运行中（引擎在跑状态机）：条件边流动、当前节点呼吸、顶部显示当前状态
   const running = useSessionStore((state) => state.running[activeId] === true);
   const setNodeScale = useUiStore((state) => state.setNodeScale);
@@ -73,7 +133,7 @@ export function GraphPane(): ReactNode {
    * 外层没有 Provider，只能从 onInit 里把实例接过来。
    */
   const flowRef = useRef<ReactFlowInstance<StateNodeType, Edge> | null>(null);
-  const graph = useGraphStore((state) => state.graphs[activeId]);
+  const graph = useGraphStore((state) => graphForDevice(state, activeId));
   const refreshGraph = useGraphStore((state) => state.refresh);
 
   const moveNode = useGraphStore((state) => state.moveNode);
@@ -87,11 +147,14 @@ export function GraphPane(): ReactNode {
   const removeNode = useGraphStore((state) => state.removeNode);
   const addBranch = useGraphStore((state) => state.addBranch);
 
-  // 切换设备（或切脚本）时对齐真相源：界面按设备各缓存一份图，另一台可能是旧的，
-  // 表现就像"切设备把状态图改了"。graph.json 只有一份，重新拉一次即可。
+  // 切设备 / 切脚本 / 引擎起来后回显了项目 → 对齐真相源（graph.json 只有一份，重新拉一次即可）。
   useEffect(() => {
+    /*
+     * **设备有没有都拉一次**：读的是项目里的脚本（`graph.get` 不带 deviceId），
+     * 所以没连设备也能看到画布内容 —— 脚本属于项目，设备只是"在哪台机器上跑"。
+     */
     void refreshGraph(activeId);
-  }, [activeId, refreshGraph]);
+  }, [activeId, projectRoot, refreshGraph]);
 
   // 关键：节点数组只在"位置/名字/识别器/激活态"变化时重建。
   // 直接用 [graph] 当依赖的话，每帧的实时分数更新都会造出一批新节点对象，
@@ -126,22 +189,22 @@ export function GraphPane(): ReactNode {
   );
 
   /*
-   * 画布上**框选**出来的界面（多选）。
+   * 选中态**只有两个来源**，都在 React Flow 自己手里：
+   *   1. `selectedNodeId`（store）：下方编辑器正在编辑哪一个，永远只有一个；
+   *   2. 画布上的多选（Control 点选、Shift/Control 框选）：xyflow 通过 `onNodesChange` 的
+   *      `select` 变更维护，落在 `rfNodes` 上 —— 这里按需读回来即可（见下面的 selectedIds）。
    *
-   * 为什么不并进 `selectedNodeId`：那个是"下方编辑器正在编辑哪一个"，永远只有一个；
-   * 框选是画布上的临时状态，可以有一串。两者取并集画边框。
-   * 也不放进 store：它不该跨设备/跨面板活着（换图就该清掉）。
+   * ⚠️ 别再自己维护一份"选中 id 数组"：它要么和 xyflow 的内部状态不同步（点了没反应），
+   * 要么反过来喂进节点数据形成回环（`selected` 变 → 重建节点 → 又报选中变化 →
+   * 计数乱跳 / 嵌套重渲染）。换设备、换脚本时 xyflow 的选中集跟着节点表一起重建，
+   * 本来就不需要我们去清。
    */
-  const [selectedIds, setSelectedIds] = useState<readonly string[]>([]);
 
-  // 选中态也算进签名：点节点要给"正在编辑的是哪个"画出边框（点击不会发生在拖拽中，安全）；
-  // 框选出来的那一串同理 —— 它变了就要重建节点，否则边框不会跟着亮/灭
+  // 选中态也算进签名：点节点要给"正在编辑的是哪个"画出边框（点击不会发生在拖拽中，安全）
   const nodeSignature = (graph?.nodes ?? [])
     .map((node) => `${node.id}:${node.x},${node.y},${node.name},${node.enter.join('|')}`)
     .join(';')
-    .concat(
-      `|${graph?.activeNodeId ?? ''}|${graph?.pendingNodeId ?? ''}|${selectedNodeId ?? ''}|${selectedIds.join(',')}`,
-    );
+    .concat(`|${graph?.activeNodeId ?? ''}|${graph?.pendingNodeId ?? ''}|${selectedNodeId ?? ''}`);
 
   /*
    * 节点状态用**官方的 useNodesState**（等价于 `const [nodes, setNodes, onNodesChange]`）。
@@ -155,6 +218,19 @@ export function GraphPane(): ReactNode {
    * 而同步时保留本地已有的坐标与尺寸（那是用户拖的、React Flow 量到的）。
    */
   const [rfNodes, setRfNodes, applyNodeChanges] = useNodesState<StateNodeType>([]);
+  /**
+   * 画布上选中的节点（**读回来**，不是自己维护）：多选由 xyflow 的 `select` 变更维护在
+   * `rfNodes` 上，这里只把 id 摘出来给图例工具条（「已选 N 个界面」/删除）用。
+   * 换设备、换脚本时节点表整体重建，选中集自然跟着清 —— 不需要额外去清。
+   */
+  const selectedIds = useMemo(
+    () =>
+      rfNodes
+        .filter((node) => node.selected === true)
+        .map((node) => node.id)
+        .sort(),
+    [rfNodes],
+  );
   // 鼠标停在哪条边上：边的线宽是**内联样式**（每条边按状态上色），CSS 的 :hover 盖不住，
   // 所以悬停反馈只能走 React 状态（顺带能在单测里断言）
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
@@ -223,11 +299,25 @@ export function GraphPane(): ReactNode {
     [graph, activeId, selectedNodeId, selectedIds, templateLabels, actionTargetTemplate],
   );
 
+  /*
+   * ⚠️ `buildNodes` **不能**进 effect 的依赖：它的依赖里有 `graph`，而引擎每帧都在推新分数
+   * （`graph` 每帧都是新对象）→ 依赖它等于"每帧重建一次节点数组"。
+   * 而节点数组换新 → xyflow 的 StoreUpdater 立刻 `setNodes` 回写它自己的 store →
+   * 触发嵌套重渲染；帧一密就攒到 React 的 50 次上限，报
+   * `Maximum update depth exceeded`（用户控制台里那条，堆栈点名 setNodes）。
+   * 所以用"最新实现"的 ref（只在 effect 里写，不在渲染期碰 current）：
+   * 同步 effect 只认签名（结构/内容/选中变了才同步），拿到的却始终是最新的 buildNodes。
+   */
+  const buildNodesRef = useRef(buildNodes);
+  useEffect(() => {
+    buildNodesRef.current = buildNodes;
+  });
+
   // 只有"图的结构/内容/激活态"变了才同步（用签名当依赖，避免每帧重建节点）
   useEffect(() => {
-    setRfNodes((previous) => buildNodes(previous));
+    setRfNodes((previous) => buildNodesRef.current(previous));
     // 用签名当依赖：实时分数每帧都在变，直接依赖 graph 会把节点每帧重建一遍
-  }, [nodeSignature, pinSignature, templateSignature, buildNodes, setRfNodes]);
+  }, [nodeSignature, pinSignature, templateSignature, setRfNodes]);
 
   // 每条边"现在走不走得通"：调试脚本时一眼看出卡在哪（纯逻辑在 lib/edge-status.ts）
   const statuses = useMemo(() => {
@@ -246,6 +336,37 @@ export function GraphPane(): ReactNode {
     );
     return markShadowed(graph.edges ?? [], raw);
   }, [graph]);
+
+  /*
+   * 边的**内容签名**：只有"画出来会不一样"的变化才换新数组。
+   * 之前直接用 `[graph]` 当依赖 → 引擎每帧推分数就重建一次 edges →
+   * xyflow 的 StoreUpdater 每帧 `setEdges` 回写自己的 store（和节点那条同一个坑）。
+   */
+  const edgeSignature = (graph?.edges ?? [])
+    .map((edge) => {
+      const status = statuses.get(edge.id);
+      const flags = `${edge.id === selectedEdgeId ? 'S' : ''}${edge.id === hoveredEdge ? 'H' : ''}`;
+      /*
+       * 签名必须覆盖"画出来会变"的每一处，漏一个就会让边**冻在旧样子**：
+       *   - `label` 里带**目标节点的名字**和**动作描述**（`edgeLabel`），所以两个都要进签名；
+       *   - `animated` 除了状态，还看"这条边是不是从当前节点出去的"。
+       */
+      const target = edge.to ? (graph?.nodes.find((node) => node.id === edge.to)?.name ?? edge.to) : '原地';
+      const fromActive = edge.from && edge.from === graph?.activeNodeId ? 'A' : '';
+      return [
+        edge.id,
+        edge.from ?? '',
+        edge.to ?? '',
+        target,
+        edge.kind,
+        edge.when,
+        JSON.stringify(edge.actionSpec),
+        status?.kind ?? '-',
+        flags,
+        fromActive,
+      ].join(':');
+    })
+    .join(';');
 
   const edges = useMemo<Edge[]>(() => {
     const list = graph?.edges ?? [];
@@ -295,8 +416,13 @@ export function GraphPane(): ReactNode {
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
         } satisfies Edge;
       });
-    // 上色/流动跟着实时状态走，否则运行时边的颜色与动画不会变；选中态也要跟着（编辑器换了一条边）
-  }, [graph, statuses, selectedEdgeId, hoveredEdge, running]);
+    /*
+     * 依赖是**签名**（内容变了才重建）+ `running`（决定流动动画）；
+     * 签名里已经含了选中/悬停/走不走得通，所以不用再列 selectedEdgeId/hoveredEdge/statuses。
+     * ⚠️ 别把 `graph` 加回来：它每帧都是新对象（分数在跳），加回来就退回"每帧重建"。
+     */
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 用签名代替 graph/statuses：它们每帧换新对象
+  }, [edgeSignature, running]);
 
   /**
    * 把全部节点收进视野（= 右下角「居中」）。
@@ -382,7 +508,7 @@ export function GraphPane(): ReactNode {
             hint: '原地动作',
             onSelect: () => {
               void connectNodes(activeId, nodeId, nodeId).then(() => {
-                const edges = useGraphStore.getState().graphs[activeId]?.edges ?? [];
+                const edges = graphForDevice(useGraphStore.getState(), activeId)?.edges ?? [];
                 const created = edges.filter((edge) => edge.from === nodeId).at(-1);
                 if (created) {
                   selectEdge(created.id);
@@ -488,6 +614,11 @@ export function GraphPane(): ReactNode {
    * 只在松手时写的话，松手那一瞬间只要有一次重建（实时推送/选中变化），
    * 节点就会被 store 里的旧坐标按回去 —— 抖动就是这么来的。节流 90ms 兜底即可，
    * 画面跟手仍然完全由 React Flow 本地负责。
+   *
+   * ⚠️ 节流这一笔必须把**所有正在拖的节点**都写回，不能只写回调里那一个：
+   * 多选拖动时（`getDragItems` 会把选中的都带上），只写 n1 的话，n2 在 store 里还是旧坐标，
+   * 而拖动期间引擎每帧都在推数据触发同步 —— 下一次同步就把 n2 **按回原位**，
+   * 看起来就是"拖着这个，另一个自己跳回去"。
    */
   const lastDragWrite = useRef(0);
   const onNodeDrag = useCallback(
@@ -497,7 +628,8 @@ export function GraphPane(): ReactNode {
         return;
       }
       lastDragWrite.current = now;
-      persistPositions([node.id]);
+      const dragging = nodesRef.current.filter((item) => item.dragging === true).map((item) => item.id);
+      persistPositions(dragging.length > 0 ? dragging : [node.id]);
     },
     [persistPositions],
   );
@@ -512,20 +644,50 @@ export function GraphPane(): ReactNode {
     [persistPositions],
   );
 
-  /** 选中集合变了（框选 / 点节点 / shift 加选 / 点空白清空）——React Flow 是"真源"，这里只镜像一份给删除按钮用 */
-  const onSelectionChange = useCallback((params: { nodes: Array<{ id: string }> }): void => {
-    const ids = params.nodes.map((node) => node.id);
-    setSelectedIds((current) =>
-      current.length === ids.length && current.every((id, index) => id === ids[index]) ? current : ids,
-    );
-  }, []);
+  /**
+   * `onNodesChange` 的包装：官方 `applyNodeChanges` 处理完，再**自己维护 `dragging` 标记**。
+   *
+   * 为什么必须自己维护（真踩过，`graph-drag.test.tsx` 里那条"拖动中被实时更新打断"的用例
+   * 一度是红的）：官方 `applyNodeChanges` 对 `position` 变更**只改 `position`**，
+   * 不写 `dragging`（源码里那个分支只 spread 了 position）。于是本地节点上的 `dragging`
+   * 永远是 undefined → `buildNodes` 重建时"正在拖的节点用本地坐标"这条路永远不生效
+   * → 拖动期间引擎每帧推数据都把节点**按回 store 的旧坐标**（表现：抖动、跟手不顺、
+   * 多个节点一起被拖时像"换脸"）。
+   *
+   * 这里把 xyflow 自己发的标记落进本地状态（拖动开始 `true`、松手 `false`），
+   * 重建时再原样带回去 —— 官方语义不变，只是把这个标记保管好。
+   */
+  const handleNodesChange = useCallback(
+    (changes: NodeChange<StateNodeType>[]): void => {
+      applyNodeChanges(changes);
+      const marks = changes.filter(
+        (change): change is NodePositionChange & { dragging: boolean } =>
+          change.type === 'position' && typeof change.dragging === 'boolean',
+      );
+      if (marks.length === 0) {
+        return; // 只有 select/dimensions 变更：不用再动 dragging 标记（也别白跑一次 setState）
+      }
+      setRfNodes((current) =>
+        current.map((node) => {
+          const mark = marks.find((change) => change.id === node.id);
+          if (!mark) {
+            return node;
+          }
+          const dragging = mark.dragging ? true : undefined;
+          return node.dragging === dragging ? node : { ...node, dragging };
+        }),
+      );
+    },
+    [applyNodeChanges, setRfNodes],
+  );
 
   /**
-   * 删除一组界面（Delete 键 / 框选后的「删除选中」都走这里）。
+   * 删除一组界面（Delete 键 / 多选后的「删除」都走这里）。
    *
    * - **逐个删**：引擎每个节点一次 `graph.node.remove`（它会把连着的边一并删掉，见
    *   `session.py: graph_node_remove`），所以这里不用自己先删边；
-   * - 先清选中态再发请求：否则删到一半时被删的节点还亮着边框，看着像卡住；
+   * - 先清选中态再发请求：否则删到一半时被删的节点还亮着边框，看着像卡住。
+   *   选中态归 xyflow 管，所以清 = 给它一串 `select: false`（走官方的 onChange 通道，不自己改状态）；
    * - 正在下方编辑的那个被删了 → 收起编辑器（否则面板里编辑的是一个不存在的界面）。
    */
   const deleteSelection = useCallback(
@@ -534,8 +696,11 @@ export function GraphPane(): ReactNode {
         return;
       }
       devLog(`删除界面：${ids.join('、')}（${ids.length} 个）`);
-      setSelectedIds([]);
-      if (selectedNodeId && ids.includes(selectedNodeId)) {
+      applyNodeChanges(ids.map((id) => ({ id, type: 'select' as const, selected: false })));
+      // 正在下方编辑的那个被删了 → 收起编辑器。这里现读 store，不把 selectedNodeId 列进依赖：
+      // 它一变（点个节点就变）这个回调就换引用，而 `onNodesDelete` 是 xyflow 的"被跟踪字段"
+      const editing = useGraphStore.getState().selectedNodeId;
+      if (editing && ids.includes(editing)) {
         selectNode(null);
       }
       for (const id of ids) {
@@ -546,8 +711,38 @@ export function GraphPane(): ReactNode {
         }
       }
     },
-    [activeId, removeNode, selectNode, selectedNodeId],
+    [activeId, applyNodeChanges, removeNode, selectNode],
   );
+
+  /*
+   * ⚠️ 传给 <ReactFlow> 的回调**必须是稳定引用**：xyflow 内部有个 StoreUpdater，
+   * 会把 props 里"被跟踪字段"的变化回写进它自己的 store（`setNodes` / `store.setState`）。
+   * 写成内联箭头函数 = 每次渲染都是新函数 → 每次渲染都往 xyflow 的 store 里写一遍 →
+   * 嵌套更新攒够 50 次就是用户控制台里那条
+   * `Maximum update depth exceeded`（堆栈点名的正是 `setNodes` 那个 effect）。
+   * 跟踪名单见 @xyflow/react 的 `reactFlowFieldsToTrack`；这里覆盖我们真正传了的几个。
+   */
+  const handleConnect = useCallback(
+    (connection: Connection): void => {
+      if (connection.source && connection.target) {
+        void connectNodes(activeId, connection.source, connection.target);
+      }
+    },
+    [connectNodes, activeId],
+  );
+  const handleNodesDelete = useCallback(
+    (nodes: Array<{ id: string }>): void => void deleteSelection(nodes.map((node) => node.id)),
+    [deleteSelection],
+  );
+  const handleEdgesDelete = useCallback(
+    (edges: Array<{ id: string }>): void => {
+      for (const edge of edges) {
+        void removeEdge(activeId, edge.id);
+      }
+    },
+    [removeEdge, activeId],
+  );
+  const fitViewOptions = useMemo(() => ({ padding: 0.25, maxZoom: 1.2 }), []);
 
   const selected = (graph?.edges ?? []).find((edge) => edge.id === selectedEdgeId) ?? null;
   const selectedNode = (graph?.nodes ?? []).find((node) => node.id === selectedNodeId) ?? null;
@@ -602,14 +797,17 @@ export function GraphPane(): ReactNode {
   // 没有 from 的边在画布上画不出来（React Flow 需要两端），运行时也不会被触发 —— 让它们可见并可清理
   const orphanEdges = (graph?.edges ?? []).filter((edge) => !edge.from);
   const cleanOrphans = useCallback(async () => {
-    const raw = useGraphStore.getState().raws[activeId];
+    const raw = rawFor(useGraphStore.getState(), activeId);
     if (!raw) {
       return;
     }
     const kept = (raw.edges ?? []).filter((edge: Record<string, unknown>) => Boolean(edge.from));
-    await graphSave(activeId, { ...raw, edges: kept });
-    const saved = await graphGet(activeId);
-    useGraphStore.getState().setGraph(activeId, toGraphData(activeId, saved, undefined), saved);
+    // 项目级保存（脚本属于项目，不属于设备）
+    await graphSave({ ...raw, edges: kept });
+    const saved = await graphGet();
+    useGraphStore
+      .getState()
+      .setGraph(activeId, toGraphData(activeId || SCRIPT_SCOPE, saved, undefined), saved);
   }, [activeId]);
 
   // 诊断：节点数组只在"真正变化"时重建（每帧重建会导致拖动被 props 抢位置）
@@ -618,9 +816,21 @@ export function GraphPane(): ReactNode {
   }, [rfNodes]);
   const recoveries = (graph?.edges ?? []).filter((edge) => edge.kind === 'recovery');
 
+  /*
+   * 当前是哪张图，就保证它在标签条里。
+   * 注意"全部关掉"的行为：关最后一个标签时 `project.root` 并没有变（引擎那边还是这个目录），
+   * 依赖没变 → 这个 effect 不会再跑一次，所以空态不会被自己的 effect 立刻弹回来。
+   */
+  useEffect(() => {
+    if (projectRoot) {
+      openGraph(projectRoot);
+    }
+  }, [projectRoot, openGraph]);
+
   return (
     <PanelShell
       title="状态图"
+      tabs={openGraphs.length > 0 ? <GraphTabs /> : undefined}
       actions={
         <>
           {/*
@@ -633,7 +843,7 @@ export function GraphPane(): ReactNode {
           {/*
             这里不再放「工作区 › 项目 › 状态图」三级切换条（原 TaskTabs）：
             同一份层级在右栏「脚本库」的目录树里已经有了，图栏头再摆一份是纯重复 ——
-            而且那条里的「＋项目 / ＋状态图」走的是 window.prompt，在 Tauri 的 webview 里
+            而且那条里的「＋项目 / ＋状态图」走的是 原生 prompt，在 Tauri 的 webview 里
             根本弹不出来（点了一点反应都没有）。管理入口归右栏，这里只留运行时与画布操作。
           */}
           <GhostButton
@@ -698,222 +908,261 @@ export function GraphPane(): ReactNode {
         className="h-full"
       >
         <Panel id="canvas" defaultSize="68%" minSize="30%" style={{ overflow: 'hidden' }}>
-          <div className="relative h-full bg-canvas">
-            {rfNodes.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center gap-1 text-badge text-faint">
-                <span>这台设备还没有状态图</span>
-                <span>先连接设备，然后在画面栏点「框选」，在画面上拖一个矩形即生成第一个节点</span>
-              </div>
-            ) : view === 'script' ? (
-              <ScriptStepsView graph={graph} />
-            ) : view === 'variables' ? (
-              <VariablesPanel deviceId={activeId} graph={graph} />
-            ) : (
-              <ReactFlow
-                nodes={rfNodes}
-                edges={edges}
-                nodeTypes={nodeTypes}
-                onNodesChange={applyNodeChanges}
-                onNodeDrag={onNodeDrag}
-                onNodeDragStop={onNodeDragStop}
-                // 点边 = 选中（幂等）：以前是 toggle，点到已选中的边会顺手关掉编辑器
-                onEdgeClick={(_event, edge) => selectEdge(edge.id)}
-                onEdgeMouseEnter={(_event, edge) => setHoveredEdge(edge.id)}
-                onEdgeMouseLeave={() => setHoveredEdge(null)}
-                // 双击边 = 直接进编辑（底部面板会聚焦到动作区）
-                onEdgeDoubleClick={(_event, edge) => {
-                  selectEdge(edge.id);
-                  focusEdgeAction();
-                }}
+          <CanvasBoundary>
+            <div
+              data-testid="graph-canvas"
+              // 平移/缩放的光标全交给 xyflow（左键能平移时它自己给 .draggable → grab/grabbing）
+              className="relative h-full bg-canvas"
+            >
+              {/*
+              标签全关掉了：画布不卸载（卸载再挂要重算 React Flow 的视图与坐标），
+              而是盖一层空态挡在上面 —— 既拦住"关掉了却还能点画布"的错觉，
+              又给一条明确的回头路（引擎那边的当前图点一下就开回来）。
+            */}
+              {openGraphs.length === 0 && (
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-1 bg-canvas text-badge text-faint">
+                  <span>没有打开的状态图</span>
+                  <span>右栏「脚本库」点任意一张就打开一个标签，标签上的 ✕ 只管关掉界面</span>
+                  {projectRoot ? (
+                    <button
+                      type="button"
+                      onClick={() => openGraph(projectRoot)}
+                      title={projectRoot}
+                      className="mt-1 rounded-sm border border-line px-1.5 py-0.5 text-dim hover:bg-raised hover:text-fg"
+                    >
+                      重新打开「{taskName(projectRoot)}」
+                    </button>
+                  ) : null}
+                </div>
+              )}
+              {view === 'script' ? (
+                <ScriptStepsView graph={graph} />
+              ) : view === 'variables' ? (
+                <VariablesPanel deviceId={activeId} graph={graph} />
+              ) : (
                 /*
-                 * 点节点 = 选中（**幂等**，不再 toggle）。
-                 * 以前点已展开的节点会"取消选中 → 收起"，而节点内部的空白/文字/改名输入框
-                 * 点一下也会冒泡到这里 —— 用户反馈"点节点里的东西也会收起"就是这个。
-                 * 收起统一由画布空白（onPaneClick）负责。
+                 * ⚠️ `<ReactFlow>` **必须常挂**，不能用 `rfNodes.length === 0 ? 提示 : <ReactFlow>`
+                 * 这种"空就换掉"的写法：`rfNodes` 一旦在 0 和非 0 之间来回（引擎回包/切设备/清缓存
+                 * 都会），ReactFlow 就跟着**反复卸载重挂**。它每次挂载都会在 mount effect 里
+                 * `setNodes` 回写自己的 store（StoreUpdater），卸载又把"上次的值"清空 →
+                 * 挂载 → 写入 → 嵌套重渲染 → 再挂载 …… 最后就是用户控制台里那条
+                 * `Maximum update depth exceeded`（堆栈签名：commitHookEffectListMount → setNodes）。
+                 * 空态改成**盖一层不拦事件的提示**：画布照样能拖能滚，也少一条重挂路径。
                  */
-                onNodeClick={(_event, node) => selectNode(node.id)}
-                onConnect={(connection) => {
-                  if (connection.source && connection.target) {
-                    void connectNodes(activeId, connection.source, connection.target);
-                  }
-                }}
-                onPaneContextMenu={(event) => {
-                  const mouse = event;
-                  const flow = flowRef.current?.screenToFlowPosition({
-                    x: mouse.clientX,
-                    y: mouse.clientY,
-                  }) ?? { x: 0, y: 0 };
-                  openPaneMenu(mouse, flow);
-                }}
-                onNodeContextMenu={(event, node) => {
-                  selectNode(node.id);
-                  openNodeMenu(event, node.id, node.data.label || node.id);
-                }}
-                onEdgeContextMenu={(event, edge) => {
-                  selectEdge(edge.id);
-                  openEdgeMenu(event, edge.id, typeof edge.label === 'string' ? edge.label : edge.id);
-                }}
-                /*
-                 * 点画布空白 = 收起。
-                 *
-                 * ⚠️ xyflow 的 pane click 是挂在 `.react-flow__pane` 上的，而节点就在它里面 ——
-                 * 点节点/边时这个回调**也会被触发**（冒泡）。不排掉的话：点节点会"先选中、再被清空"，
-                 * 点节点里的操作更是直接收起（用户反馈的两次"收起"都是这个）。
-                 */
-                onPaneClick={(event) => {
-                  const target = event.target as HTMLElement | null;
-                  if (target?.closest('.react-flow__node') || target?.closest('.react-flow__edge')) {
-                    return; // 点在节点/边里面：不是"点空白"
-                  }
-                  selectEdge(null);
-                  selectNode(null);
-                }}
-                onInit={(instance) => {
-                  flowRef.current = instance;
-                }}
-                /*
-                 * 画布手势：
-                 *   - `selectionOnDrag`：**左键拖空白 = 框选**多个界面；
-                 *   - `panOnDrag={[1, 2]}`：平移给**中键 + 右键**（外加"空格+拖动"）。
-                 *     `[1]`/`[2]` 是 DOM 的 `MouseEvent.button`：1 = 中键、2 = 右键。
-                 *     右键**拖动** = 平移（光标是"小手"，Figma / Unity 都是这个手感，用户点名要），
-                 *     右键**只点不拖** = 弹菜单 —— xyflow 原生分得开（`createPanZoomEndHandler`：
-                 *     这次右键被用来平移过，就不触发 onPaneContextMenu），所以两者可以共存。
-                 *   - `panOnScroll` + `zoomOnScroll={false}`：**滚动/双指滑动 = 平移**，
-                 *     ⌘+滚动 = 缩放（Mac 上 zoomActivationKeyCode 默认就是 Meta），捏合仍然缩放。
-                 *     Mac 触控板没有中键，原来"滚动=缩放"意味着不按空格就没法平移。
-                 */
-                selectionOnDrag
-                panOnDrag={[1, 2]}
-                panOnScroll
-                zoomOnScroll={false}
-                multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
-                // Delete 和 Backspace 都能删（macOS 键盘上 Delete 是 Fn+Backspace，不给 Backspace 就没人删得动）
-                deleteKeyCode={['Delete', 'Backspace']}
-                onSelectionChange={onSelectionChange}
-                /* Delete 键删：xyflow 先从自己的状态里摘掉再回调 → 这里同步到引擎（真源在 graph.json） */
-                onNodesDelete={(nodes) => void deleteSelection(nodes.map((node) => node.id))}
-                onEdgesDelete={(edges) => {
-                  for (const edge of edges) {
-                    void removeEdge(activeId, edge.id);
-                  }
-                }}
-                fitView
-                fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
-                minZoom={0.3}
-                maxZoom={1.6}
-                nodesDraggable
-                nodesConnectable
-                // 允许从任意一侧的圆点连（Loose）：用户不用记住"左边是入、右边是出"
-                // 用官方的严格模式：右圆点(出) → 左圆点(入)。Loose 模式下从**左**（target）
-                // 圆点拖出去也允许连线，得到的是反向边（用户反馈"选左侧却连到右侧"）
-                connectionMode={ConnectionMode.Strict}
-                connectionLineStyle={{ stroke: 'var(--brand, #6ea8fe)', strokeWidth: 2 }}
-                proOptions={{ hideAttribution: false }}
-              >
-                <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#262b36" />
-                {/*
+                <>
+                  <ReactFlow
+                    nodes={rfNodes}
+                    edges={edges}
+                    nodeTypes={nodeTypes}
+                    onNodesChange={handleNodesChange}
+                    onNodeDrag={onNodeDrag}
+                    onNodeDragStop={onNodeDragStop}
+                    // 点边 = 选中（幂等）：以前是 toggle，点到已选中的边会顺手关掉编辑器
+                    onEdgeClick={(_event, edge) => selectEdge(edge.id)}
+                    onEdgeMouseEnter={(_event, edge) => setHoveredEdge(edge.id)}
+                    onEdgeMouseLeave={() => setHoveredEdge(null)}
+                    // 双击边 = 直接进编辑（底部面板会聚焦到动作区）
+                    onEdgeDoubleClick={(_event, edge) => {
+                      selectEdge(edge.id);
+                      focusEdgeAction();
+                    }}
+                    /*
+                     * 点节点 = 选中（**幂等**，不再 toggle）。
+                     * 以前点已展开的节点会"取消选中 → 收起"，而节点内部的空白/文字/改名输入框
+                     * 点一下也会冒泡到这里 —— 用户反馈"点节点里的东西也会收起"就是这个。
+                     * 收起统一由画布空白（onPaneClick）负责。
+                     */
+                    onNodeClick={(_event, node) => selectNode(node.id)}
+                    // 稳定引用，见上面 handleConnect 的注释（xyflow 会把它回写进自己的 store）
+                    onConnect={handleConnect}
+                    onPaneContextMenu={(event) => {
+                      const mouse = event;
+                      const flow = flowRef.current?.screenToFlowPosition({
+                        x: mouse.clientX,
+                        y: mouse.clientY,
+                      }) ?? { x: 0, y: 0 };
+                      openPaneMenu(mouse, flow);
+                    }}
+                    onNodeContextMenu={(event, node) => {
+                      selectNode(node.id);
+                      openNodeMenu(event, node.id, node.data.label || node.id);
+                    }}
+                    onEdgeContextMenu={(event, edge) => {
+                      selectEdge(edge.id);
+                      openEdgeMenu(event, edge.id, typeof edge.label === 'string' ? edge.label : edge.id);
+                    }}
+                    /*
+                     * 点画布空白 = 收起。
+                     *
+                     * ⚠️ xyflow 的 pane click 是挂在 `.react-flow__pane` 上的，而节点就在它里面 ——
+                     * 点节点/边时这个回调**也会被触发**（冒泡）。不排掉的话：点节点会"先选中、再被清空"，
+                     * 点节点里的操作更是直接收起（用户反馈的两次"收起"都是这个）。
+                     */
+                    onPaneClick={(event) => {
+                      const target = event.target as HTMLElement | null;
+                      if (target?.closest('.react-flow__node') || target?.closest('.react-flow__edge')) {
+                        return; // 点在节点/边里面：不是"点空白"
+                      }
+                      selectEdge(null);
+                      selectNode(null);
+                    }}
+                    onInit={(instance) => {
+                      flowRef.current = instance;
+                    }}
+                    /*
+                     * 画布手势：**全部用官方默认**，一条都不自己发明。
+                     *   - 左键拖空白 = 平移（`panOnDrag` 默认 true；光标是 xyflow 自己给的 grab）；
+                     *   - Shift 拖动 = 框选（`selectionKeyCode` 默认 Shift；`selectionOnDrag` 保持默认 false）；
+                     *   - 滚动 / 双指滑动 = 缩放（`zoomOnScroll` 默认 true，捏合也缩放）；
+                     *   - 中键拖动、空格+拖动 = 平移（官方内置）；
+                     *   - 多选 = **Control** 点选（`multiSelectionKeyCode`；官方在 mac 上是 Meta，
+                     *     这里按用户要求统一成 Control，Windows/Linux 上本来就是它）。
+                     * ⚠️ 不要再传 `panOnDrag={[1, 2]}` 那类数组：xyflow 一见 `panOnDrag` 含 2
+                     * 就 `preventDefault()` 掉画布的 contextmenu，右键菜单会整个消失。
+                     */
+                    zoomOnScroll
+                    multiSelectionKeyCode={['Control']}
+                    // Delete 和 Backspace 都能删（macOS 键盘上 Delete 是 Fn+Backspace，不给 Backspace 就没人删得动）
+                    deleteKeyCode={['Delete', 'Backspace']}
+                    /* Delete 键删：xyflow 先从自己的状态里摘掉再回调 → 这里同步到引擎（真源在 graph.json）。
+                   这三个也都是 xyflow 的"被跟踪字段"，必须用稳定引用（见 handleConnect 的注释） */
+                    onNodesDelete={handleNodesDelete}
+                    onEdgesDelete={handleEdgesDelete}
+                    fitView
+                    fitViewOptions={fitViewOptions}
+                    minZoom={0.3}
+                    maxZoom={1.6}
+                    nodesDraggable
+                    nodesConnectable
+                    // 允许从任意一侧的圆点连（Loose）：用户不用记住"左边是入、右边是出"
+                    // 用官方的严格模式：右圆点(出) → 左圆点(入)。Loose 模式下从**左**（target）
+                    // 圆点拖出去也允许连线，得到的是反向边（用户反馈"选左侧却连到右侧"）
+                    connectionMode={ConnectionMode.Strict}
+                    connectionLineStyle={{ stroke: 'var(--brand, #6ea8fe)', strokeWidth: 2 }}
+                    proOptions={{ hideAttribution: false }}
+                  >
+                    <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#262b36" />
+                    {/*
                   小地图：节点一多（或拖远了）没有它就"找不到自己在哪"，
                   用户反馈"节点会消失"有一半是节点跑到视野外却没有参照物。
                 */}
-                <MiniMap
-                  pannable
-                  zoomable
-                  position="bottom-right"
-                  style={{
-                    width: 148,
-                    height: 104,
-                    // 官方控件放在小地图左边（两个都在右下角会叠在一起）
-                    bottom: 8,
-                    right: 8,
-                    background: 'var(--bg-panel)',
-                    border: '1px solid var(--border)',
-                  }}
-                  maskColor="rgba(10,12,16,0.55)"
-                  // 节点颜色要能看清：原来用面板灰，和底色几乎一样，小地图等于白给
-                  nodeColor={(node) =>
-                    (node.data as { active?: boolean } | undefined)?.active ? '#4da3ff' : '#8b95a7'
-                  }
-                  nodeStrokeColor="#1a1d24"
-                  nodeStrokeWidth={1}
-                  nodeBorderRadius={2}
-                />
-                {/* 官方控件：缩放 / 适配视图（fitView）/ 锁定，比自己画一套稳 */}
-                <Controls
-                  showInteractive={false}
-                  position="bottom-right"
-                  style={{ bottom: 8, right: 164 }} // 挨着小地图左侧
-                />
-              </ReactFlow>
-            )}
-
-            {/* 图例 + 孤立步骤清理：第一次打开的人要能知道节点/边是干什么的 */}
-            <div className="pointer-events-none absolute bottom-2 left-2 flex max-w-[70%] flex-col items-start gap-0.5 rounded-sm bg-panel/85 px-1 text-badge text-faint">
-              <span className="pointer-events-none">
-                节点 = 一个界面（由识别器判定）· 边 = 一个动作（条件成立才走）
-              </span>
-              <span className="pointer-events-none">
-                拖节点右侧圆点连到另一个节点 = 连一条边；点节点/边可在下方编辑
-              </span>
-              <span className="pointer-events-none">拖动空白 = 框选多个界面（Delete 删除选中）</span>
-              <span className="pointer-events-none">
-                滚动 / 双指滑动 = 平移画布，⌘+滚动 = 缩放（空格或中键拖动也能平移）
-              </span>
-              {selectedIds.length > 0 && (
-                <span className="pointer-events-auto flex items-center gap-1 rounded-sm border border-brand bg-panel px-1 text-brand">
-                  <span data-testid="selection-count">已选 {selectedIds.length} 个界面</span>
-                  <button
-                    type="button"
-                    data-testid="delete-selection"
-                    onClick={() => void deleteSelection(selectedIds)}
-                    title="删除选中的界面（连在它们身上的边会一起删）"
-                    className="rounded-sm border border-failed/60 px-1 text-failed hover:bg-raised"
-                  >
-                    删除
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedIds([]);
-                      selectNode(null);
-                    }}
-                    title="取消选择（也可以点一下画布空白）"
-                    className="rounded-sm px-1 text-dim hover:bg-raised hover:text-fg"
-                  >
-                    取消选择
-                  </button>
-                </span>
+                    <MiniMap
+                      pannable
+                      zoomable
+                      position="bottom-right"
+                      style={{
+                        width: 148,
+                        height: 104,
+                        // 官方控件放在小地图左边（两个都在右下角会叠在一起）
+                        bottom: 8,
+                        right: 8,
+                        background: 'var(--bg-panel)',
+                        border: '1px solid var(--border)',
+                      }}
+                      maskColor="rgba(10,12,16,0.55)"
+                      // 节点颜色要能看清：原来用面板灰，和底色几乎一样，小地图等于白给
+                      nodeColor={(node) =>
+                        (node.data as { active?: boolean } | undefined)?.active ? '#4da3ff' : '#8b95a7'
+                      }
+                      nodeStrokeColor="#1a1d24"
+                      nodeStrokeWidth={1}
+                      nodeBorderRadius={2}
+                    />
+                    {/* 官方控件：缩放 / 适配视图（fitView）/ 锁定，比自己画一套稳 */}
+                    <Controls
+                      showInteractive={false}
+                      position="bottom-right"
+                      style={{ bottom: 8, right: 164 }} // 挨着小地图左侧
+                    />
+                  </ReactFlow>
+                  {/*
+                  空脚本的提示：**盖上去**而不是替换画布（见上面那段注释）。
+                  `pointer-events-none` 保留平移/框选，用户不用先"点掉"提示。
+                */}
+                  {rfNodes.length === 0 && (
+                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 text-badge text-faint">
+                      <span>这份脚本还没有界面节点</span>
+                      <span>
+                        连上设备后，在画面栏点「框选」拖一个矩形 = 录一个界面（脚本存在项目里，和设备无关）
+                      </span>
+                    </div>
+                  )}
+                </>
               )}
-              {orphanEdges.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => void cleanOrphans()}
-                  className="pointer-events-auto rounded-sm border border-failed/60 px-1 text-failed hover:bg-raised"
-                  title="这些步骤没有挂在任何界面上：画布上不显示、运行时也不会被触发"
-                >
-                  有 {orphanEdges.length} 个未挂界面的录制步骤 · 点这里清理
-                </button>
+
+              {/* 图例 + 孤立步骤清理：第一次打开的人要能知道节点/边是干什么的 */}
+              <div className="pointer-events-none absolute bottom-2 left-2 flex max-w-[70%] flex-col items-start gap-0.5 rounded-sm bg-panel/85 px-1 text-badge text-faint">
+                <span className="pointer-events-none">
+                  节点 = 一个界面（由识别器判定）· 边 = 一个动作（条件成立才走）
+                </span>
+                <span className="pointer-events-none">
+                  拖节点右侧圆点连到另一个节点 = 连一条边；点节点/边可在下方编辑
+                </span>
+                <span className="pointer-events-none">
+                  拖动空白 = 平移画布；Shift+拖动 = 框选；按住 Control 点 = 多选（Delete 删除选中）
+                </span>
+                <span className="pointer-events-none">
+                  滚动 / 双指滑动 = 缩放画布；中键或空格+拖动 = 平移
+                </span>
+                {selectedIds.length > 0 && (
+                  <span className="pointer-events-auto flex items-center gap-1 rounded-sm border border-brand bg-panel px-1 text-brand">
+                    <span data-testid="selection-count">已选 {selectedIds.length} 个界面</span>
+                    <button
+                      type="button"
+                      data-testid="delete-selection"
+                      onClick={() => void deleteSelection(selectedIds)}
+                      title="删除选中的界面（连在它们身上的边会一起删）"
+                      className="rounded-sm border border-failed/60 px-1 text-failed hover:bg-raised"
+                    >
+                      删除
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // 清选中 = 同一条官方通道（onNodesChange 的 select），不自己改状态
+                        applyNodeChanges(
+                          selectedIds.map((id) => ({ id, type: 'select' as const, selected: false })),
+                        );
+                        selectNode(null);
+                      }}
+                      title="取消选择（也可以点一下画布空白）"
+                      className="rounded-sm px-1 text-dim hover:bg-raised hover:text-fg"
+                    >
+                      取消选择
+                    </button>
+                  </span>
+                )}
+                {orphanEdges.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void cleanOrphans()}
+                    className="pointer-events-auto rounded-sm border border-failed/60 px-1 text-failed hover:bg-raised"
+                    title="这些步骤没有挂在任何界面上：画布上不显示、运行时也不会被触发"
+                  >
+                    有 {orphanEdges.length} 个未挂界面的录制步骤 · 点这里清理
+                  </button>
+                )}
+              </div>
+
+              {menu && <GraphContextMenu anchor={menu} onClose={() => setMenu(null)} />}
+
+              {/* 运行状态条：现在停在哪 / 下一步走哪条 / 还差什么 */}
+              <RunStatusStrip graph={graph} statuses={statuses} running={running} />
+
+              {recoveries.length > 0 && (
+                <div className="pointer-events-none absolute right-2 bottom-2 flex flex-col items-end gap-1">
+                  {recoveries.map((edge) => (
+                    <span
+                      key={edge.id}
+                      className="rounded-sm border border-dashed border-recovery px-1.5 py-0.5 text-badge text-recovery"
+                    >
+                      ⚡ {edge.id} · {edge.when} · 全局中断
+                    </span>
+                  ))}
+                </div>
               )}
             </div>
-
-            {menu && <GraphContextMenu anchor={menu} onClose={() => setMenu(null)} />}
-
-            {/* 运行状态条：现在停在哪 / 下一步走哪条 / 还差什么 */}
-            <RunStatusStrip graph={graph} statuses={statuses} running={running} />
-
-            {recoveries.length > 0 && (
-              <div className="pointer-events-none absolute right-2 bottom-2 flex flex-col items-end gap-1">
-                {recoveries.map((edge) => (
-                  <span
-                    key={edge.id}
-                    className="rounded-sm border border-dashed border-recovery px-1.5 py-0.5 text-badge text-recovery"
-                  >
-                    ⚡ {edge.id} · {edge.when} · 全局中断
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
+          </CanvasBoundary>
         </Panel>
         <Separator
           className="h-px bg-line transition-colors hover:bg-brand"
