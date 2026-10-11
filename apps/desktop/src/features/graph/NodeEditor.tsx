@@ -82,7 +82,7 @@ export function NodeEditor({
           return (
             <span key={label} className="flex items-center gap-0.5">
               {/* 模板缩略图：点一下切黑白（模板匹配本来就是按灰度算的） */}
-              <TemplateThumb label={label} size={18} />
+              <TemplateThumb label={label} size={40} />
               <button
                 type="button"
                 disabled={busy}
@@ -121,7 +121,7 @@ export function NodeEditor({
           <span>这个界面用的模板：</span>
           {enter.map((label) => (
             <span key={label} className="flex items-center gap-0.5">
-              <TemplateThumb label={label} size={22} />
+              <TemplateThumb label={label} size={44} />
               <span className="text-dim">{label}</span>
             </span>
           ))}
