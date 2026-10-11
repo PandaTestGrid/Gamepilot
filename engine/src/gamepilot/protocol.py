@@ -57,6 +57,8 @@ METHOD_DEVICE_KEY = "device.key"
 METHOD_PROJECT_GET = "project.get"
 METHOD_PROJECT_SET = "project.set"
 METHOD_PROJECT_LIST = "project.list"
+METHOD_WORKSPACE_LIST = "workspace.list"  # 列出工作区（库根）
+METHOD_WORKSPACE_CREATE = "workspace.create"  # 新建工作区
 # 脚本库（多状态图）：一个目录 = 一个状态图；四个方法成功都返回 {items, current}
 METHOD_PROJECT_CREATE = "project.create"
 METHOD_PROJECT_DUPLICATE = "project.duplicate"
@@ -77,6 +79,7 @@ METHOD_GRAPH_SAVE = "graph.save"
 METHOD_RECORD_TEMPLATE = "record.template"
 METHOD_RECOGNIZER_THRESHOLD = "recognizer.threshold"
 METHOD_RECOGNIZER_REMOVE = "recognizer.remove"
+METHOD_RECOGNIZER_RENAME = "recognizer.rename"
 
 # 运行控制
 # 变量（"黑板"）：改运行期变量值（不写回脚本）

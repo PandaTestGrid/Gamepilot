@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from .. import library
+from .. import library, workspaces
 from ..project import resolve_project
 from ..protocol import (
     METHOD_PROJECT_CREATE,
@@ -30,6 +30,8 @@ from ..protocol import (
     METHOD_PROJECT_LIST,
     METHOD_PROJECT_RENAME,
     METHOD_PROJECT_SET,
+    METHOD_WORKSPACE_CREATE,
+    METHOD_WORKSPACE_LIST,
 )
 
 if TYPE_CHECKING:  # 避免循环导入
@@ -84,6 +86,17 @@ def register(server: RpcServer, manager: SessionManager) -> None:
     def _project_list(params: dict[str, Any]) -> dict[str, Any]:
         base = params.get("base")
         return {"items": manager.list_projects(str(base) if base else None)}
+
+    @server.method(METHOD_WORKSPACE_LIST)
+    def _workspace_list(params: dict[str, Any]) -> dict[str, Any]:
+        """列出工作区（每个工作区是一个"库根"，里面放任务）。"""
+        return {"items": [item.to_dict() for item in workspaces.list_workspaces()]}
+
+    @server.method(METHOD_WORKSPACE_CREATE)
+    def _workspace_create(params: dict[str, Any]) -> dict[str, Any]:
+        """新建工作区目录并登记（同名不覆盖）。"""
+        made = workspaces.create_workspace(_require_str(params, "name"))
+        return {"created": made.to_dict(), "items": [item.to_dict() for item in workspaces.list_workspaces()]}
 
     @server.method(METHOD_PROJECT_CREATE)
     def _project_create(params: dict[str, Any]) -> dict[str, Any]:

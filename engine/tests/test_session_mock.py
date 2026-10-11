@@ -83,6 +83,47 @@ def test_textured_region_records_a_template_recognizer(session: DeviceSession) -
     assert detection.score >= 0.9, f"棋盘格目标的匹配分数不该这么低: {detection.score}"
 
 
+def test_remove_recognizer_deletes_its_template_file(session: DeviceSession, tmp_path: Path) -> None:
+    """删除识别器要连素材文件一起删。
+
+    颜色识别器（纯色区域降级来的）的 spec 里**没有** `template` 字段，
+    但录制时同样写了 `templates/<label>.png`：只按 spec 删的话，用户点了删除
+    还会在 templates/ 里看到它，像没删干净。
+    """
+    session.record_template(rect=Rect(*LOGO), label="logo")
+    session.record_template(rect=Rect(*BUTTON), label="hp_bar")
+    assert (tmp_path / "templates" / "logo.png").exists()
+    assert (tmp_path / "templates" / "hp_bar.png").exists()
+    assert session.graph.specs["hp_bar"]["type"] == "color", "纯色区域应当降级成颜色识别器"
+
+    session.remove_recognizer("logo")
+    session.remove_recognizer("hp_bar")
+
+    assert not (tmp_path / "templates" / "logo.png").exists()
+    assert not (tmp_path / "templates" / "hp_bar.png").exists()
+    assert "logo" not in session.graph.recognizers
+    assert "hp_bar" not in session.graph.recognizers
+
+
+def test_remove_refusal_disambiguates_nodes_with_the_same_name(session: DeviceSession) -> None:
+    """拒绝删除的提示里，重名节点必须带 id。
+
+    真实场景：脚本里有两个节点都叫「新界面」（只差 id），删识别器时报
+    "界面『新界面』的进入条件" —— 用户根本不知道该去改哪一个（实测反馈）。
+    """
+    session.record_template(rect=Rect(*LOGO), label="相机", node_id="node_1", node_name="新界面")
+    session.record_template(rect=Rect(*BUTTON), label="hp", node_id="node_2", node_name="新界面")
+
+    with pytest.raises(RuntimeError) as info:
+        session.remove_recognizer("相机")
+
+    message = str(info.value)
+    assert "还在被使用" in message
+    assert "『新界面』（node_1）" in message, f"重名节点必须带 id：{message}"
+    # 被拒绝 = 什么都没动
+    assert "相机" in session.graph.recognizers
+
+
 def test_record_template_writes_files_and_registers_recognizer(session: DeviceSession, tmp_path: Path) -> None:
     result = session.record_template(
         rect=Rect(*BUTTON),

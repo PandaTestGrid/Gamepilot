@@ -224,3 +224,36 @@ def test_unknown_screen_keeps_state_and_relocates(engine: tuple[Engine, Scripted
     # 回到主界面后依然能识别
     machine.tick(_frame(controller.screenshot()))
     assert machine.current == "main"
+
+
+def test_run_action_resolves_variables(engine: tuple[Engine, ScriptedController]) -> None:
+    """「单独执行这一步」必须先求值，和其他执行路径同一套。
+
+    真踩过：把动作参数抽成变量之后（`{"$var": "时长"}`），点「▶ 执行这一步」报
+    `动作参数必须是数字，收到: {'$var': '时长'}` —— 因为这条路径先 `Action.parse` 再交给
+    `_execute`，跳过了变量求值。
+    """
+    machine, _controller = engine
+    machine.variables.set("时长", 120)
+
+    described = machine.run_action({"type": "click", "x": 0.5, "y": 0.5, "duration_ms": {"$var": "时长"}})
+
+    assert described.startswith("点击"), described
+
+
+def test_run_action_supports_set_action(engine: tuple[Engine, ScriptedController]) -> None:
+    """赋值动作（set）也要能"单独执行" —— 它不在 Action 的类型表里，以前报"未支持的动作类型"。"""
+    machine, _controller = engine
+
+    described = machine.run_action({"type": "set", "name": "计数", "value": 3})
+
+    assert described == "设置变量 计数 = 3"
+    assert machine.variables.get("计数") == 3
+
+
+def test_run_action_reports_undefined_variable(engine: tuple[Engine, ScriptedController]) -> None:
+    """变量没定义：直接报给用户（能改的错），不要静默执行成别的动作。"""
+    machine, _controller = engine
+
+    with pytest.raises(ValueError, match="变量未定义"):
+        machine.run_action({"type": "wait", "seconds": {"$var": "没定义过"}})

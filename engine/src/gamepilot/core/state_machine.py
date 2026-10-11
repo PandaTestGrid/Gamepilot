@@ -324,22 +324,31 @@ class Engine:
     def run_action(self, action: dict[str, Any]) -> str:
         """只执行一个动作（调试用"单独跑这一步"），不影响状态机当前位置。
 
-        复用 _execute 那一套（识别器目标解析、等待、按键…），避免两处实现走偏。
-        """
-        from .actions import Action
+        复用 `_execute` 那一套（变量求值、识别器目标解析、等待、按键、赋值、子脚本…），
+        避免两处实现走偏 —— 而这里**真的走偏过**：以前是先 `Action.parse(action)` 再交给
+        `_execute`，于是
 
-        parsed = Action.parse(action)
+        - 参数写成 `{"$var": "时长"}` 的动作（"把参数抽成变量"之后的样子）**没求值就解析**，
+          直接报"动作参数必须是数字，收到: {'$var': '时长'}";
+        - `set`（赋值变量）/ `call`（运行子脚本）不在 `ACTION_TYPES` 里，
+          报"未支持的动作类型: set" —— 明明 `_execute` 支持它们。
+
+        所以现在：先求值（求值失败直接抛给用户，这是用户能改的错），
+        再把**求值后的** spec 交给 `_execute` 统一分发。
+        """
+        spec = resolve_spec(dict(action), self.variables, self._scores())
+        described = describe_action(spec)
         edge = Edge(
             id="__manual__",
             when="",
             src=self.current,
             dst=None,
-            action=parsed.to_dict(),
+            action=spec,
             condition=Condition(always=True),
         )
         self._execute(edge)
-        self._emit("action_manual", node=self.current, edge=edge, message=f"单独执行：{parsed.describe()}")
-        return parsed.describe()
+        self._emit("action_manual", node=self.current, edge=edge, message=f"单独执行：{described}")
+        return described
 
     def _hit_breakpoint(self, edge: Edge) -> bool:
         """这条边是不是断点：是就暂停并返回 True（这一拍不执行动作）。"""
@@ -562,6 +571,21 @@ class Engine:
             "stats": dict(self.stats),
             "detections": [item.to_dict() for item in self.detections.values()],
         }
+
+
+def describe_action(spec: dict[str, Any]) -> str:
+    """给「单独执行这一步」用的一句话描述（**已求值**的 spec）。
+
+    `set` / `call` 没有进 `Action.parse` 的能力（它们在 `_execute` 里被特判：
+    赋值动作改黑板、子脚本动作切脚本目录），所以描述也得特判 ——
+    否则"单独执行"一个赋值步骤会报"未支持的动作类型: set"。
+    """
+    kind = str(spec.get("type") or "click")
+    if kind == SET_ACTION:
+        return f"设置变量 {spec.get('name')} = {spec.get('value')!r}"
+    if kind == CALL_ACTION:
+        return f"运行子脚本 {spec.get('script')}"
+    return Action.parse(spec).describe()
 
 
 def _rect_center(rect: list[Any]) -> tuple[float, float]:

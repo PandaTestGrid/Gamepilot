@@ -30,7 +30,7 @@ from .core.actions import Action
 from .core.conditions import ALWAYS_LABEL
 from .core.frame import Frame
 from .core.geometry import Rect
-from .core.graph import Edge, Graph, Node
+from .core.graph import Edge, Graph, Node, validate_recognizer_label
 from .core.state_machine import Engine
 from .core.trace import TraceBuffer
 from .devices import ORIENTATION_LABELS
@@ -41,6 +41,16 @@ from .project import Project
 logger = logging.getLogger("gamepilot.session")
 
 Emit = Callable[[str, dict[str, Any]], None]
+
+
+def _node_ref(node: Node) -> str:
+    """在"被谁用了"这类提示里怎么称呼一个节点。
+
+    重名时**必须带上 id**：编辑过两个都叫「新界面」的节点（只差 id），
+    提示里光写『新界面』等于没说，用户根本不知道该去改哪一个。
+    """
+    name = node.name or node.id
+    return f"『{name}』（{node.id}）" if name != node.id else f"『{name}』"
 
 
 class DeviceSession:
@@ -566,6 +576,9 @@ class DeviceSession:
                 raise RuntimeError("框选区域为空")
 
             filename = f"{label}.png"
+            # 每次录制都把裁下来的那一块存成素材（按识别器名），`templates/` 就是"录过什么"的台账；
+            # 纯色区域虽然会降级成颜色识别器（用不上这张图），也照样留着 ——
+            # 它是那次录制的实物证据，删除识别器时一起清掉（见 remove_recognizer）
             cv2.imwrite(f"{self.project.templates_dir}/{filename}", crop)
 
             # 纯色区域用模板匹配没有判别力（NCC 退化），自动改用颜色识别器
@@ -625,6 +638,21 @@ class DeviceSession:
                 "graph": self.graph.to_dict(),
             }
 
+    def rename_recognizer(self, old: str, new: str) -> dict[str, Any]:
+        """给识别器改名（级联所有引用），落盘 → 热重载。
+
+        和 `remove_recognizer` 相反：改名是**可以**在还被引用时做的 ——
+        因为引用会一起改（见 `Graph.rename_recognizer`）。
+        改完必须 `save()` + `reload_graph()`：不重载的话，引擎里跑的还是旧标签的识别器，
+        画面上的分数会一直挂在旧名字上。
+        """
+        with self.lock:
+            label = validate_recognizer_label(new)
+            refs = self.graph.rename_recognizer(old, label)
+            self.graph.save()
+            self.reload_graph()
+            return {"from": old, "to": label, "refs": refs, "graph": self.graph.to_dict()}
+
     def remove_recognizer(self, label: str) -> dict[str, Any]:
         """删掉一个模板/识别器。
 
@@ -637,7 +665,7 @@ class DeviceSession:
             users: list[str] = []
             for node in self.graph.nodes.values():
                 if label in node.enter:
-                    users.append(f"界面『{node.name}』的进入条件")
+                    users.append(f"界面{_node_ref(node)}的进入条件")
             for edge in self.graph.edges:
                 if label in edge.condition.labels or label == edge.when:
                     users.append(f"边 {edge.id} 的判断条件")
@@ -648,10 +676,13 @@ class DeviceSession:
             spec = dict(self.graph.specs.get(label) or {})
             self.graph.specs.pop(label, None)
             self.graph.recognizers.pop(label, None)
-            template = str(spec.get("template") or "")
-            if template:
+            # 删掉它的模板文件：spec 里指的是正主；再顺手清 `templates/<label>.png`。
+            # 多数时候两者是同一个文件，但**颜色识别器**（纯色区域降级）的 spec 里没有
+            # `template` 字段，而录制时照样写了 `templates/<label>.png`（见 record_template）——
+            # 不一起删的话，用户点了删除却发现 templates/ 里还留着，看着像没删干净
+            for relative in {str(spec.get("template") or ""), f"templates/{label}.png"} - {""}:
                 with contextlib.suppress(OSError):
-                    os.remove(os.path.join(self.project.root, template))
+                    os.remove(os.path.join(self.project.root, relative))
             self.graph.save()
             self.reload_graph()
             return {"removed": label, "graph": self.graph.to_dict()}

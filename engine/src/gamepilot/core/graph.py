@@ -231,6 +231,69 @@ class Graph:
         spec["threshold"] = round(float(threshold), 4)
         self.add_recognizer(label, spec)
 
+    def rename_recognizer(self, old: str, new: str) -> dict[str, int]:
+        """给识别器改名（标签），并把**所有引用一起改**。
+
+        为什么必须级联：`node.enter` / `edge.when` / `edge.condition.*` / 动作的
+        `target`·`to_target` / 动作里 `$score` 引用的都是**标签字符串**。
+        只改 `specs` 的键，`validate()` 立刻就会报"引用了未定义的识别器" ——
+        改名只有"全改"和"不改"两种状态，不能半途而废。
+
+        模板文件（`templates/xxx.png`）**不跟着改名**：spec 里存的是相对路径，
+        文件叫什么名字对匹配没有任何影响；跟着改反而多出"新文件名已存在""改到一半崩了"的坑。
+
+        返回改名动到的引用处数（界面用它告诉用户"顺带更新了几处引用"）。
+        """
+        old = old.strip()
+        new = validate_recognizer_label(new)
+        if old not in self.specs:
+            raise KeyError(f"识别器不存在: {old}")
+        if old == new:
+            return {"nodes": 0, "edges": 0, "scores": 0}
+        if new in self.specs:
+            raise ValueError(f"已经有同名识别器: {new}")
+
+        # 保持原顺序（键换名字，位置不动）：识别读数列表不该因为改名而跳到别处
+        self.specs = {new if key == old else key: value for key, value in self.specs.items()}
+        self.recognizers = {new if key == old else key: value for key, value in self.recognizers.items()}
+
+        nodes = 0
+        for node in self.nodes.values():
+            if old in node.enter:
+                node.enter = [new if item == old else item for item in node.enter]
+                nodes += 1
+
+        edges = 0
+        scores = 0
+        for edge in self.edges:
+            touched = False
+            if edge.when == old:
+                edge.when = new
+                touched = True
+            condition = edge.condition
+            renamed = Condition(
+                all_of=tuple(new if item == old else item for item in condition.all_of),
+                any_of=tuple(new if item == old else item for item in condition.any_of),
+                none_of=tuple(new if item == old else item for item in condition.none_of),
+                min_score=condition.min_score,
+                within_ms=condition.within_ms,
+                always=condition.always,
+            )
+            if renamed != condition:
+                edge.condition = renamed
+                touched = True
+            for key in ("target", "to_target"):
+                if edge.action.get(key) == old:
+                    edge.action[key] = new
+                    touched = True
+            renamed_scores = _rename_score_refs(edge.action, old, new)
+            scores += renamed_scores
+            if touched or renamed_scores:
+                edges += 1
+
+        self.validate()
+        return {"nodes": nodes, "edges": edges, "scores": scores}
+
     def upsert_node(self, node: Node) -> None:
         self.nodes[node.id] = node
 
@@ -295,3 +358,56 @@ class Graph:
 
 def roi_of(spec: dict[str, Any]) -> Rect | None:
     return Rect.parse(spec["roi"]) if spec.get("roi") else None
+
+
+# 识别器标签的长度上限：它会变成模板文件名（`templates/<label>.png`），
+# 太长在 macOS/Linux 上虽然还能写，但界面里已经完全显示不下了
+LABEL_MAX_LENGTH = 48
+
+# 标签里不允许出现的字符：路径分隔符（录制时会当文件名用）+ 控制字符
+_LABEL_FORBIDDEN = frozenset("/\\")
+
+
+def validate_recognizer_label(label: str) -> str:
+    """校验识别器标签，返回去掉首尾空白后的值（非法就抛 ValueError）。
+
+    标签同时出现在四个地方，所以规则不能松：
+    1. `graph.json` 里 `recognizers` 的**键**；
+    2. 边的 `when` / `condition` 三个标签列表；
+    3. 动作的 `target` / `to_target`；
+    4. 录制时被当成模板文件名 `templates/<label>.png`。
+    第 4 条是为什么必须挡路径分隔符 —— 否则 `a/../../x` 能把文件写到工程外面去。
+    """
+    cleaned = label.strip()
+    if not cleaned:
+        raise ValueError("识别器名字不能为空")
+    if len(cleaned) > LABEL_MAX_LENGTH:
+        raise ValueError(f"识别器名字太长（最多 {LABEL_MAX_LENGTH} 个字符）")
+    if any(char in _LABEL_FORBIDDEN for char in cleaned):
+        raise ValueError("识别器名字不能带 / 或 \\（它会变成模板文件名）")
+    if any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        raise ValueError("识别器名字不能带控制字符")
+    if cleaned == ALWAYS_LABEL:
+        # `when: "always"` 是"无条件边"的哨兵值（conditions.ALWAYS_LABEL），
+        # 拿它当识别器名字，边就会在"永远成立"和"等这个标签命中"之间产生歧义
+        raise ValueError(f"「{ALWAYS_LABEL}」是保留名（表示无条件），换一个")
+    return cleaned
+
+
+def _rename_score_refs(value: object, old: str, new: str) -> int:
+    """把动作里 `{"$score": "旧标签"}` 改成新标签，返回改了几处。
+
+    动作参数可以是任意嵌套结构（列表里套对象、对象里套列表），所以这里递归走一遍：
+    漏掉一层就会留下"引用了不存在的识别器"，而且是保存时报错、跑起来才发现。
+    """
+    count = 0
+    if isinstance(value, dict):
+        if value.get("$score") == old:
+            value["$score"] = new
+            count += 1
+        for item in value.values():
+            count += _rename_score_refs(item, old, new)
+    elif isinstance(value, list):
+        for item in value:
+            count += _rename_score_refs(item, old, new)
+    return count

@@ -44,6 +44,7 @@ from ..protocol import (
     METHOD_GRAPH_SAVE,
     METHOD_MAC_WINDOWS,
     METHOD_RECOGNIZER_REMOVE,
+    METHOD_RECOGNIZER_RENAME,
     METHOD_RECOGNIZER_THRESHOLD,
     METHOD_RECORD_ACTION,
     METHOD_RECORD_TEMPLATE,
@@ -457,6 +458,18 @@ def register(server: RpcServer) -> SessionManager:
     def _recognizer_remove(params: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = manager.get(_require_str(params, "deviceId")).remove_recognizer(
             _require_str(params, "label")
+        )
+        return result
+
+    @server.method(METHOD_RECOGNIZER_RENAME)
+    def _recognizer_rename(params: dict[str, Any]) -> dict[str, Any]:
+        """识别器改名：`{deviceId, label, to}` → `{from, to, refs, graph}`。
+
+        引用会一起改（节点进入条件 / 边条件 / 动作目标 / 动作里的 $score），
+        所以改名不像删除那样需要考虑"被引用"。
+        """
+        result: dict[str, Any] = manager.get(_require_str(params, "deviceId")).rename_recognizer(
+            _require_str(params, "label"), _require_str(params, "to")
         )
         return result
 
