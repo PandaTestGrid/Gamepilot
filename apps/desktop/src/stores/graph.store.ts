@@ -49,6 +49,14 @@ interface GraphState {
   ) => Promise<void>;
   readonly removeNode: (deviceId: string, nodeId: string) => Promise<void>;
   readonly connectNodes: (deviceId: string, from: string, to: string) => Promise<void>;
+  /** 一键建分支：识别器出现 → 去 A；不出现 → 去 B */
+  readonly addBranch: (
+    deviceId: string,
+    from: string,
+    label: string,
+    yes: string,
+    no: string,
+  ) => Promise<void>;
   /** 黑板：保存变量定义（写回 graph.json 的 variables 段） */
   readonly setVariables: (
     deviceId: string,
@@ -252,6 +260,22 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
     set((current) => ({
       raws: { ...current.raws, [deviceId]: saved },
       graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, saved, undefined) },
+    }));
+  },
+
+  addBranch: async (deviceId: string, from: string, label: string, yes: string, no: string) => {
+    // "如果『X』在 → 去 A；不在 → 去 B" —— 就是两条边，条件分别是 all_of / none_of
+    await graphEdgeAdd(deviceId, { from, to: yes, when: label, condition: { all_of: [label] } });
+    const result = await graphEdgeAdd(deviceId, {
+      from,
+      to: no,
+      when: label,
+      condition: { none_of: [label] },
+      action: { type: 'wait', seconds: 0.3 },
+    });
+    set((current) => ({
+      raws: { ...current.raws, [deviceId]: result.graph },
+      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
     }));
   },
 

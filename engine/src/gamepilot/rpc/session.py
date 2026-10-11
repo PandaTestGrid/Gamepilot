@@ -440,6 +440,7 @@ def register(server: RpcServer) -> SessionManager:
             dst=str(params["to"]) if params.get("to") else None,
             when=str(params["when"]) if params.get("when") else None,
             action=action if isinstance(action, dict) else None,
+            condition=params.get("condition") if isinstance(params.get("condition"), dict) else None,
         )
 
     @server.method(METHOD_VARIABLE_SET)

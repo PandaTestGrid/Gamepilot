@@ -23,6 +23,10 @@ export function NodeEditor({
 }): ReactNode {
   const updateNode = useGraphStore((state) => state.updateNode);
   const selectEdge = useGraphStore((state) => state.selectEdge);
+  const addBranch = useGraphStore((state) => state.addBranch);
+  const [branchLabel, setBranchLabel] = useState('');
+  const [branchYes, setBranchYes] = useState('');
+  const [branchNo, setBranchNo] = useState('');
   const removeNode = useGraphStore((state) => state.removeNode);
   const selectNode = useGraphStore((state) => state.selectNode);
   const [name, setName] = useState(node.name);
@@ -119,6 +123,61 @@ export function NodeEditor({
           ))}
         </div>
       )}
+
+      {/* 一键建"如果…否则…"分支：这才是用户最想要的表达方式 */}
+      <div className="mb-1 flex flex-wrap items-center gap-1 text-badge text-dim">
+        <span className="text-faint">＋ 分支：如果</span>
+        <select
+          value={branchLabel}
+          onChange={(event) => setBranchLabel(event.target.value)}
+          className="h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+        >
+          <option value="">（选识别器）</option>
+          {labels.map((label) => (
+            <option key={label} value={label}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <span className="text-faint">出现 → 去</span>
+        <select
+          value={branchYes}
+          onChange={(event) => setBranchYes(event.target.value)}
+          className="h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+        >
+          <option value="">（选节点）</option>
+          {(graph?.nodes ?? [])
+            .filter((item) => item.id !== node.id)
+            .map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+        </select>
+        <span className="text-faint">否则 → 去</span>
+        <select
+          value={branchNo}
+          onChange={(event) => setBranchNo(event.target.value)}
+          className="h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+        >
+          <option value="">（留在原地也可以）</option>
+          {(graph?.nodes ?? []).map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.name}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={!branchLabel || !branchYes || busy}
+          onClick={() => {
+            void run(() => addBranch(deviceId, node.id, branchLabel, branchYes, branchNo || node.id));
+          }}
+          className="h-5 rounded-sm border border-brand px-1.5 text-badge text-brand hover:bg-raised disabled:opacity-40"
+        >
+          建分支
+        </button>
+      </div>
 
       {/* 这个界面的逻辑：怎么判定、有哪些操作、怎么进来的 */}
       <div className="flex flex-col gap-0.5 text-badge text-faint">

@@ -61,7 +61,7 @@ describe('边编辑器', () => {
 
     expect(screen.getByText('e_rec_1')).toBeInTheDocument();
     expect(screen.getByText('判断条件')).toBeInTheDocument();
-    expect(screen.getByText('限时等待ms')).toBeInTheDocument();
+    expect(screen.getByText('限时等待（毫秒）')).toBeInTheDocument();
     expect(screen.getByText('动作')).toBeInTheDocument();
     expect(screen.getByText('保存到脚本')).toBeInTheDocument();
     expect(screen.getByText('删除边')).toBeInTheDocument();

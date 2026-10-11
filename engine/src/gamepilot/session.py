@@ -508,7 +508,13 @@ class DeviceSession:
             return {"removed": node_id, "graph": self.graph.to_dict()}
 
     def graph_edge_add(
-        self, *, src: str | None, dst: str | None, when: str | None = None, action: dict[str, Any] | None = None
+        self,
+        *,
+        src: str | None,
+        dst: str | None,
+        when: str | None = None,
+        action: dict[str, Any] | None = None,
+        condition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             label = when or ""
@@ -527,7 +533,7 @@ class DeviceSession:
                     "from": src,
                     "to": dst,
                     "cooldown_ms": 600,
-                    "condition": {"all_of": [label]} if label else {"always": True},
+                    "condition": condition or ({"all_of": [label]} if label else {"always": True}),
                     "action": default_action,
                 }
             )

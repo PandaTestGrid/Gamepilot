@@ -367,7 +367,13 @@ export function graphNodeRemove(deviceId: string, nodeId: string): Promise<{ gra
 
 export function graphEdgeAdd(
   deviceId: string,
-  params: { from?: string | null; to?: string | null; when?: string; action?: Record<string, unknown> },
+  params: {
+    from?: string | null;
+    to?: string | null;
+    when?: string;
+    action?: Record<string, unknown>;
+    condition?: Record<string, unknown>;
+  },
 ): Promise<{ edgeId: string; graph: GraphPayload }> {
   return rpc<{ edgeId: string; graph: GraphPayload }>('graph.edge.add', { deviceId, ...params });
 }

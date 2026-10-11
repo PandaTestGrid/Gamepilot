@@ -6,7 +6,7 @@
  *
  * 条件语义（和引擎 core/conditions.py 一致）：
  *   且（all_of）所有标签都命中 / 或（any_of）任一命中 / 非（none_of）都不得出现，
- *   min_score 是分数门槛，within_ms 是"限时等待"（进节点后最多等这么久，超时这条边就不走）。
+ *   分数门槛 是分数门槛，within_ms 是"限时等待"（进节点后最多等这么久，超时这条边就不走）。
  */
 import { type ReactNode, useState } from 'react';
 
@@ -206,7 +206,7 @@ export function EdgeEditor({
           </span>
         ))}
         <label className="flex items-center gap-1 text-dim">
-          min_score
+          分数门槛
           <input
             type="number"
             step="0.05"
@@ -221,7 +221,7 @@ export function EdgeEditor({
           className="flex items-center gap-1 text-dim"
           title="限时等待：进入源节点后最多等这么久，超时这条边就不走"
         >
-          限时等待ms
+          限时等待（毫秒）
           <input
             type="number"
             step="500"
