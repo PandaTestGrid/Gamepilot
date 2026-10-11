@@ -17,6 +17,15 @@
 .react-flow__pane.selection {
   cursor: crosshair;
 }
+/*
+ * 平移进行中：光标换成"抓住"（右键/中键拖动时，要能看出自己在拖画布）。
+ * ⚠️ 必须写在这条 `.selection` 之后：两者权重相同（都是两个类），靠源码顺序决胜 ——
+ * xyflow 自带的 `.react-flow__pane.dragging{cursor:grabbing}` 是被我们这条 `.selection` 盖掉的。
+ */
+.react-flow__pane.dragging {
+  cursor: grabbing;
+}
+
 /* 框选出来的矩形：用品牌色（xyflow 默认是浅蓝，在暗色主题上像系统高亮） */
 .react-flow__nodesselection-rect {
   background: color-mix(in oklab, var(--brand) 12%, transparent);

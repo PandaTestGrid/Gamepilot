@@ -42,8 +42,8 @@ export function TaskTabs(): ReactNode {
         setWorkspace(matched?.name ?? result.items[0]?.name ?? '');
       })
       .catch((error: unknown) => devLog(`工作区列表失败: ${String(error)}`));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在挂载时拉一次，之后按当前目录的父目录判断
-  }, []);
+    // 依赖 root：引擎握手完成、或切换脚本后再拉一次（挂载时引擎可能还没起来，踩过）
+  }, [root]);
 
   useEffect(() => {
     if (!base) {
