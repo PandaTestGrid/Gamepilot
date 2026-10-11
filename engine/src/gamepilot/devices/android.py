@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -330,8 +331,19 @@ class AndroidController(Controller):
         只在抬手时合成一次 tap/swipe（并记一条日志说明降级）。
         """
         if self._scrcpy is not None:
-            self._scrcpy.touch(phase, x, y)
-            return
+            try:
+                self._scrcpy.touch(phase, x, y)
+                return
+            except (BrokenPipeError, ConnectionError, OSError) as exc:
+                # 控制通道断了（scrcpy server 没了 / adb forward 掉了）：
+                # 丢掉这条通道，改用 adb 注入（没有实时能力，但至少不报错）
+                logger.warning("scrcpy 控制通道断了（%s），降级为 adb 注入", exc)
+                self.channel = "screencap"
+                self.link_note = "scrcpy 控制通道断开，已降级为 adb 注入（实时拖动不可用）"
+                with contextlib.suppress(Exception):
+                    self._scrcpy.close()
+                self._scrcpy = None
+                # 事件栏由上层会话负责，这里只记日志（通道与降级信息在 linkNote 里）
         if phase == "down":
             self._touch_start = (x, y, time.perf_counter())
             return

@@ -414,3 +414,65 @@ def test_controller_applies_orientation_to_touch() -> None:
     controller._orientation = ios.ORIENT_PORTRAIT
     controller.touch("down", 0.25, 0.75)
     assert fake.calls[-1] == ("down", round(0.25 * 65535), round(0.75 * 65535))
+
+
+# ---------------------------------------------------------------- 控制通道断线自愈
+
+
+class FlakyHid:
+    """第一次调用断线，重连后正常。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, int]] = []
+        self.connected = True
+        self.broken = True
+
+    def touch(self, phase: str, x: int, y: int) -> None:
+        if self.broken:
+            raise BrokenPipeError(32, "Broken pipe")
+        self.calls.append((phase, x, y))
+
+    def press(self, name: str) -> None:
+        if self.broken:
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def text(self, value: str) -> None:
+        if self.broken:
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def reconnect(self) -> None:
+        self.broken = False
+
+
+def test_touch_recovers_from_broken_pipe() -> None:
+    """BrokenPipeError 要自动重连并重试一次，而不是把异常原样抛给界面。"""
+    controller = ios.IosController(udid="UDID-TEST")
+    flaky = FlakyHid()
+    controller._hid = flaky  # type: ignore[assignment]
+    controller._orientation_at = float("inf")
+    controller._session = None  # 没有会话时 _recover_hid 会尝试整套重连 → 用假的替代
+    recovered: list[str] = []
+
+    def fake_recover() -> None:
+        recovered.append("hid")
+        flaky.broken = False
+
+    controller._recover_hid = fake_recover  # type: ignore[method-assign]
+
+    controller.touch("down", 0.5, 0.5)
+
+    assert recovered == ["hid"], "断线应触发一次重连"
+    assert flaky.calls and flaky.calls[-1][0] == "down"
+
+
+def test_touch_gives_readable_error_when_recovery_fails() -> None:
+    """怎么都修不好时，错误信息要能看懂（不是裸的 BrokenPipeError）。"""
+    controller = ios.IosController(udid="UDID-TEST")
+    flaky = FlakyHid()
+    controller._hid = flaky  # type: ignore[assignment]
+    controller._orientation_at = float("inf")
+    controller._recover_hid = lambda: None  # type: ignore[method-assign]
+    controller.reconnect = lambda: None  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="控制通道暂时不可用"):
+        controller.touch("down", 0.5, 0.5)

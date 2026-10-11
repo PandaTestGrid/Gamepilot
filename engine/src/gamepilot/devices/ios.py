@@ -470,6 +470,19 @@ class HidBridge:
             self._indigo = None
         logger.info("iOS HID 就绪: %s（触摸 ✓%s）", self.udid, " 按键 ✓" if self._indigo else "")
 
+    @property
+    def alive(self) -> bool:
+        return self.connected and self._uhs is not None
+
+    def reconnect(self) -> None:
+        """HID 服务断了就重开（隧道留着，不用动采集）。"""
+        logger.warning("iOS HID 重连中: %s", self.udid)
+        self.close()
+        self._uhs = None
+        self._indigo = None
+        self._keyboard_id = None
+        self.connect()
+
     def close(self) -> None:
         async def cleanup() -> None:
             for service in (self._uhs, self._indigo):
@@ -769,15 +782,50 @@ class IosController(Controller):
 
     def _hid_or_raise(self) -> HidBridge:
         if self._hid is None or not self._hid.connected:
-            raise RuntimeError("iOS HID 未连接")
+            raise RuntimeError("iOS 控制通道未就绪")
         return self._hid
+
+    def _with_hid(self, action: str, call: Any) -> Any:
+        """执行一次 HID 操作；断线就自动重连并重试一次，再不行给一句人话。"""
+        try:
+            return call(self._hid_or_raise())
+        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError) as exc:
+            logger.warning("iOS 控制通道断了（%s:%s），自动重连后重试", action, exc)
+            self._recover_hid()
+            try:
+                return call(self._hid_or_raise())
+            except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError) as again:
+                # 隧道整个没了：整套重连一次
+                logger.warning("重试仍失败（%s），整套重连", again)
+                self.reconnect()
+                try:
+                    return call(self._hid_or_raise())
+                except Exception as final:
+                    raise RuntimeError(
+                        f"iOS 控制通道暂时不可用（{type(final).__name__}）。"
+                        "隧道可能被系统回收了，已自动重连；请再操作一次"
+                    ) from final
+
+    def _recover_hid(self) -> None:
+        """优先只重开 HID 服务（便宜），隧道死了才整套重连。"""
+        session = self._session
+        bridge = self._hid
+        try:
+            if bridge is None:
+                raise RuntimeError("没有 HID")
+            bridge.attach(session) if session is not None else None
+            bridge.reconnect()
+        except Exception as exc:
+            logger.warning("只重开 HID 失败（%s），改整套重连", exc)
+            self.reconnect()
 
     def touch(self, phase: str, x: float, y: float) -> None:
         if phase not in ("down", "move", "up"):
             raise ValueError(f"phase 必须是 down/move/up，收到: {phase}")
         self._refresh_orientation()
         dx, dy = to_digitizer(x, y, self._orientation)
-        self._hid_or_raise().touch(phase, round(dx * DIGITIZER_MAX), round(dy * DIGITIZER_MAX))
+        point = (round(dx * DIGITIZER_MAX), round(dy * DIGITIZER_MAX))
+        self._with_hid("touch", lambda hid: hid.touch(phase, *point))
 
     def click(self, x: float, y: float) -> None:
         self.touch("down", x, y)
@@ -796,10 +844,10 @@ class IosController(Controller):
     def press(self, name: str) -> None:
         if name not in SUPPORTED_KEYS and name not in NAMED_BUTTONS:
             raise ValueError(f"不支持的按键: {name}")
-        self._hid_or_raise().press(name)
+        self._with_hid("press", lambda hid: hid.press(name))
 
     def text(self, value: str) -> None:
-        self._hid_or_raise().text(value)
+        self._with_hid("text", lambda hid: hid.text(value))
 
     def close(self) -> None:
         if self._hid is not None:
