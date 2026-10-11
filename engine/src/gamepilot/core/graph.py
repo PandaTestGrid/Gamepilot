@@ -15,6 +15,7 @@ from .actions import Action
 from .conditions import ALWAYS_LABEL, Condition
 from .geometry import Rect
 from .recognizer import Recognizer, build_recognizer
+from .variables import SET_ACTION, Variable, VariableRefs, parse_variables
 
 
 @dataclass
@@ -42,6 +43,20 @@ class Node:
         if self.note:
             out["note"] = self.note
         return out
+
+
+def _action_is_deferred(spec: object) -> bool:
+    """动作里带变量引用（$var/$expr）或是赋值动作时，**延后到执行那一刻**再解析。
+
+    这样 graph.json 里可以写 {"$var": "点击X"}，而不必在加载时就要求它是具体数字。
+    """
+    if not isinstance(spec, dict):
+        return False
+    if str(spec.get("type")) == SET_ACTION:
+        return True
+    if VariableRefs.collect(spec).vars:
+        return True
+    return any(key in spec for key in ("$expr",))
 
 
 @dataclass
@@ -74,6 +89,7 @@ class Edge:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Edge:
         when = str(data.get("when") or "")
+        raw_action = data.get("action") or {"type": "click", "target": when}
         return cls(
             id=str(data["id"]),
             when=when,
@@ -84,10 +100,15 @@ class Edge:
             min_score=float(data.get("min_score", 0.0)),
             cooldown_ms=int(data.get("cooldown_ms", 0)),
             retries=int(data.get("retries", 1)),
-            action=Action.parse(
-                data.get("action") or {"type": "click", "target": when},
-                fallback_target=None if when == ALWAYS_LABEL else when,
-            ).to_dict(),
+            action=(
+                # 带变量引用/赋值的动作原样保留（运行时求值后再解析），其余照旧规范化
+                dict(raw_action)
+                if _action_is_deferred(raw_action)
+                else Action.parse(
+                    raw_action,
+                    fallback_target=None if when == ALWAYS_LABEL else when,
+                ).to_dict()
+            ),
             condition=Condition.parse(data.get("condition"), fallback=when),
         )
 
@@ -125,6 +146,8 @@ class Graph:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: list[Edge] = field(default_factory=list)
     recognizers: dict[str, Recognizer] = field(default_factory=dict)
+    # 变量（"黑板"）：动作参数可以用 {"$var": 名字} 引用它们
+    variables: dict[str, Variable] = field(default_factory=dict)
     specs: dict[str, dict[str, Any]] = field(default_factory=dict)
     defaults: dict[str, object] = field(default_factory=dict)
     path: str | None = None
@@ -139,6 +162,7 @@ class Graph:
             nodes={node["id"]: Node.from_dict(node) for node in data.get("nodes", [])},
             edges=[Edge.from_dict(edge) for edge in data.get("edges", [])],
             defaults=dict(data.get("defaults") or {}),
+            variables=parse_variables(data.get("variables")),
             path=path,
             base_dir=base_dir,
         )
@@ -220,6 +244,20 @@ class Graph:
                 for condition_label in edge.condition.labels or fallback_labels:
                     if condition_label not in self.recognizers:
                         raise ValueError(f"边 {edge.id} 的条件引用了未定义的识别器: {condition_label}")
+            # 变量引用必须是定义过的（和识别器标签一样在保存时报错，别等跑起来才发现）
+            for name in VariableRefs.collect(edge.action).vars:
+                if name not in self.variables:
+                    raise ValueError(f"边 {edge.id} 的动作引用了未定义的变量: {name}")
+            if str(edge.action.get("type")) == SET_ACTION:
+                target_name = str(edge.action.get("name") or "").strip()
+                if not target_name:
+                    raise ValueError(f"边 {edge.id} 的赋值动作没写变量名")
+                if target_name not in self.variables:
+                    raise ValueError(f"边 {edge.id} 给未定义的变量赋值: {target_name}")
+                continue
+            if _action_is_deferred(edge.action):
+                # 带变量引用的动作：参数值要等运行时才知道，这里只校验引用本身
+                continue
             action = Action.parse(edge.action, fallback_target=edge.action_fallback_target)
             for action_label in (action.target, action.to_target):
                 if action_label and action_label not in self.recognizers:

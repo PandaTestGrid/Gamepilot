@@ -24,6 +24,7 @@ from .frame import Detection, Frame
 from .graph import Edge, Graph
 from .recognizer import VoteFilter, perceive
 from .trace import TraceBuffer, TraceEvent
+from .variables import SET_ACTION, VariableStore, resolve_spec
 
 
 @dataclass
@@ -65,6 +66,8 @@ class Engine:
         self.current: str | None = start_node
         self.pending: Pending | None = None
         self.detections: dict[str, Detection] = {}
+        # 变量（"黑板"）：动作参数里的 {"$var": …} 在执行那一刻求值
+        self.variables = VariableStore()
         self.stats = {"ticks": 0, "actions": 0, "transitions": 0, "failed": 0, "recoveries": 0}
         self._timeout_reported: set[str] = set()
         # 本次"进入节点"期间已经触发过的边（dst 为空的边默认只触发一次，
@@ -313,8 +316,35 @@ class Engine:
         除了 `wait`，动作都是"发出去就返回"：是否真的切了界面，由后续帧的条件确认
         （低帧率 + 高延迟下这样才不会把时序搞乱）。
         """
+        # 变量在这里求值：参数写 {"$var": "点击X"} 就会换成当前值
         try:
-            action = Action.parse(edge.action, fallback_target=edge.action_fallback_target)
+            spec = resolve_spec(dict(edge.action), self.variables)
+        except ValueError as exc:
+            self.stats["failed"] += 1
+            self._emit("action_failed", node=self.current, edge=edge, message=str(exc))
+            return
+
+        # 赋值动作（蓝图里的 Set Value）：改运行期变量，然后就走完了
+        if str(spec.get("type")) == SET_ACTION:
+            name = str(spec.get("name") or "").strip()
+            value = spec.get("value", 0)
+            try:
+                self.variables.set(name, value)
+            except Exception as exc:  # 类型不匹配等
+                self.stats["failed"] += 1
+                self._emit("action_failed", node=self.current, edge=edge, message=f"赋值失败: {exc}")
+                return
+            self.stats["actions"] += 1
+            self._emit(
+                "action_executed",
+                node=self.current,
+                edge=edge,
+                message=f"设置变量 {name} = {self.variables.get(name)!r}",
+            )
+            return
+
+        try:
+            action = Action.parse(spec, fallback_target=edge.action_fallback_target)
         except ValueError as exc:
             self.stats["failed"] += 1
             self._emit("action_failed", node=self.current, edge=edge, message=str(exc))
@@ -422,6 +452,13 @@ class Engine:
             controller.touch("up", x, y)
         else:
             controller.click(x, y)
+
+    def reset_variables(self) -> None:
+        """把运行期变量恢复成脚本里的默认值（每次 run.start／换图时调一次）。
+
+        变量是"跑起来会被 set 改"的，不重置的话第二次运行会带着上次的残留值。
+        """
+        self.variables.reset(self.graph.variables)
 
     def _emit(
         self,

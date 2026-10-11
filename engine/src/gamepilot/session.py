@@ -332,6 +332,8 @@ class DeviceSession:
         with self.lock:
             if not self.graph.nodes:
                 raise RuntimeError("状态图还没有节点：先在画面上框选录制一个界面")
+            # 每次开始运行都把变量恢复成默认值（上次跑完的残留不该带进来）
+            self.engine.reset_variables()
             self.running = True
         self.emit("run.started", {"deviceId": self.device_id})
 
@@ -635,6 +637,7 @@ class DeviceSession:
         self.engine = Engine(
             self.graph, self.controller, trace=self.trace, on_event=self._on_engine_event, start_node=current
         )
+        self.engine.reset_variables()
         self.running = running
 
     # ------------------------------------------------------------------ #
@@ -656,6 +659,7 @@ class DeviceSession:
                 "channel": getattr(self.controller, "channel", "unknown"),
                 "streamFps": round(self.stream_fps, 1),
                 # iOS 会变：界面方向（横屏坐标变换靠它，排错时一眼能看到）
+                "variables": self.engine.variables.snapshot(),
                 "orientation": orientation_code,
                 "orientationName": ORIENTATION_LABELS.get(orientation_code, None) if orientation_code else None,
                 "linkNote": getattr(self.controller, "link_note", ""),

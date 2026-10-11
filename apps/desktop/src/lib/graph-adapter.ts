@@ -8,11 +8,13 @@
 import type { GraphPayload } from '@/lib/rpc';
 import type {
   EdgeAction,
+  GraphVariable,
   EdgeCondition,
   EdgeKind,
   GraphData,
   GraphEdgeView,
   GraphNodeView,
+  ParamValue,
   RecognizerView,
 } from '@/types';
 
@@ -67,6 +69,20 @@ export function toGraphData(
   }));
 
   const liveScores = new Map((live?.detections ?? []).map((item) => [item.label, item] as const));
+  const runtime =
+    (live as { variables?: Record<string, number | string | boolean> } | undefined)?.variables ?? {};
+  const variables: GraphVariable[] = Object.entries(payload.variables ?? {}).map(([name, spec]) => {
+    const item = (spec ?? {}) as Record<string, unknown>;
+    return {
+      name,
+      type: (['number', 'text', 'key'].includes(String(item.type))
+        ? String(item.type)
+        : 'number') as GraphVariable['type'],
+      value: (item.value ?? 0) as number | string | boolean,
+      runtimeValue: runtime[name],
+    };
+  });
+
   const recognizers: RecognizerView[] = Object.entries(payload.recognizers ?? {}).map(([label, spec]) => {
     const live1 = liveScores.get(label);
     const type = str(spec.type, 'template');
@@ -88,6 +104,7 @@ export function toGraphData(
     nodes,
     edges,
     recognizers,
+    variables,
     activeNodeId: live?.node ?? null,
     pendingNodeId: live?.pending ?? null,
   };
@@ -123,20 +140,44 @@ function toCondition(edge: Record<string, unknown>): EdgeCondition {
 }
 
 /** graph.json 的 action → 界面模型 */
+/** 引擎里的 {"$var": "点X"} ↔ 界面上写成 "$点X" */
+export function toParamValue(value: unknown): ParamValue | undefined {
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return value.startsWith('$') ? value : value;
+  }
+  if (value && typeof value === 'object' && '$var' in (value as Record<string, unknown>)) {
+    return `$${String((value as Record<string, unknown>).$var)}`;
+  }
+  return undefined;
+}
+
+/** 界面上的 "$点X" → 引擎里的 {"$var": "点X"} */
+export function toParamPayload(value: ParamValue | undefined): unknown {
+  if (typeof value === 'string' && value.startsWith('$') && value.length > 1) {
+    return { $var: value.slice(1) };
+  }
+  return value;
+}
+
 function toAction(value: unknown, fallbackTarget: string): EdgeAction {
   const spec = (value ?? {}) as Record<string, unknown>;
   const type = str(spec.type, 'click');
-  const known = ['click', 'long_press', 'swipe', 'wait', 'key', 'text'];
+  const known = ['click', 'long_press', 'swipe', 'wait', 'key', 'text', 'set'];
   return {
     type: (known.includes(type) ? type : 'click') as EdgeAction['type'],
     target: typeof spec.target === 'string' ? spec.target : fallbackTarget,
     toTarget: typeof spec.to_target === 'string' ? spec.to_target : undefined,
-    x: typeof spec.x === 'number' ? spec.x : undefined,
-    y: typeof spec.y === 'number' ? spec.y : undefined,
-    toX: typeof spec.to_x === 'number' ? spec.to_x : undefined,
-    toY: typeof spec.to_y === 'number' ? spec.to_y : undefined,
-    durationMs: num(spec.duration_ms, 300),
-    seconds: num(spec.seconds, 0.5),
+    x: toParamValue(spec.x),
+    y: toParamValue(spec.y),
+    toX: toParamValue(spec.to_x),
+    toY: toParamValue(spec.to_y),
+    durationMs: toParamValue(spec.duration_ms) ?? 300,
+    seconds: toParamValue(spec.seconds) ?? 0.5,
+    name: typeof spec.name === 'string' ? spec.name : undefined,
+    assign: toParamValue(spec.value) !== undefined ? String(toParamValue(spec.value)) : undefined,
     value: typeof spec.value === 'string' ? spec.value : '',
   };
 }
@@ -172,8 +213,13 @@ export function toConditionPayload(
 /** 界面模型 → graph.json 的 action */
 export function toActionPayload(action: EdgeAction): Record<string, unknown> {
   const out: Record<string, unknown> = { type: action.type };
+  if (action.type === 'set') {
+    out.name = action.name ?? '';
+    out.value = action.assign ?? '0';
+    return out;
+  }
   if (action.type === 'wait') {
-    out.seconds = action.seconds ?? 0.5;
+    out.seconds = toParamPayload(action.seconds) ?? 0.5;
     return out;
   }
   if (action.type === 'key' || action.type === 'text') {
@@ -184,20 +230,20 @@ export function toActionPayload(action: EdgeAction): Record<string, unknown> {
     out.target = action.target;
   } else {
     if (action.x !== undefined) {
-      out.x = action.x;
+      out.x = toParamPayload(action.x);
     }
     if (action.y !== undefined) {
-      out.y = action.y;
+      out.y = toParamPayload(action.y);
     }
   }
   if (action.type === 'swipe') {
     if (action.toTarget) {
       out.to_target = action.toTarget;
     } else {
-      out.to_x = action.toX ?? 0.5;
-      out.to_y = action.toY ?? 0.5;
+      out.to_x = toParamPayload(action.toX) ?? 0.5;
+      out.to_y = toParamPayload(action.toY) ?? 0.5;
     }
   }
-  out.duration_ms = action.durationMs ?? 300;
+  out.duration_ms = toParamPayload(action.durationMs) ?? 300;
   return out;
 }

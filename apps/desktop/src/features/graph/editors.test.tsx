@@ -22,6 +22,7 @@ const graph: GraphData = {
     { id: 'dialer', name: '拨号盘', enter: [], x: 200, y: 0, visits: 0 },
   ],
   edges: [],
+  variables: [],
   recognizers: [
     {
       label: 'icon',

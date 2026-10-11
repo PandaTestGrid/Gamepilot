@@ -26,3 +26,21 @@
 - 设备没连上（`session.store.ready[deviceId]` 为假）时按钮变灰，并在 `title` 里说明原因；
 - 状态全在 store（`ui.store.controlMode` / `recordActionMode`、`session.store.pressKey` / `recordStep`），
   组件自身不持有状态，换设备不会串。
+
+## 设备弹层（分类与交互）
+
+| 文件 | 职责 |
+|---|---|
+| `DevicePopover.tsx` | 弹层外壳：搜索、分类 Tab、列表、Footer（刷新/高级），↑↓/Enter/Esc 键盘流转 |
+| `device-kinds.ts` | **纯逻辑**：分类 / 过滤 / 排序 / 搜索（`buildDeviceTabs` / `filterByTab` / `sortForDisplay` / `resolveTab`），有单测 |
+| `DeviceRow.tsx` | 一行设备：当前 / 已连接 / 未连接 / 失败 四种交互各不相同 |
+| `MacWindowList.tsx` | 「本机窗口」Tab 的内容：枚举窗口 + 搜索 + 刷新 + 权限提示 + 已连标记 |
+
+规则：
+
+- **只显示有内容的分类**（空 Tab 会让人以为"设备不见了"）；分类计数来自实际设备列表。
+- macOS 在引擎里是**一个伪设备（`macos:picker`）+ 一串窗口**两条数据路径：
+  伪设备**不是可连设备**，只用来在 Tab 上有入口；真正要连的是 `macos:<句柄>`。
+- 点击语义按状态分：当前设备 = 无动作；已连接 = **切换**；未连接 = 连接；行尾按钮才是断开。
+- `DeviceKind` 白名单在 `stores/device.store.ts` 里是**穷举 Record**：新增来源漏一行就编译不过
+  （曾经漏了 `ios`，所有 iPhone 被降级成 `remote`，分类里看不到）。

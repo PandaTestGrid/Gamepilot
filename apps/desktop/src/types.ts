@@ -43,17 +43,33 @@ export interface EdgeCondition {
 }
 
 /** 基础操作（和引擎 core/actions.py 一一对应） */
+/** 变量（"黑板"）：动作参数可以写成 "$变量名" 引用它 */
+export interface GraphVariable {
+  readonly name: string;
+  readonly type: 'number' | 'text' | 'key';
+  readonly value: number | string | boolean;
+  /** 运行时当前值（引擎回传，跑起来后会被"赋值"动作改） */
+  readonly runtimeValue?: number | string | boolean;
+}
+
+/** 参数值：字面量，或 "$变量名" 形式的引用 */
+export type ParamValue = number | string;
+
 export interface EdgeAction {
-  readonly type: 'click' | 'long_press' | 'swipe' | 'wait' | 'key' | 'text';
+  readonly type: 'click' | 'long_press' | 'swipe' | 'wait' | 'key' | 'text' | 'set';
   readonly target?: string;
   readonly toTarget?: string;
-  readonly x?: number;
-  readonly y?: number;
-  readonly toX?: number;
-  readonly toY?: number;
-  readonly durationMs?: number;
-  readonly seconds?: number;
+  /** 数字或 "$变量名"（引用变量） */
+  readonly x?: ParamValue;
+  readonly y?: ParamValue;
+  readonly toX?: ParamValue;
+  readonly toY?: ParamValue;
+  readonly durationMs?: ParamValue;
+  readonly seconds?: ParamValue;
   readonly value?: string;
+  /** 赋值动作（type=set）：把哪个变量设成什么 */
+  readonly name?: string;
+  readonly assign?: string;
 }
 
 export interface GraphEdgeView {
@@ -93,6 +109,7 @@ export interface GraphData {
   readonly nodes: readonly GraphNodeView[];
   readonly edges: readonly GraphEdgeView[];
   readonly recognizers: readonly RecognizerView[];
+  readonly variables: readonly GraphVariable[];
   readonly activeNodeId: string | null;
   readonly pendingNodeId: string | null;
 }

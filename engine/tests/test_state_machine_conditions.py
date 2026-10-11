@@ -255,3 +255,79 @@ def test_fired_edge_does_not_report_timeout_later(tmp_path: Path) -> None:
 
     assert "edge_timeout" not in events, f"已经执行过的边不该再报超时: {events}"
     assert len(controller.clicks) == 1, "一次访问只点一次"
+
+
+def test_variables_apply_at_runtime() -> None:
+    """变量（黑板）：动作参数引用变量、赋值动作改变量、重置回默认值。"""
+    controller = RecordingController()
+    graph = Graph.from_dict(
+        {
+            "nodes": [{"id": "main", "name": "主界面", "enter": ["home"]}],
+            "recognizers": {"home": {"type": "template", "template": "templates/home.png", "threshold": 0.7}},
+            "variables": {"点X": {"type": "number", "value": 0.25}, "次数": {"type": "number", "value": 0}},
+            "edges": [
+                {
+                    "id": "e_click",
+                    "when": "home",
+                    "from": "main",
+                    "action": {"type": "click", "x": {"$var": "点X"}, "y": 0.9},
+                },
+                {
+                    "id": "e_count",
+                    "when": "home",
+                    "from": "main",
+                    "priority": -1,
+                    "action": {"type": "set", "name": "次数", "value": {"$expr": "次数 + 1"}},
+                },
+            ],
+        },
+        base_dir=".",
+    )
+    graph.validate()
+    assert graph.variables["点X"].value == 0.25
+
+    engine = Engine(graph, controller)
+    engine.reset_variables()
+
+    # 先执行一次点击边（不走 tick，避免脚本控制器的界面切换影响判断）
+    engine._execute(graph.edges[0])
+    assert controller.clicks and controller.clicks[0][0] == pytest.approx(0.25), (
+        f"点击 X 应该来自变量，实际 {controller.clicks[:1]}"
+    )
+
+    # 赋值动作：次数 + 1
+    engine._execute(graph.edges[1])
+    assert float(engine.variables.get("次数") or 0) == pytest.approx(1.0)
+
+    # 重置后回到默认值（每次 run.start 都会重置）
+    engine.reset_variables()
+    assert float(engine.variables.get("次数") or 0) == 0.0
+
+
+def test_variable_reference_missing_at_runtime_is_reported() -> None:
+    """运行期变量被删了也要给可读错误，而不是崩掉。"""
+    controller = RecordingController()
+    graph = Graph.from_dict(
+        {
+            "nodes": [{"id": "main", "name": "主界面", "enter": ["home"]}],
+            "recognizers": {"home": {"type": "template", "template": "templates/home.png", "threshold": 0.7}},
+            "variables": {"点X": {"type": "number", "value": 0.25}},
+            "edges": [
+                {
+                    "id": "e_click",
+                    "when": "home",
+                    "from": "main",
+                    "action": {"type": "click", "x": {"$var": "点X"}, "y": 0.9},
+                }
+            ],
+        },
+        base_dir=".",
+    )
+    engine = Engine(graph, controller)
+    # 模拟"跑之前变量被删了/图换了"：运行期没有任何变量
+    from gamepilot.core.variables import VariableStore
+
+    engine.variables = VariableStore({})
+    engine._execute(graph.edges[0])
+    assert not controller.clicks, "引用不到的变量不该瞎点"
+    assert engine.stats["failed"] >= 1

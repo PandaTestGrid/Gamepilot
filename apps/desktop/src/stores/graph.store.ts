@@ -8,6 +8,7 @@ import { create } from 'zustand';
 
 import { toGraphData } from '@/lib/graph-adapter';
 import {
+  graphGet,
   graphEdgeAdd,
   graphNodeAdd,
   graphNodeRemove,
@@ -48,6 +49,11 @@ interface GraphState {
   ) => Promise<void>;
   readonly removeNode: (deviceId: string, nodeId: string) => Promise<void>;
   readonly connectNodes: (deviceId: string, from: string, to: string) => Promise<void>;
+  /** 黑板：保存变量定义（写回 graph.json 的 variables 段） */
+  readonly setVariables: (
+    deviceId: string,
+    variables: Record<string, { type?: string; value?: string | number | boolean }>,
+  ) => Promise<void>;
   /** 每帧同步：识别分数 / 当前节点 / pending 目标 */
   readonly updateLive: (
     deviceId: string,
@@ -80,6 +86,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
         nodes: [],
         edges: [],
         recognizers: [],
+        variables: [],
         activeNodeId: null,
         pendingNodeId: null,
       };
@@ -229,6 +236,22 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
     set((current) => ({
       raws: { ...current.raws, [deviceId]: result.graph },
       graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+    }));
+  },
+
+  setVariables: async (
+    deviceId: string,
+    variables: Record<string, { type?: string; value?: string | number | boolean }>,
+  ) => {
+    const raw = get().raws[deviceId];
+    if (!raw) {
+      return;
+    }
+    await graphSave(deviceId, { ...raw, variables });
+    const saved = await graphGet(deviceId);
+    set((current) => ({
+      raws: { ...current.raws, [deviceId]: saved },
+      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, saved, undefined) },
     }));
   },
 

@@ -78,6 +78,8 @@ METHOD_RECORD_TEMPLATE = "record.template"
 METHOD_RECOGNIZER_THRESHOLD = "recognizer.threshold"
 
 # 运行控制
+# 变量（"黑板"）：改运行期变量值（不写回脚本）
+METHOD_VARIABLE_SET = "variable.set"
 # 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置
 METHOD_ACTION_RUN = "action.run"
 METHOD_RUN_START = "run.start"

@@ -233,3 +233,95 @@ def test_default_condition_is_omitted_from_file() -> None:
     edge = Edge.from_dict({"id": "e1", "when": "home", "action": {"type": "click", "target": "home"}})
     payload = edge.to_dict()
     assert "condition" not in payload, "默认条件（就是 when）不用写进文件，保持 graph.json 干净"
+
+
+# ---------------------------------------------------------------- 变量（黑板）
+
+
+def test_parse_variables_accepts_shorthand_and_types() -> None:
+    from gamepilot.core.variables import parse_variables
+
+    parsed = parse_variables(
+        {
+            "点击X": 0.5,  # 简写 = number
+            "目标模板": {"type": "key", "value": "icon"},
+            "坏类型": {"type": "unknown", "value": 1},  # 不认识 → 按 number
+            "": 1,  # 空名字丢掉
+        }
+    )
+    assert parsed["点击X"].value == 0.5
+    assert parsed["点击X"].type == "number"
+    assert parsed["目标模板"].value == "icon"
+    assert parsed["坏类型"].type == "number"
+    assert "" not in parsed
+
+
+def test_resolve_spec_replaces_var_and_expr() -> None:
+    from gamepilot.core.variables import Variable, VariableStore, resolve_spec
+
+    store = VariableStore({"点击X": Variable("点击X", "number", 0.5), "次数": Variable("次数", "number", 2)})
+    resolved = resolve_spec(
+        {"type": "click", "x": {"$var": "点击X"}, "y": 0.8, "duration_ms": {"$expr": "次数 * 100"}},
+        store,
+    )
+    assert resolved["x"] == 0.5
+    assert resolved["y"] == 0.8
+    assert resolved["duration_ms"] == 200.0
+
+
+def test_resolve_spec_rejects_unknown_variable() -> None:
+    from gamepilot.core.variables import VariableStore, resolve_spec
+
+    with pytest.raises(ValueError, match="变量未定义"):
+        resolve_spec({"type": "click", "x": {"$var": "不存在"}}, VariableStore({}))
+
+
+def test_variable_store_set_keeps_type_and_resets() -> None:
+    from gamepilot.core.variables import Variable, VariableStore
+
+    store = VariableStore({"次数": Variable("次数", "number", 0)})
+    store.set("次数", "3")  # 数字变量收到字符串 → 转成数字
+    assert store.get("次数") == 3.0
+    store.set("次数", "不是数字")  # 转不了就忽略，不炸
+    assert store.get("次数") == 3.0
+    store.reset()
+    assert store.get("次数") == 0  # 重置回默认值
+    store.set("新变量", 7)  # 没定义过的变量直接新增
+    assert store.get("新变量") == 7
+
+
+def test_expression_rejects_dangerous_input() -> None:
+    from gamepilot.core.variables import VariableStore, evaluate_expr
+
+    # 危险表达式必须被挡住（要么字符集不允许，要么求值时报未定义）
+    with pytest.raises(ValueError):
+        evaluate_expr("__import__('os').system('ls')", VariableStore({}))
+    with pytest.raises(ValueError, match="不支持的字符"):
+        evaluate_expr("a; import os", VariableStore({}))
+
+
+def test_graph_validates_variable_references() -> None:
+    """引用未定义变量要在保存时报错（和识别器标签一个待遇）。"""
+    from gamepilot.core.graph import Edge, Graph
+
+    graph = Graph()
+    graph.add_edge(Edge.from_dict({"id": "e1", "action": {"type": "click", "x": {"$var": "没定义"}, "y": 0.8}}))
+    with pytest.raises(ValueError, match="未定义的变量"):
+        graph.validate()
+
+    graph.edges[0].action["x"] = {"$var": "点击X"}
+    graph.variables = {
+        "点击X": __import__("gamepilot.core.variables", fromlist=["Variable"]).Variable("点击X", "number", 0.5)
+    }
+    graph.validate()  # 定义过就通过了
+
+
+def test_graph_validates_set_action_target() -> None:
+    from gamepilot.core.graph import Edge, Graph
+
+    graph = Graph()
+    graph.add_edge(
+        Edge.from_dict({"id": "e1", "action": {"type": "set", "name": "次数", "value": {"$expr": "次数 + 1"}}})
+    )
+    with pytest.raises(ValueError, match="未定义的变量"):
+        graph.validate()

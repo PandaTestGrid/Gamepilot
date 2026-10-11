@@ -57,6 +57,7 @@ function seed(): void {
     deviceId: 'dev',
     nodes: [{ id: 'n1', name: '主界面', enter: [], x: 100, y: 100, visits: 0 }],
     edges: [],
+    variables: [],
     recognizers: [],
     activeNodeId: null,
     pendingNodeId: null,

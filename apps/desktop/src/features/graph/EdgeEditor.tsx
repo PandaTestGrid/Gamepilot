@@ -17,7 +17,7 @@ import { describeEdgeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
-import type { EdgeAction, EdgeCondition, GraphData, GraphEdgeView } from '@/types';
+import type { EdgeAction, ParamValue, EdgeCondition, GraphData, GraphEdgeView } from '@/types';
 
 const KEY_OPTIONS = ['back', 'home', 'recents', 'power', 'volume_up', 'volume_down'] as const;
 
@@ -51,6 +51,7 @@ export function EdgeEditor({
   // 不用 effect 去同步 props → state（那样会多一次渲染，也被 lint 规则禁止）。
 
   const labels = (graph?.recognizers ?? []).map((item) => item.label);
+  const varNames = (graph?.variables ?? []).map((item) => item.name);
   const deviceReady = useSessionStore((state) => state.ready[deviceId] === true);
   const runOnce = async (): Promise<void> => {
     setBusy(true);
@@ -268,11 +269,13 @@ export function EdgeEditor({
                   label="x"
                   value={action.x ?? 0.5}
                   onChange={(value) => setAction({ ...action, x: value })}
+                  variables={varNames}
                 />
                 <NumberField
                   label="y"
                   value={action.y ?? 0.5}
                   onChange={(value) => setAction({ ...action, y: value })}
+                  variables={varNames}
                 />
               </>
             )}
@@ -285,11 +288,13 @@ export function EdgeEditor({
               label="到x"
               value={action.toX ?? 0.5}
               onChange={(value) => setAction({ ...action, toX: value })}
+              variables={varNames}
             />
             <NumberField
               label="到y"
               value={action.toY ?? 0.2}
               onChange={(value) => setAction({ ...action, toY: value })}
+              variables={varNames}
             />
           </>
         )}
@@ -299,6 +304,7 @@ export function EdgeEditor({
             label="时长ms"
             value={action.durationMs ?? 300}
             onChange={(value) => setAction({ ...action, durationMs: value })}
+            variables={varNames}
           />
         )}
 
@@ -307,6 +313,7 @@ export function EdgeEditor({
             label="秒"
             value={action.seconds ?? 0.5}
             onChange={(value) => setAction({ ...action, seconds: value })}
+            variables={varNames}
           />
         )}
 
@@ -364,25 +371,54 @@ export function EdgeEditor({
   );
 }
 
+/**
+ * 数值参数输入框。
+ *
+ * 支持两种写法：数字（0.5）或 `$变量名`（引用变量）—— 后者就是蓝图里的"数据连线"，
+ * 只是先用文本表达，等 P2 再做成可拖的引脚。
+ */
 function NumberField({
   label,
   value,
   onChange,
+  variables = [],
 }: {
   label: string;
-  value: number;
-  onChange: (value: number) => void;
+  value: ParamValue;
+  onChange: (value: ParamValue) => void;
+  variables?: readonly string[];
 }): ReactNode {
+  const text = String(value);
+  const isRef = text.startsWith('$');
+  const listId = `vars-${label}`;
   return (
-    <label className="flex items-center gap-1 text-dim">
+    <label className="flex items-center gap-1 text-dim" title="填数字，或填 $变量名 引用变量">
       {label}
       <input
-        type="number"
-        step="0.05"
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-        className="h-5 w-14 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+        list={variables.length > 0 ? listId : undefined}
+        value={text}
+        onChange={(event) => {
+          const raw = event.target.value;
+          // 以 $ 开头 = 引用变量（原样存字符串）；否则按数字解析
+          if (raw.startsWith('$')) {
+            onChange(raw);
+            return;
+          }
+          const parsed = Number(raw);
+          onChange(raw === '' || Number.isNaN(parsed) ? 0 : parsed);
+        }}
+        className={cn(
+          'h-5 w-20 rounded-sm border bg-canvas px-1 text-badge text-fg',
+          isRef ? 'border-brand' : 'border-line',
+        )}
       />
+      {variables.length > 0 && (
+        <datalist id={listId}>
+          {variables.map((name) => (
+            <option key={name} value={`$${name}`} />
+          ))}
+        </datalist>
+      )}
     </label>
   );
 }

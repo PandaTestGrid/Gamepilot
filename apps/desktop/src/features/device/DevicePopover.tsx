@@ -1,199 +1,268 @@
 /**
- * 设备弹层：统一列表 + 一步连接 + 行内错误（DESIGN.md §4.3）。
+ * 设备弹层：分类 Tab + 一步连接 / 切换 + 行内错误（DESIGN.md §4.3）。
  *
  * 与 AirtestIDE 的差别都体现在这里：
- *   - 四个折叠区 → 一个列表 + 来源徽标
- *   - 「先选下拉再点连接」 → 点行任意位置即连
- *   - 裸的「刷新/重启 ADB」 → 收进 ⋯ 高级
- *   - iOS 设备由引擎发现（pymobiledevice3 usbmux，仅 17.4+），点一下就连；
+ *   - 四个折叠区 → **按来源分类的 Tab（只显示有内容的分类，带数量）**；
+ *   - 「先选下拉再点连接」 → 点行任意位置即连；**已连接的行点一下 = 切换当前设备**；
+ *   - 本机窗口（macOS）不再塞在底部折叠区里 → 独立 Tab，整个列表区都是窗口选择器；
+ *   - 裸的「刷新/重启 ADB」 → 收进 ⋯ 高级；
+ *   - 键盘可用：↑↓ 换行、Enter 连接/切换、Esc 关闭、打开即聚焦搜索框。
  */
 import { MoreHorizontal, RefreshCw, Search } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { StatusDot, type DotTone } from '@/layout/PanelShell';
-import { formatResolution } from '@/lib/format';
+import {
+  buildDeviceTabs,
+  connectableDevices,
+  filterByTab,
+  isMacDevice,
+  isMacPicker,
+  matchDeviceQuery,
+  resolveTab,
+  sortForDisplay,
+} from '@/features/device/device-kinds';
+import { DeviceRow } from '@/features/device/DeviceRow';
+import { MacWindowList } from '@/features/device/MacWindowList';
+import { StatusDot } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
-import { macWindows, type MacWindowInfo } from '@/lib/rpc';
 import { useDeviceStore } from '@/stores/device.store';
 import { useSessionStore } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
-import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
-
-const TABS: Array<{ id: 'all' | DeviceKind; label: string }> = [
-  { id: 'all', label: '全部' },
-  { id: 'android', label: '安卓' },
-  { id: 'emulator', label: '模拟器' },
-  { id: 'windows', label: 'Windows' },
-  { id: 'ios', label: 'iOS' },
-  { id: 'mock', label: 'Mock' },
-];
-
-function toneOf(status: DeviceStatus): DotTone {
-  switch (status) {
-    case 'connected':
-      return 'confirmed';
-    case 'connecting':
-      return 'pending';
-    case 'failed':
-      return 'failed';
-    default:
-      return 'idle';
-  }
-}
 
 export function DevicePopover(): ReactNode {
   const open = useUiStore((state) => state.devicePopoverOpen);
   const toggle = useUiStore((state) => state.toggleDevicePopover);
+  const tab = useUiStore((state) => state.deviceTab);
+  const setTab = useUiStore((state) => state.setDeviceTab);
+
   const devices = useDeviceStore((state) => state.devices);
-  const connectSession = useSessionStore((state) => state.connect);
-  const disconnectSession = useSessionStore((state) => state.disconnect);
+  const activeId = useDeviceStore((state) => state.activeId);
+  const setActive = useDeviceStore((state) => state.setActive);
   const scan = useDeviceStore((state) => state.scan);
   const scanState = useDeviceStore((state) => state.scanState);
   const scanErrors = useDeviceStore((state) => state.scanErrors);
   const scanError = useDeviceStore((state) => state.scanError);
   const lastScanAt = useDeviceStore((state) => state.lastScanAt);
+
+  const connectSession = useSessionStore((state) => state.connect);
+  const disconnectSession = useSessionStore((state) => state.disconnect);
+
   const [query, setQuery] = useState('');
-  const [tab, setTab] = useState<'all' | DeviceKind>('all');
   const [advanced, setAdvanced] = useState(false);
-  // 本机窗口（macOS）：列表 + 手输句柄
-  const [macOpen, setMacOpen] = useState(false);
-  const [macAllowed, setMacAllowed] = useState(true);
-  const [windows, setWindows] = useState<MacWindowInfo[]>([]);
-  const [handleInput, setHandleInput] = useState('');
-  const [macNote, setMacNote] = useState('');
-
-  const loadWindows = useCallback(async () => {
-    try {
-      const result = await macWindows();
-      setWindows(result.windows);
-      setMacAllowed(result.allowed);
-      setMacNote(
-        result.platform !== 'darwin'
-          ? '本机窗口只在 macOS 上可用（Windows 用同一套接口，待实现）'
-          : result.allowed
-            ? `找到 ${result.windows.length} 个窗口`
-            : '缺少「屏幕录制」权限，抓到的画面会是空白',
-      );
-    } catch (error) {
-      setMacNote(`取窗口列表失败: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, []);
-
-  const connectWindow = (handle: number | string): void => {
-    if (!handle) {
-      return;
-    }
-    // 设备 id 用句柄拼：引擎侧会按 window=<句柄> 解析出同一个窗口
-    void connectSession(`macos:${handle}`, `Mac:///?window=${handle}`);
-  };
+  const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const rows = useMemo(
     () =>
-      devices.filter((device) => {
-        const matchTab = tab === 'all' || device.kind === tab;
-        const text = `${device.name} ${device.uri} ${device.kind}`.toLowerCase();
-        return matchTab && (query.trim() === '' || text.includes(query.trim().toLowerCase()));
-      }),
-    [devices, query, tab],
+      sortForDisplay(
+        connectableDevices(filterByTab(devices, tab)).filter((device) => matchDeviceQuery(device, query)),
+        activeId,
+      ),
+    [devices, tab, query, activeId],
   );
 
+  const tabs = useMemo(() => buildDeviceTabs(devices), [devices]);
   const connectedCount = devices.filter((device) => device.status === 'connected').length;
+  const macConnected = useMemo(
+    () =>
+      new Set(
+        devices
+          .filter((device) => isMacDevice(device) && device.status === 'connected')
+          .map((device) => Number(device.id.split(':')[1]))
+          .filter((handle) => Number.isFinite(handle)),
+      ),
+    [devices],
+  );
 
-  // 打开就扫一次：这是低频操作，不该让用户再点一次"刷新"（DESIGN.md §4.3.4）
+  const connectWindow = useCallback(
+    (handle: number | string): void => {
+      const value = String(handle).trim();
+      if (!value) {
+        return;
+      }
+      void connectSession(`macos:${value}`, `Mac:///?window=${value}`).then((ok) => {
+        if (ok) {
+          toggle(false);
+        }
+      });
+    },
+    [connectSession, toggle],
+  );
+
+  // 打开就扫一次：低频操作，不该让用户再点一次"刷新"（DESIGN.md §4.3.4）
   useEffect(() => {
     if (open) {
       void scan();
     }
   }, [open, scan]);
 
+  // Esc 关弹层：挂 document 级（焦点在搜索框/列表/任何地方都能关，和「布局」菜单一致）
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        toggle(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open, toggle]);
+
+  // 当前 Tab 没内容（例如 iOS 拔了）就退到有内容的分类，避免打开是空列表
+  useEffect(() => {
+    if (open) {
+      setTab(resolveTab(tab, tabs));
+    }
+  }, [open, tab, tabs, setTab]);
+
   if (!open) {
     return null;
   }
 
+  /** ↑↓ 在行之间移动焦点；Enter 交给按钮原生行为（更可靠）；Esc 见上面的 document 监听。 */
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') {
+      return;
+    }
+    const focusables = Array.from(
+      listRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [],
+    );
+    if (focusables.length === 0) {
+      return;
+    }
+    const index = focusables.findIndex((node) => node === document.activeElement);
+    const step = event.key === 'ArrowDown' ? 1 : -1;
+    const next = index === -1 ? 0 : (index + step + focusables.length) % focusables.length;
+    focusables[next]?.focus();
+    event.preventDefault();
+  };
+
   return (
     <div className="absolute inset-0 z-30 bg-canvas/60" onClick={() => toggle(false)} role="presentation">
       <div
-        className="absolute top-16 left-3 w-[460px] rounded-sm border border-line bg-panel"
+        className="absolute top-16 left-3 flex h-[420px] w-[520px] flex-col rounded-sm border border-line bg-panel"
         onClick={(event) => event.stopPropagation()}
+        onKeyDown={onKeyDown}
         role="presentation"
       >
-        <div className="flex h-7 items-center gap-2 border-b border-line px-2">
+        <div className="flex h-7 shrink-0 items-center gap-2 border-b border-line px-2">
           <span className="text-panelhead font-medium">设备</span>
           <span className="text-badge text-faint">
             {connectedCount} 台已连接 · 上限 4
             {scanState === 'scanning' ? ' · 扫描中…' : lastScanAt ? ' · 已刷新' : ''}
           </span>
           <div className="flex-1" />
+          <span className="text-badge text-faint">↑↓ 选择 · Enter 连接/切换 · Esc 关闭</span>
           <button type="button" onClick={() => toggle(false)} className="px-1 text-dim hover:text-fg">
             ✕
           </button>
         </div>
 
-        <div className="flex items-center gap-2 border-b border-line px-2 py-2">
-          <Search className="size-3.5 text-faint" />
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索设备，或粘贴 URI（Android:///?serial=xxx）"
-            className="h-6 flex-1 bg-transparent text-body placeholder:text-faint focus:outline-none"
-          />
-        </div>
+        {/* 搜索：本机窗口那一类里搜的是 App/标题/句柄 */}
+        {tab !== 'mac' && (
+          <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-2">
+            <Search className="size-3.5 text-faint" />
+            <input
+              ref={searchRef}
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索设备，或粘贴 URI（Android:///?serial=xxx）"
+              className="h-6 min-w-0 flex-1 bg-transparent text-body placeholder:text-faint focus:outline-none"
+            />
+          </div>
+        )}
 
-        <div className="flex gap-1 border-b border-line px-2 py-1.5">
-          {TABS.map((item) => (
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-line px-2 py-1.5">
+          {tabs.map((item) => (
             <button
               key={item.id}
               type="button"
               onClick={() => setTab(item.id)}
+              title={`${item.label}（${item.count}）`}
               className={cn(
-                'h-5 rounded-sm px-2 text-badge',
+                'flex h-5 items-center gap-1 rounded-sm px-2 text-badge',
                 tab === item.id ? 'bg-active text-fg' : 'text-dim hover:bg-raised',
               )}
             >
               {item.label}
+              <span className="text-faint">{item.count}</span>
             </button>
           ))}
         </div>
 
-        <div className="max-h-[340px] overflow-auto">
-          {rows.map((device) => (
-            <DeviceRow
-              key={device.id}
-              device={device}
-              onConnect={() => {
-                // 连上了才收起弹层；失败时保持打开，原因会显示在行内与顶部红条
-                void connectSession(device.id, device.uri).then((ok) => {
-                  if (ok) {
-                    toggle(false);
-                  }
-                });
+        <div ref={listRef} className="min-h-0 flex-1 overflow-auto">
+          {tab === 'mac' ? (
+            <MacWindowList
+              connected={macConnected}
+              onConnect={connectWindow}
+              onActivate={(handle) => {
+                setActive(`macos:${handle}`);
+                toggle(false);
               }}
-              onDisconnect={() => void disconnectSession(device.id)}
             />
-          ))}
-          {rows.length === 0 && (
-            <div className="px-3 py-6 text-center text-badge text-faint">没有匹配的设备</div>
-          )}
+          ) : (
+            <>
+              {rows.map((device) => (
+                <DeviceRow
+                  key={device.id}
+                  device={device}
+                  active={device.id === activeId}
+                  onActivate={() => {
+                    setActive(device.id);
+                    toggle(false);
+                  }}
+                  onConnect={() => {
+                    // 连上了才收起弹层；失败时保持打开，原因会显示在行内与顶部红条
+                    void connectSession(device.id, device.uri).then((ok) => {
+                      if (ok) {
+                        toggle(false);
+                      }
+                    });
+                  }}
+                  onDisconnect={() => void disconnectSession(device.id)}
+                />
+              ))}
+              {rows.length === 0 && (
+                <div className="px-3 py-6 text-center text-badge text-faint">
+                  {query ? '没有匹配的设备' : '这一类还没有设备 · 点下面的「刷新」重新扫描'}
+                </div>
+              )}
 
-          {(scanError || scanErrors.length > 0) && (
-            <div className="flex items-start gap-2 border-t border-line bg-raised/40 px-2 py-1.5">
-              <StatusDot tone="failed" className="mt-0.5" />
-              <span className="flex-1 text-badge text-failed">
-                {scanError ? `扫描失败：${scanError}` : scanErrors.join(' · ')}
-              </span>
-              <button type="button" onClick={() => void scan()} className="text-badge text-brand">
-                重试
-              </button>
-            </div>
+              {/* macOS 入口：伪设备不算可连设备，这里给一条"去看窗口"的路 */}
+              {devices.some(isMacPicker) && (
+                <button
+                  type="button"
+                  onClick={() => setTab('mac')}
+                  className="flex h-7 w-full items-center gap-2 border-t border-line px-2 text-left text-badge text-brand hover:bg-raised"
+                >
+                  🪟 本机窗口（macOS）：在「本机窗口」Tab 里挑一个窗口连（抓的是那个窗口的画面）
+                </button>
+              )}
+
+              {(scanError || scanErrors.length > 0) && (
+                <div className="flex items-start gap-2 border-t border-line bg-raised/40 px-2 py-1.5">
+                  <StatusDot tone="failed" className="mt-0.5" />
+                  <span className="flex-1 text-badge text-failed">
+                    {scanError ? `扫描失败：${scanError}` : scanErrors.join(' · ')}
+                  </span>
+                  <button type="button" onClick={() => void scan()} className="text-badge text-brand">
+                    重试
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
 
-        <div className="relative flex h-8 items-center gap-3 border-t border-line px-2 text-badge text-dim">
+        <div className="relative flex h-8 shrink-0 items-center gap-3 border-t border-line px-2 text-badge text-dim">
           <button
             type="button"
             onClick={() => void scan()}
             className="flex items-center gap-1 hover:text-fg"
-            title="重新扫描 adb 设备与可发现的窗口"
+            title="重新扫描 adb / usbmux / 本机窗口"
           >
             <RefreshCw className={cn('size-3', scanState === 'scanning' && 'animate-spin')} /> 刷新
           </button>
@@ -205,81 +274,7 @@ export function DevicePopover(): ReactNode {
             <MoreHorizontal className="size-3" /> 高级
           </button>
           <div className="flex-1" />
-          {/* 本机窗口（macOS）：选窗口或直接输句柄 */}
-          <div className="mt-1 border-t border-line pt-1">
-            <button
-              type="button"
-              onClick={() => {
-                const next = !macOpen;
-                setMacOpen(next);
-                // 展开时才去枚举窗口（枚举本身会触发一次系统权限检查）
-                if (next) {
-                  void loadWindows();
-                }
-              }}
-              className="flex w-full items-center gap-1 text-badge text-dim hover:text-fg"
-            >
-              {macOpen ? '▾' : '▸'} 本机窗口（macOS）{macNote ? ` · ${macNote}` : ''}
-            </button>
-            {macOpen && (
-              <div className="mt-1 flex flex-col gap-1">
-                {windows.length === 0 && (
-                  <span className="text-badge text-faint">
-                    {macAllowed ? '没有可选窗口（刷新试试）' : '需要先在系统设置里给「屏幕录制」权限'}
-                  </span>
-                )}
-                {windows.slice(0, 40).map((window) => (
-                  <button
-                    key={window.handle}
-                    type="button"
-                    onClick={() => connectWindow(window.handle)}
-                    className="flex items-center gap-1 rounded-sm px-1 text-left text-badge text-dim hover:bg-raised hover:text-fg"
-                    title={`${window.label} · ${window.width}x${window.height}（点一下连上这个窗口）`}
-                  >
-                    <span className="w-10 shrink-0 text-faint">#{window.handle}</span>
-                    <span className="min-w-0 flex-1 truncate">{window.label}</span>
-                    <span className="shrink-0 text-faint">
-                      {window.width}x{window.height}
-                    </span>
-                  </button>
-                ))}
-                <div className="flex items-center gap-1">
-                  <input
-                    value={handleInput}
-                    onChange={(event) => setHandleInput(event.target.value.replace(/\D/g, ''))}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        connectWindow(handleInput);
-                      }
-                    }}
-                    placeholder="或直接输句柄，如 89"
-                    className="h-5 min-w-0 flex-1 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => connectWindow(handleInput)}
-                    className="h-5 shrink-0 rounded-sm border border-line px-1 text-badge text-dim hover:text-fg"
-                  >
-                    连接句柄
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void loadWindows()}
-                    className="h-5 shrink-0 rounded-sm border border-line px-1 text-badge text-dim hover:text-fg"
-                  >
-                    刷新
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <span
-            className="text-faint"
-            title="pymobiledevice3 隧道 + DVT 采集 + CoreDevice HID；需要 iOS 17.4+"
-          >
-            iOS：17.4+（隧道采集 ≈8fps · 无需切 USB 配置）
-          </span>
+          <span className="truncate text-faint">iOS 17.4+ · 本机窗口需屏幕录制权限</span>
 
           {advanced && (
             <div className="absolute bottom-8 left-12 w-52 rounded-sm border border-line bg-raised py-1">
@@ -301,85 +296,4 @@ export function DevicePopover(): ReactNode {
       </div>
     </div>
   );
-}
-
-function DeviceRow({
-  device,
-  onConnect,
-  onDisconnect,
-}: {
-  device: DeviceRuntime;
-  onConnect: () => void;
-  onDisconnect: () => void;
-}): ReactNode {
-  const failed = device.status === 'failed';
-  return (
-    <div className="group border-b border-line/60">
-      <div className="flex h-8 items-center gap-2 px-2 hover:bg-raised">
-        <button
-          type="button"
-          onClick={onConnect}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-        >
-          <StatusDot tone={toneOf(device.status)} />
-          <span className="truncate text-body">{device.name}</span>
-          <span className="text-badge text-faint">{kindLabel(device.kind)}</span>
-        </button>
-        <span className="w-20 text-right text-badge text-dim">
-          {device.status === 'failed' ? '不可用' : formatResolution(device.resolution)}
-        </span>
-        {device.status === 'connected' ? (
-          <button
-            type="button"
-            onClick={onDisconnect}
-            className="w-12 text-right text-badge text-confirmed hover:text-failed"
-          >
-            断开
-          </button>
-        ) : device.status === 'connecting' ? (
-          <span className="flex w-12 items-center justify-end gap-1 text-badge text-pending">
-            <RefreshCw className="size-3 animate-spin" />
-          </span>
-        ) : (
-          <button
-            type="button"
-            onClick={onConnect}
-            className="w-12 text-right text-badge text-brand opacity-0 group-hover:opacity-100"
-          >
-            连接
-          </button>
-        )}
-      </div>
-
-      {failed && (
-        <div className="flex items-center gap-2 bg-raised/40 px-2 py-1.5">
-          <StatusDot tone="failed" />
-          <span className="flex-1 text-badge text-failed">
-            {device.error ?? '连接失败'}
-            {device.suggestedFix ? ` · ${device.suggestedFix}` : ''}
-          </span>
-          <button type="button" onClick={onConnect} className="text-badge text-brand">
-            重新检测
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function kindLabel(kind: DeviceKind): string {
-  switch (kind) {
-    case 'android':
-      return '安卓';
-    case 'ios':
-      return 'iOS';
-    case 'emulator':
-      return '模拟器';
-    case 'windows':
-      return 'Windows';
-    case 'mock':
-      return 'Mock';
-    default:
-      return '远程';
-  }
 }

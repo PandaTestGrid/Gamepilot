@@ -114,6 +114,8 @@ export interface GraphPayload {
   readonly recognizers: Record<string, Record<string, unknown>>;
   readonly nodes: ReadonlyArray<{ id: string; name?: string; enter?: string[]; timeout_ms?: number }>;
   readonly edges: ReadonlyArray<Record<string, unknown>>;
+  /** 变量（"黑板"）：动作参数可以引用它们 */
+  readonly variables?: Record<string, { type?: string; value?: number | string | boolean }>;
 }
 
 export interface ConnectResult {

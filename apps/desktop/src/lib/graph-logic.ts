@@ -11,10 +11,14 @@
  *
  * 全部是纯函数（不碰 React），所以可以单测；界面只负责显示。
  */
-import type { EdgeAction, GraphData, GraphEdgeView, GraphNodeView } from '@/types';
+import type { EdgeAction, GraphData, GraphEdgeView, GraphNodeView, ParamValue } from '@/types';
 
-function percent(value: number | undefined): string {
-  return typeof value === 'number' ? value.toFixed(2) : '?';
+function percent(value: ParamValue | undefined): string {
+  if (typeof value === 'number') {
+    return value.toFixed(2);
+  }
+  // "$变量名" 原样显示，一眼能看出这里引用了变量
+  return typeof value === 'string' ? value : '?';
 }
 
 /** 一步操作 → 一行摘要（图上和列表里都用它）。 */
@@ -26,7 +30,8 @@ export function describeAction(action: EdgeAction, compact = false): string {
     }
     case 'long_press': {
       const where = action.target ? `『${action.target}』` : `(${percent(action.x)}, ${percent(action.y)})`;
-      const held = action.durationMs ? ` 按住 ${(action.durationMs / 1000).toFixed(2)}s` : '';
+      const held =
+        typeof action.durationMs === 'number' ? ` 按住 ${(action.durationMs / 1000).toFixed(2)}s` : '';
       return `长按 ${where}${compact ? '' : held}`;
     }
     case 'swipe': {
@@ -35,11 +40,15 @@ export function describeAction(action: EdgeAction, compact = false): string {
       }
       const from = `(${percent(action.x)}, ${percent(action.y)})`;
       const to = `(${percent(action.toX)}, ${percent(action.toY)})`;
-      const spent = action.durationMs ? ` ${(action.durationMs / 1000).toFixed(2)}s` : '';
+      const spent = typeof action.durationMs === 'number' ? ` ${(action.durationMs / 1000).toFixed(2)}s` : '';
       return `滑动 ${from}→${to}${compact ? '' : spent}`;
     }
-    case 'wait':
-      return `等待 ${(action.seconds ?? 0.5).toFixed(2)}s`;
+    case 'wait': {
+      const seconds = action.seconds ?? 0.5;
+      return `等待 ${typeof seconds === 'number' ? seconds.toFixed(2) : seconds}s`;
+    }
+    case 'set':
+      return `设置变量 ${action.name || '?'} = ${action.assign ?? '0'}`;
     case 'key':
       return `按键 ${action.value || action.target || '?'}`;
     case 'text':

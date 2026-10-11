@@ -22,6 +22,7 @@ const graph: GraphData = {
   ],
   edges: [],
   recognizers: [],
+  variables: [],
   activeNodeId: 'launcher',
   pendingNodeId: null,
 };

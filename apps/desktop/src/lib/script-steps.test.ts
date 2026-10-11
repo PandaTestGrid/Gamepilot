@@ -44,6 +44,7 @@ const graph: GraphData = {
     edge('e2', 'dialer', null, { type: 'wait', seconds: 1 }),
   ],
   recognizers: [],
+  variables: [],
   activeNodeId: null,
   pendingNodeId: null,
 };

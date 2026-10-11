@@ -49,6 +49,7 @@ from ..protocol import (
     METHOD_RUN_STOP,
     METHOD_TEMPLATE_IMAGE,
     METHOD_TIMELINE,
+    METHOD_VARIABLE_SET,
     NOTIFY_DEVICE_CONNECTED,
     NOTIFY_DEVICE_CONNECTING,
     NOTIFY_DEVICE_DISCONNECTED,
@@ -429,6 +430,15 @@ def register(server: RpcServer) -> SessionManager:
             when=str(params["when"]) if params.get("when") else None,
             action=action if isinstance(action, dict) else None,
         )
+
+    @server.method(METHOD_VARIABLE_SET)
+    def _variable_set(params: dict[str, Any]) -> dict[str, Any]:
+        """改运行期变量值（黑板面板上直接试参数用；不写回脚本）。"""
+        session = manager.get(_require_str(params, "deviceId"))
+        name = _require_str(params, "name")
+        value = params.get("value")
+        session.engine.variables.set(name, value if isinstance(value, (int, float, str, bool)) else str(value))
+        return {"name": name, "value": session.engine.variables.get(name)}
 
     @server.method(METHOD_GRAPH_GET)
     def _graph_get(params: dict[str, Any]) -> dict[str, Any]:

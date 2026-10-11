@@ -29,6 +29,7 @@ import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
 import { NodeEditor } from '@/features/graph/NodeEditor';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
+import { VariablesPanel } from '@/features/graph/VariablesPanel';
 
 import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
@@ -130,7 +131,7 @@ const EDITOR_MIN_PX = 72;
 
 export function GraphPane(): ReactNode {
   // 状态图 / 脚本：同一份数据的两种看法（一个看结构、一个看执行顺序）
-  const [view, setView] = useState<'graph' | 'script'>('graph');
+  const [view, setView] = useState<'graph' | 'script' | 'variables'>('graph');
   const activeId = useDeviceStore((state) => state.activeId);
   const graph = useGraphStore((state) => state.graphs[activeId]);
   const moveNode = useGraphStore((state) => state.moveNode);
@@ -406,6 +407,8 @@ export function GraphPane(): ReactNode {
               </div>
             ) : view === 'script' ? (
               <ScriptStepsView graph={graph} />
+            ) : view === 'variables' ? (
+              <VariablesPanel deviceId={activeId} graph={graph} />
             ) : (
               <ReactFlow
                 nodes={nodes}
