@@ -6,7 +6,7 @@
  *
  * 目录树由引擎的 workspace.tree 给出（它会兼容"库根下直接是脚本"的老布局）。
  */
-import { type ReactNode, useEffect, useState } from 'react';
+import { Component, type ReactNode, useEffect, useState } from 'react';
 
 import { devLog, projectCreate, workspaceTree, type TreeProject, type TreeWorkspace } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
@@ -14,7 +14,35 @@ import { useSessionStore } from '@/stores/session.store';
 
 const SELECT = 'h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg';
 
+/**
+ * 兜底：这条栏拉不到目录树（引擎没起来、测试环境没有引擎）时**什么都不显示**，
+ * 绝不把异常抛给上层 —— 之前就是它抛错连累了 3 个已有测试和一个真实场景。
+ */
+class SafeBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  override componentDidCatch(error: unknown): void {
+    devLog(`任务标签栏出错（已忽略）: ${String(error)}`);
+  }
+
+  override render(): ReactNode {
+    return this.state.failed ? null : this.props.children;
+  }
+}
+
 export function TaskTabs(): ReactNode {
+  return (
+    <SafeBoundary>
+      <TaskTabsInner />
+    </SafeBoundary>
+  );
+}
+
+function TaskTabsInner(): ReactNode {
   const project = useSessionStore((state) => state.project);
   const switchProject = useSessionStore((state) => state.switchProject);
   const refreshProject = useSessionStore((state) => state.refreshProject);
@@ -46,7 +74,7 @@ export function TaskTabs(): ReactNode {
     currentProject?.workspaces.find((ws) => root === ws.root || root.startsWith(`${ws.root}/`)) ??
     currentProject?.workspaces[0];
 
-  if (!root || !currentProject) {
+  if (!root || !currentProject || (currentProject.workspaces ?? []).length === 0) {
     return null;
   }
 

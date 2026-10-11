@@ -32,6 +32,7 @@ import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContext
 import { RunStatusStrip } from '@/features/graph/RunStatusStrip';
 import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
+import { TaskTabs } from '@/features/graph/TaskTabs';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
 
 import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
@@ -630,7 +631,7 @@ export function GraphPane(): ReactNode {
           */}
           <RunButton size="compact" />
           <span className="mx-0.5 h-3 w-px bg-line" />
-          {/* TODO(下一轮)：TaskTabs 在无引擎环境会抛错，先不挂载，修好再开 */}
+          <TaskTabs />
           <GhostButton
             active={view === 'graph'}
             onClick={() => setView('graph')}
