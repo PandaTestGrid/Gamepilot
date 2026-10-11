@@ -32,7 +32,6 @@ import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContext
 import { RunStatusStrip } from '@/features/graph/RunStatusStrip';
 import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
-import { TaskTabs } from '@/features/graph/TaskTabs';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
 
 import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
