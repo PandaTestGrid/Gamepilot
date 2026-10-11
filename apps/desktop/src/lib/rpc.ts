@@ -74,7 +74,10 @@ export async function rpc<T>(method: string, params: Record<string, unknown> = {
   try {
     return await invoke<T>('engine_rpc', { method, params });
   } catch (error) {
-    throw new Error(cleanErrorText(error instanceof Error ? error.message : String(error)));
+    // cause 留着原始错误：文案给人看，原始信封给排查用（控制台里展开就能看到 code/data）
+    throw new Error(cleanErrorText(error instanceof Error ? error.message : String(error)), {
+      cause: error,
+    });
   }
 }
 

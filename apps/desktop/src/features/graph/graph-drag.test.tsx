@@ -34,6 +34,10 @@ vi.mock('@xyflow/react', () => ({
     probe.props = props as typeof probe.props;
     return null;
   },
+  // 小地图 / 视图控制条在探针里不需要真渲染，但必须存在（否则 import 就炸）
+  MiniMap: () => null,
+  useStore: (selector: (state: { transform: [number, number, number] }) => unknown) =>
+    selector({ transform: [0, 0, 1] }),
   Background: () => null,
   Handle: () => null,
   Position: { Left: 'left', Right: 'right' },

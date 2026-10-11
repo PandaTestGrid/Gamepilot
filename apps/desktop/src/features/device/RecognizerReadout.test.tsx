@@ -210,46 +210,22 @@ describe('识别读数：行内改名', () => {
   });
 });
 
-describe('识别读数：删除', () => {
+describe('识别读数：这里**不放**删除（销毁性操作在「识别器」面板）', () => {
   beforeEach(() => {
     useUiStore.setState({ readoutFilter: 'all', readoutOpen: true });
   });
 
-  it('每行一个删除按钮，点它删的是这一行（设备 + 标签）', () => {
+  it('列表里没有删除按钮，也没有删除相关的调用', () => {
     const { remove } = setup();
 
-    const buttons = screen.getAllByTestId('recognizer-remove');
-    expect(buttons).toHaveLength(3);
-    const second = buttons[1];
-    expect(second).toBeDefined();
-    expect(second).toHaveAccessibleName('删除 main_region_2');
+    expect(screen.getAllByTestId('recognizer-name')).toHaveLength(3);
+    expect(screen.queryAllByTestId('recognizer-remove')).toHaveLength(0);
+    expect(screen.queryByLabelText(/删除/)).toBeNull();
 
-    fireEvent.click(second as HTMLElement);
-
-    expect(remove).toHaveBeenCalledTimes(1);
-    expect(remove).toHaveBeenCalledWith(DEVICE, 'main_region_2');
-  });
-
-  it('删除按钮带说明（模板文件一起删 / 被引用时会告诉你被谁用了）', () => {
-    setup();
-
-    const first = screen.getAllByTestId('recognizer-remove')[0];
-    expect(first).toBeDefined();
-    expect(first).toHaveAttribute('title', expect.stringContaining('被节点/边引用时会告诉你被谁用了'));
-  });
-
-  it('正在改名的那一行点删除：先收起输入框，不会把改名也一起提交', () => {
-    const { rename, remove } = setup();
-
+    // 改名还在（它可逆、也不是销毁操作）
     fireEvent.doubleClick(screen.getByText('main_region_1'));
-    fireEvent.change(screen.getByTestId('recognizer-name-input'), { target: { value: '半截名字' } });
-    const first = screen.getAllByTestId('recognizer-remove')[0];
-    expect(first).toBeDefined();
-    fireEvent.click(first as HTMLElement);
-
-    expect(remove).toHaveBeenCalledWith(DEVICE, 'main_region_1');
-    expect(rename).not.toHaveBeenCalled();
-    expect(screen.queryByTestId('recognizer-name-input')).toBeNull();
+    expect(screen.getByTestId('recognizer-name-input')).toBeInTheDocument();
+    expect(remove).not.toHaveBeenCalled();
   });
 });
 

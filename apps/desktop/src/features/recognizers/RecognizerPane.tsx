@@ -8,6 +8,7 @@ import { type ReactNode, useRef } from 'react';
 
 import { TemplateThumb } from '@/features/recognizers/TemplateThumb';
 import { StatusDot } from '@/layout/PanelShell';
+import { collectRecognizerUsage, describeRecognizerUsage } from '@/lib/recognizer-usage';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { useGraphStore } from '@/stores/graph.store';
@@ -36,25 +37,16 @@ export function RecognizerPane(): ReactNode {
       <div className="min-h-0 flex-1 overflow-auto">
         {recognizers.map((item) => {
           const pass = item.score >= item.threshold;
+          // 谁在用它：被引用着就删不掉（引擎会拒绝），所以按钮先置灰并写清原因，
+          // 而不是让用户点一下再吃一个错误
+          const usage = collectRecognizerUsage(graph, item.label);
+          const blocked = usage.total > 0;
+          const usageText = describeRecognizerUsage(usage);
           return (
             <div key={item.label} className="border-b border-line/60 px-2 py-1 hover:bg-raised">
               <div className="flex h-[30px] items-center gap-2">
                 {item.type === 'template' && item.template ? (
-                  <span className="flex items-center gap-0.5">
-                    <TemplateThumb label={item.label} />
-                    <button
-                      type="button"
-                      title="删除这个模板（被界面/边引用时会告诉你被谁用了）"
-                      onClick={() => {
-                        // 走 store 的那一个删除动作：拒绝的原因会进错误条 + 事件栏。
-                        // 直接调 RPC 再自己 catch 的话，用户只看到"点了没反应"（真踩过）
-                        void removeRecognizer(activeId, item.label);
-                      }}
-                      className="ml-1 h-5 shrink-0 rounded-sm border border-line px-1 text-badge text-failed hover:bg-raised"
-                    >
-                      删
-                    </button>
-                  </span>
+                  <TemplateThumb label={item.label} />
                 ) : (
                   <span
                     className="size-[26px] shrink-0 rounded-sm border border-line bg-raised"
@@ -71,6 +63,37 @@ export function RecognizerPane(): ReactNode {
                   {item.score.toFixed(2)}
                 </span>
                 <span className="text-badge text-faint">{typeLabel(item.type)}</span>
+                {/* 删除放在这里而不是画面上的读数列表：那一列是**实时监控**（分数每帧在跳），
+                    销毁性操作摆在跳动的东西旁边，误点的代价太大。这里能同时看到缩略图、
+                    阈值和"被谁引用"，是"看清代价再删"的地方 */}
+                <button
+                  type="button"
+                  data-testid="recognizer-remove"
+                  disabled={blocked}
+                  aria-label={`删除 ${item.label}`}
+                  title={
+                    blocked
+                      ? `删不掉：${usageText}。先到状态图里把这些引用去掉（节点的进入条件 / 边的判断条件 / 动作目标）`
+                      : `删除 ${item.label}（模板文件一起删）`
+                  }
+                  onClick={() => {
+                    void removeRecognizer(activeId, item.label);
+                  }}
+                  className={cn(
+                    'h-5 shrink-0 rounded-sm border px-1 text-badge',
+                    blocked
+                      ? 'cursor-not-allowed border-line text-faint opacity-50'
+                      : 'border-line text-failed hover:bg-raised',
+                  )}
+                >
+                  删
+                </button>
+              </div>
+              <div
+                className={cn('mb-1 text-badge', blocked ? 'text-pending' : 'text-faint')}
+                title={usageText}
+              >
+                {usageText}
               </div>
               <div className="flex h-4 items-center gap-2">
                 <span className="text-badge text-faint">阈值</span>

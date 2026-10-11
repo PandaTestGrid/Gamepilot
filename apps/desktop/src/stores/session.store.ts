@@ -43,6 +43,7 @@ import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
 import { useLogStore } from '@/stores/log.store';
+import { setPositionScope } from '@/lib/node-positions';
 import { clearTemplateCache } from '@/stores/template.store';
 import type { RecordDraft } from '@/types';
 
@@ -526,6 +527,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   applyProjectChange: async () => {
     try {
       const info = await projectGet();
+      // 坐标是界面私有的：按脚本目录分开记，切换脚本不会把上一份脚本的摆位套过来
+      setPositionScope(info.root);
       set({ project: info, error: null });
       // 换脚本后每台设备的状态图都变了：重新拉一遍（引擎侧已热重载，当前节点与运行态保留）
       for (const deviceId of Object.keys(get().ready)) {

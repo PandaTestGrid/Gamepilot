@@ -7,6 +7,13 @@
 import { create } from 'zustand';
 
 import { toGraphData } from '@/lib/graph-adapter';
+import {
+  applyPositions,
+  clearStoredPositions,
+  loadStoredPositions,
+  preservePositions,
+  storePositions,
+} from '@/lib/node-positions';
 import { preloadTemplates } from '@/stores/template.store';
 import {
   graphGet,
@@ -27,6 +34,13 @@ interface GraphState {
   readonly selectedEdgeId: string | null;
   readonly selectedNodeId: string | null;
   readonly ensure: (deviceId: string) => void;
+  /**
+   * 重新从引擎拉这张图（真相源只有一份 graph.json）。
+   *
+   * 界面是按设备各缓存一份的；同一份脚本在多台设备间切换时，另一台的缓存可能是旧的，
+   * 看起来就像"切设备把状态图改了"。切换设备时调它即可对齐。
+   */
+  readonly refresh: (deviceId: string) => Promise<void>;
   readonly addRecognizer: (deviceId: string, recognizer: RecognizerView) => void;
   readonly addNode: (deviceId: string, node: GraphNodeView) => void;
   readonly addEdge: (deviceId: string, edge: GraphEdgeView) => void;
@@ -35,8 +49,16 @@ interface GraphState {
   readonly moveNode: (deviceId: string, nodeId: string, x: number, y: number) => void;
   readonly selectEdge: (edgeId: string | null) => void;
   readonly selectNode: (nodeId: string | null) => void;
-  /** 引擎给出的状态图（唯一真源） */
-  readonly setGraph: (deviceId: string, graph: GraphData, raw?: GraphPayload) => void;
+  /**
+   * 引擎给出的状态图（唯一真源）。
+   * `resetPositions`：丢弃界面记住的坐标，回到引擎给的网格布局（"重新布局"按钮用）。
+   */
+  readonly setGraph: (
+    deviceId: string,
+    graph: GraphData,
+    raw?: GraphPayload,
+    options?: { resetPositions?: boolean },
+  ) => void;
   /** 改一条边（判断条件/动作/优先级等）→ 写回引擎并刷新界面模型 */
   readonly saveEdge: (deviceId: string, edgeId: string, patch: Partial<GraphEdgePayload>) => Promise<void>;
   /** 删除一条边 */
@@ -78,11 +100,53 @@ function update(deviceId: string, graph: GraphData, changes: Partial<GraphData>)
   return { [deviceId]: { ...graph, ...changes } };
 }
 
+/**
+ * 引擎回包的图 → 界面图：**所有**引擎回包都必须走这里。
+ *
+ * 坐标是界面私有的（引擎不存 x/y），所以每次回包都要把用户摆过的位置套回去：
+ * 本地记忆（重启后还在）打底，内存里的最新位置优先。
+ * 以前 store 里有 8 处各自 `toGraphData(...)` 直接替换，等于把拖动结果冲掉 ——
+ * 表现就是"拖动后节点弹回 / 建新节点前面的节点也没了"。
+ */
+function placed(deviceId: string, payload: GraphPayload, current: GraphState): GraphData {
+  const mapped = toGraphData(deviceId, payload, undefined);
+  preloadTemplates(mapped.recognizers.map((item) => item.label));
+  const withStored = applyPositions(mapped, loadStoredPositions(deviceId));
+  return preservePositions(withStored, current.graphs[deviceId]);
+}
+
+/** 坐标写入 localStorage 的节流器：拖动是连续的，别每帧写一遍（也不该阻塞拖动） */
+const writeTimers = new Map<string, number>();
+function remember(deviceId: string, graph: GraphData): void {
+  const pending = writeTimers.get(deviceId);
+  if (pending !== undefined) {
+    window.clearTimeout(pending);
+  }
+  writeTimers.set(
+    deviceId,
+    window.setTimeout(() => {
+      writeTimers.delete(deviceId);
+      storePositions(deviceId, graph);
+    }, 250),
+  );
+}
+
 export const useGraphStore = create<GraphState>()((set, get) => ({
   graphs: {},
   raws: {},
   selectedEdgeId: null,
   selectedNodeId: null,
+
+  refresh: async (deviceId) => {
+    const raw = await graphGet(deviceId);
+    set((state) => ({
+      raws: { ...state.raws, [deviceId]: raw },
+      graphs: {
+        ...state.graphs,
+        [deviceId]: applyPositions(toGraphData(deviceId, raw, undefined), loadStoredPositions(deviceId)),
+      },
+    }));
+  },
 
   ensure: (deviceId) =>
     set((state) => {
@@ -165,21 +229,40 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
         return state;
       }
       const nodes = graph.nodes.map((item) => (item.id === nodeId ? { ...item, x, y } : item));
-      return { graphs: { ...state.graphs, ...update(deviceId, graph, { nodes }) } };
+      const next = { ...graph, nodes };
+      // 拖完就记一笔：引擎回包（连接/录制/建节点）都会重排，没有这份记忆位置就守不住
+      remember(deviceId, next);
+      return { graphs: { ...state.graphs, [deviceId]: next } };
     }),
 
   selectNode: (nodeId) => set({ selectedNodeId: nodeId, selectedEdgeId: null }),
 
   selectEdge: (edgeId) => set({ selectedEdgeId: edgeId, selectedNodeId: null }),
 
-  setGraph: (deviceId, graph, raw) => {
+  setGraph: (deviceId, graph, raw, options) => {
     // 状态图一到手就预取模板截图：画布上的缩略图、底部详情、识别器面板共用同一份缓存，
     // 免得每个组件各请求一次（引擎保存重载时的瞬时失败会让它们同时变成"×"，看着像模板丢了）
     preloadTemplates(graph.recognizers.map((item) => item.label));
-    set((state) => ({
-      graphs: { ...state.graphs, [deviceId]: graph },
-      raws: raw ? { ...state.raws, [deviceId]: raw } : state.raws,
-    }));
+    if (options?.resetPositions) {
+      clearStoredPositions(deviceId); // "重新布局"= 明确丢弃摆位记忆
+    }
+    set((state) => {
+      if (options?.resetPositions) {
+        return {
+          graphs: { ...state.graphs, [deviceId]: graph },
+          raws: raw ? { ...state.raws, [deviceId]: raw } : state.raws,
+        };
+      }
+      // 引擎回包只有网格坐标（引擎不存 x/y），用户拖过的位置必须从"上一份界面图 + 本地记忆"里保住，
+      // 否则每次回包节点都会弹回网格，看起来就是"拖动后节点消失"。
+      // 顺序：本地记忆打底（冷启动用），内存里的最新位置优先。
+      const withStored = applyPositions(graph, loadStoredPositions(deviceId));
+      const kept = preservePositions(withStored, state.graphs[deviceId]);
+      return {
+        graphs: { ...state.graphs, [deviceId]: kept },
+        raws: raw ? { ...state.raws, [deviceId]: raw } : state.raws,
+      };
+    });
   },
 
   saveEdge: async (deviceId, edgeId, patch) => {
@@ -195,7 +278,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
       graphs: {
         ...current.graphs,
         // 第三个参数是"当帧实时命中"，这里没有（下一帧 updateLive 会补上分数）
-        [deviceId]: toGraphData(deviceId, saved, undefined),
+        [deviceId]: placed(deviceId, saved, current),
       },
     }));
   },
@@ -213,7 +296,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
       graphs: {
         ...current.graphs,
         // 第三个参数是"当帧实时命中"，这里没有（下一帧 updateLive 会补上分数）
-        [deviceId]: toGraphData(deviceId, saved, undefined),
+        [deviceId]: placed(deviceId, saved, current),
       },
       selectedEdgeId: null,
     }));
@@ -224,7 +307,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
       const result = await graphNodeAdd(deviceId, { name, enter });
       set((current) => ({
         raws: { ...current.raws, [deviceId]: result.graph },
-        graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+        graphs: { ...current.graphs, [deviceId]: placed(deviceId, result.graph, current) },
       }));
       return result.nodeId;
     } catch {
@@ -240,7 +323,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
     const result = await graphNodeUpdate(deviceId, nodeId, patch);
     set((current) => ({
       raws: { ...current.raws, [deviceId]: result.graph },
-      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+      graphs: { ...current.graphs, [deviceId]: placed(deviceId, result.graph, current) },
     }));
   },
 
@@ -248,7 +331,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
     const result = await graphNodeRemove(deviceId, nodeId);
     set((current) => ({
       raws: { ...current.raws, [deviceId]: result.graph },
-      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+      graphs: { ...current.graphs, [deviceId]: placed(deviceId, result.graph, current) },
     }));
   },
 
@@ -264,7 +347,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
     const saved = await graphGet(deviceId);
     set((current) => ({
       raws: { ...current.raws, [deviceId]: saved },
-      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, saved, undefined) },
+      graphs: { ...current.graphs, [deviceId]: placed(deviceId, saved, current) },
     }));
   },
 
@@ -280,7 +363,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
     });
     set((current) => ({
       raws: { ...current.raws, [deviceId]: result.graph },
-      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+      graphs: { ...current.graphs, [deviceId]: placed(deviceId, result.graph, current) },
     }));
   },
 
@@ -288,7 +371,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
     const result = await graphEdgeAdd(deviceId, { from, to });
     set((current) => ({
       raws: { ...current.raws, [deviceId]: result.graph },
-      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+      graphs: { ...current.graphs, [deviceId]: placed(deviceId, result.graph, current) },
     }));
   },
 

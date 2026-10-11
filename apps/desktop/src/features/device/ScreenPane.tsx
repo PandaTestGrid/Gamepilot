@@ -5,7 +5,7 @@
  * 识别框、node/tick/fps 浮层全部是引擎的真实数据，前端只做展示与坐标换算
  * （而且坐标本来就是归一化的，连换算都不需要）。
  */
-import { ChevronDown, ChevronUp, Grid2x2, MousePointerSquareDashed, ScanLine, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Grid2x2, MousePointerSquareDashed, ScanLine } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { Group, Panel, type PanelImperativeHandle, Separator, usePanelRef } from 'react-resizable-panels';
 
@@ -994,7 +994,6 @@ export function RecognizerReadout({
   const open = useUiStore((state) => state.readoutOpen);
   const setOpen = useUiStore((state) => state.setReadoutOpen);
   const rename = useSessionStore((state) => state.renameRecognizer);
-  const remove = useSessionStore((state) => state.removeRecognizer);
   // 正在改名的行：值 + 校验错误（null = 可以提交）
   const [editing, setEditing] = useState<{ label: string; value: string; error: string | null } | null>(null);
   // 这次编辑是否已经了结（提交成功 / Esc 取消）：输入框卸载时浏览器还会补一个 blur，
@@ -1058,9 +1057,7 @@ export function RecognizerReadout({
           aria-expanded={open}
           onClick={() => setOpen(!open)}
           title={
-            open
-              ? '收起诉数区（画面更高；也可以把上面的横线拖到底）'
-              : '展开识别读数（筛选 · 双击名字改名 · 行尾删除）'
+            open ? '收起诉数区（画面更高；也可以把上面的横线拖到底）' : '展开识别读数（筛选 · 双击名字改名）'
           }
           className="flex h-[18px] items-center gap-1 rounded-sm px-1 text-dim hover:bg-raised hover:text-fg"
         >
@@ -1169,22 +1166,6 @@ export function RecognizerReadout({
               <span className="shrink-0 text-badge text-faint">
                 {item.state === 'confirmed' ? '稳定' : item.state === 'pending' ? '待确认' : '未命中'}
               </span>
-              {/* 删除：行尾一个 ✕，平时半透明（不抢分数/状态的视线），悬停整行才实心。
-                  被节点/边引用时引擎会拒绝并说清被谁用了 —— 那句话进错误条 + 事件栏，
-                  所以这里不需要自己再确认一次 */}
-              <button
-                type="button"
-                data-testid="recognizer-remove"
-                aria-label={`删除 ${item.label}`}
-                title={`删除 ${item.label}（模板文件一起删；被节点/边引用时会告诉你被谁用了）`}
-                onClick={() => {
-                  setEditing(null);
-                  void remove(deviceId, item.label);
-                }}
-                className="flex size-4 shrink-0 items-center justify-center rounded-sm text-dim opacity-0 group-hover/row:opacity-100 hover:bg-raised hover:text-failed focus-visible:opacity-100"
-              >
-                <X className="size-3" />
-              </button>
             </div>
           );
         })}

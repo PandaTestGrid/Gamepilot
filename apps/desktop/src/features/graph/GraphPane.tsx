@@ -13,6 +13,7 @@ import {
   ConnectionMode,
   type ReactFlowInstance,
   MarkerType,
+  MiniMap,
   ReactFlow,
   type Edge,
   type NodeChange,
@@ -27,6 +28,7 @@ import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
 import { NodeEditor } from '@/features/graph/NodeEditor';
 import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContextMenu';
+import { ViewportControls } from '@/features/graph/ViewportControls';
 import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
@@ -63,6 +65,8 @@ export function GraphPane(): ReactNode {
    */
   const flowRef = useRef<ReactFlowInstance<StateNodeType, Edge> | null>(null);
   const graph = useGraphStore((state) => state.graphs[activeId]);
+  const refreshGraph = useGraphStore((state) => state.refresh);
+
   const moveNode = useGraphStore((state) => state.moveNode);
   const selectEdge = useGraphStore((state) => state.selectEdge);
   const connectNodes = useGraphStore((state) => state.connectNodes);
@@ -73,6 +77,12 @@ export function GraphPane(): ReactNode {
   const createNode = useGraphStore((state) => state.createNode);
   const removeNode = useGraphStore((state) => state.removeNode);
   const addBranch = useGraphStore((state) => state.addBranch);
+
+  // 切换设备（或切脚本）时对齐真相源：界面按设备各缓存一份图，另一台可能是旧的，
+  // 表现就像"切设备把状态图改了"。graph.json 只有一份，重新拉一次即可。
+  useEffect(() => {
+    void refreshGraph(activeId);
+  }, [activeId, refreshGraph]);
 
   // 关键：节点数组只在"位置/名字/识别器/激活态"变化时重建。
   // 直接用 [graph] 当依赖的话，每帧的实时分数更新都会造出一批新节点对象，
@@ -242,6 +252,16 @@ export function GraphPane(): ReactNode {
     // 上色跟着实时状态走，否则运行时边的颜色不会变；选中态也要跟着（编辑器换了一条边）
   }, [graph, statuses, selectedEdgeId, hoveredEdge]);
 
+  /**
+   * 把全部节点收进视野（= 右下角「居中」）。
+   *
+   * 为什么要在"建节点/加分支"之后自动做一次：引擎回包会重排、详情坞展开会让画布变矮，
+   * 节点很容易落到可视区外 —— 没有参照物时用户看到的就是"节点消失了"。
+   */
+  const centerAll = useCallback(() => {
+    void flowRef.current?.fitView({ duration: 280, padding: 0.22, maxZoom: 1.2 });
+  }, []);
+
   /** 让底部边编辑器把"动作"区滚进视野（双击边时用）。 */
   const focusEdgeAction = useCallback(() => {
     window.setTimeout(() => {
@@ -266,6 +286,9 @@ export function GraphPane(): ReactNode {
                 if (nodeId) {
                   moveNode(activeId, nodeId, Math.round(flow.x), Math.round(flow.y));
                   selectNode(nodeId);
+                  // 引擎回包会重排（位置记忆已保）—— 但详情坞展开会让画布变矮，
+                  // 所以等布局稳定后再居中一次：**所有**节点都进视野，老节点也不会被挤出画面
+                  window.setTimeout(centerAll, 260);
                 }
               });
             },
@@ -503,10 +526,12 @@ export function GraphPane(): ReactNode {
           </GhostButton>
           <GhostButton
             onClick={() => {
-              // 重新按网格布局（引擎不存坐标，坐标是界面私有的）
+              // 重新按网格布局（引擎不存坐标，坐标是界面私有的）—— 这里要**丢弃**摆位记忆
               const raw = useGraphStore.getState().raws[activeId];
               if (raw) {
-                useGraphStore.getState().setGraph(activeId, toGraphData(activeId, raw, undefined), raw);
+                useGraphStore
+                  .getState()
+                  .setGraph(activeId, toGraphData(activeId, raw, undefined), raw, { resetPositions: true });
               }
             }}
             title="按网格重新排列节点"
@@ -591,6 +616,29 @@ export function GraphPane(): ReactNode {
                 proOptions={{ hideAttribution: false }}
               >
                 <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#262b36" />
+                {/*
+                  小地图：节点一多（或拖远了）没有它就"找不到自己在哪"，
+                  用户反馈"节点会消失"有一半是节点跑到视野外却没有参照物。
+                */}
+                <MiniMap
+                  pannable
+                  zoomable
+                  position="bottom-right"
+                  style={{
+                    width: 148,
+                    height: 104,
+                    bottom: 34, // 让出右下角给「居中 / 缩放」控制条
+                    right: 8,
+                    background: 'var(--bg-panel)',
+                    border: '1px solid var(--border)',
+                  }}
+                  maskColor="rgba(10,12,16,0.6)"
+                  nodeColor={(node) =>
+                    (node.data as { active?: boolean } | undefined)?.active ? '#4da3ff' : '#3b4250'
+                  }
+                  nodeStrokeWidth={2}
+                />
+                <ViewportControls flow={flowRef} />
               </ReactFlow>
             )}
 
