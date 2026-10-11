@@ -9,6 +9,7 @@
  *
  * 层级：**工作区 > 项目 > 状态图**（状态图 = 一个脚本目录）。
  */
+import { ScriptRow } from '@/features/library/ScriptRow';
 import { type ReactNode, useEffect, useState } from 'react';
 
 import {
@@ -17,6 +18,7 @@ import {
   workspaceCreate,
   workspaceMkdir,
   workspaceTree,
+  type ProjectSummary,
   type TreeProject,
 } from '@/lib/rpc';
 import { useLibraryStore } from '@/stores/library.store';
