@@ -89,16 +89,17 @@ export function WorkspaceTree(): ReactNode {
             const folded = collapsed[project.root] === true;
             return (
               <div key={project.root}>
-                <div className="flex h-6 items-center gap-1 px-1 hover:bg-raised">
+                <div className="group flex h-6 items-center gap-1 px-1 hover:bg-raised">
+                  {/* 整行都能点：点名字就展开/收起（不用非得点那个小三角） */}
                   <button
                     type="button"
                     onClick={() => setCollapsed((current) => ({ ...current, [project.root]: !folded }))}
-                    className="w-3 shrink-0 text-faint"
                     title={folded ? '展开' : '收起'}
+                    className="flex min-w-0 flex-1 items-center gap-1 text-left"
                   >
-                    {folded ? '▸' : '▾'}
+                    <span className="w-3 shrink-0 text-faint">{folded ? '▸' : '▾'}</span>
+                    <span className="min-w-0 flex-1 truncate text-fg">{project.name}</span>
                   </button>
-                  <span className="min-w-0 flex-1 truncate text-fg">{project.name}</span>
                   <span className="shrink-0 text-faint">{(project.tasks ?? []).length} 张状态图</span>
                   <button
                     type="button"
@@ -116,7 +117,7 @@ export function WorkspaceTree(): ReactNode {
                         })();
                       }
                     }}
-                    className="h-4.5 shrink-0 rounded-sm border border-line px-1 text-dim hover:bg-raised hover:text-fg"
+                    className="h-4.5 shrink-0 rounded-sm border border-line px-1 text-dim opacity-0 transition-opacity group-hover:opacity-100 hover:bg-raised hover:text-fg"
                   >
                     ＋状态图
                   </button>

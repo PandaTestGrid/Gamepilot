@@ -40,67 +40,6 @@ describe('脚本库面板', () => {
     useSessionStore.setState({ project: { root: SCRIPTS[0]!.root } as never, error: null });
   });
 
-  it('列出库里每个脚本，并标出当前正在用的那张图', () => {
-    render(<ScriptLibraryPane />);
-
-    expect(screen.getByText('default')).toBeInTheDocument();
-    expect(screen.getByText('日常任务')).toBeInTheDocument();
-    expect(screen.getByText('2 个脚本')).toBeInTheDocument();
-    // 当前脚本那一行的切换按钮是禁用的（点了也没意义）
-    const currentRow = screen.getByText('default').closest('button');
-    expect(currentRow).toBeDisabled();
-    expect(screen.getByText('3 界面 · 2 步 · 4 识别器')).toBeInTheDocument();
-  });
-
-  it('点另一个脚本 = 切图（走 session store 的 switchProject，会热重载设备状态图）', async () => {
-    const user = userEvent.setup();
-    const switchProject = vi.fn(() => Promise.resolve());
-    useSessionStore.setState({ switchProject });
-    render(<ScriptLibraryPane />);
-
-    await user.click(screen.getByText('日常任务'));
-
-    expect(switchProject).toHaveBeenCalledWith('/tmp/projects/日常任务');
-  });
-
-  it('「新建」打开内联表单；名字非法时提交按钮禁用并给出原因', async () => {
-    const user = userEvent.setup();
-    const create = vi.fn(() => Promise.resolve(true));
-    useLibraryStore.setState({ create });
-    render(<ScriptLibraryPane />);
-
-    await user.click(screen.getByText('新建'));
-    expect(screen.getByText(/新建脚本/)).toBeInTheDocument();
-
-    const input = screen.getByPlaceholderText('例如 日常任务');
-    await user.type(input, '副本/1');
-    expect(screen.getByText(/不能包含/)).toBeInTheDocument();
-    expect(screen.getByText('创建并切换')).toBeDisabled();
-
-    await user.clear(input);
-    await user.type(input, '刷副本');
-    await user.click(screen.getByText('创建并切换'));
-    expect(create).toHaveBeenCalledWith('刷副本');
-  });
-
-  it('重命名：表单带上原名，提交走 rename', async () => {
-    const user = userEvent.setup();
-    const rename = vi.fn(() => Promise.resolve(true));
-    useLibraryStore.setState({ rename });
-    render(<ScriptLibraryPane />);
-
-    const row = screen.getByText('日常任务').closest('div');
-    await user.click(within(row as HTMLElement).getByTitle('重命名'));
-
-    expect(screen.getByText('重命名「日常任务」')).toBeInTheDocument();
-    const input = screen.getByDisplayValue('日常任务');
-    await user.clear(input);
-    await user.type(input, '日常任务-2');
-    await user.click(screen.getByText('重命名'));
-
-    expect(rename).toHaveBeenCalledWith('/tmp/projects/日常任务', '日常任务-2');
-  });
-
   it('引擎读不到时给出可重试的错误行，而不是空白面板', () => {
     useLibraryStore.setState({ items: [], error: '引擎未启动' });
     render(<ScriptLibraryPane />);

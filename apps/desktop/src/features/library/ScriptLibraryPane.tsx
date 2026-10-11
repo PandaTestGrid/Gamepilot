@@ -75,6 +75,11 @@ export function ScriptLibraryPane(): ReactNode {
     return <WelcomeCard />;
   }
 
+  // 有数据时只显示「工作区 › 项目 › 状态图」树（旧的头部/新建表单已由树接管）
+  if (items.length > 0) {
+    return <WorkspaceTree />;
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-6 shrink-0 items-center gap-1 border-b border-line px-2">
