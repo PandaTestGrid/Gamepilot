@@ -209,6 +209,9 @@ class TunnelSession:
         self._shot: Any = None
         self._frame: np.ndarray | None = None
         self._frame_id = 0
+        self.failures = 0
+        self.reconnects = 0
+        self.last_frame_at = 0.0
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._stop = threading.Event()
@@ -266,6 +269,7 @@ class TunnelSession:
         await service.connect()
         self._shot = service
         logger.info("iOS 隧道就绪: %s (iOS %s)", self.udid, getattr(rsd, "product_version", "?"))
+        self.last_frame_at = time.time()
         self._task = self._loop.create_task(self._loop_shots())
 
     # ---------- 采集 ----------
@@ -288,6 +292,8 @@ class TunnelSession:
                         self._frame = image
                         self._frame_id += 1
                         self.size = (int(image.shape[1]), int(image.shape[0]))
+                    self.last_frame_at = time.time()
+                    self.failures = 0
                     self._event.set()
                     self.frames += 1
                     window_count += 1
@@ -298,11 +304,39 @@ class TunnelSession:
                         window_start = time.time()
             except Exception as exc:
                 self.error = f"{type(exc).__name__}: {exc}"
-                logger.warning("iOS 截图失败: %s", self.error)
+                self.failures += 1
+                logger.warning("iOS 截图失败(%d): %s", self.failures, self.error)
+                # 连续失败说明 DVT 会话废了：重建它（隧道留着，HID 不受影响），别让画面永久冻结
+                if self.failures == 3:
+                    await self._reopen_dvt()
                 await asyncio.sleep(0.5)
             remain = interval - (time.time() - begin)
             if remain > 0:
                 await asyncio.sleep(remain)
+
+    async def _reopen_dvt(self) -> None:
+        """重建 DVT 截图会话（隧道与 HID 不动）。"""
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
+
+        logger.warning("iOS 采集重连中（第 %d 次）", self.reconnects + 1)
+        with contextlib_suppress():
+            if self._dvt is not None:
+                await self._dvt.__aexit__(None, None, None)
+        self._dvt = None
+        self._shot = None
+        try:
+            provider = DvtProvider(self._rsd)
+            self._dvt = await provider.__aenter__()
+            service = Screenshot(self._dvt)
+            await service.connect()
+            self._shot = service
+            self.reconnects += 1
+            self.error = None
+            logger.info("iOS 采集已重连（第 %d 次）", self.reconnects)
+        except Exception as exc:
+            self.error = f"重连失败: {type(exc).__name__}: {exc}"
+            logger.warning("iOS 采集重连失败: %s", self.error)
 
     def latest_frame(self, timeout: float = 1.0) -> np.ndarray | None:
         if timeout > 0 and self._event.wait(timeout):
@@ -583,9 +617,36 @@ class IosController(Controller):
     def link_fps(self) -> float:
         return float(self._session.fps_actual) if self._session is not None else 0.0
 
+    def _stalled(self, seconds: float = 6.0) -> bool:
+        session = self._session
+        return session is not None and time.time() - session.last_frame_at > seconds
+
+    def reconnect(self) -> None:
+        """整套重连：隧道 + DVT 采集 + HID（隧道级故障时才需要）。"""
+        logger.warning("iOS 采集卡住，整套重连: %s", self.udid)
+        if self._hid is not None:
+            self._hid.close()
+            self._hid = None
+        if self._session is not None:
+            self._session.close()
+            self._session = None
+        session = TunnelSession(self.udid, fps=self._fps)
+        session.start()
+        self._session = session
+        bridge = HidBridge(self.udid)
+        bridge.attach(session)
+        bridge.connect()
+        self._hid = bridge
+        self.link_note = f"DVT 采集（{session.size[0]}x{session.size[1]}，已重连）"
+
     def screenshot(self) -> np.ndarray:
         if self._session is None:
             raise RuntimeError("iOS 采集未启动")
+        if self._stalled():
+            # 卡住超过 6 秒：先重建 DVT，再不行就整套重连
+            self._session.run(self._session._reopen_dvt())
+            if self._stalled():
+                self.reconnect()
         frame = self._session.latest_frame(timeout=0.0)
         if frame is None:
             frame = self._session.latest_frame(timeout=1.5)

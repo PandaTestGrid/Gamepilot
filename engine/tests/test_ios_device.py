@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -322,3 +323,50 @@ def test_touch_uses_current_canvas_size_after_rotation() -> None:
     channel.touch("up", 1.0, 1.0)  # type: ignore[attr-defined]
     x, y, _, _ = decode(control.packets[-1])
     assert (x, y) == (1279, 607)
+
+
+# ---------------------------------------------------------------- 断线自愈
+
+
+def test_ios_session_reconnects_after_repeated_failures() -> None:
+    """截图连续失败要触发 DVT 重建，别让画面永久冻结。"""
+    session = ios.TunnelSession("UDID-TEST", fps=8)
+    calls: list[str] = []
+
+    class Boom:
+        async def get_screenshot(self) -> bytes:
+            raise RuntimeError("DVT 断了")
+
+    async def fake_reopen() -> None:
+        calls.append("reopen")
+
+    session._shot = Boom()  # 模拟坏掉的截图服务
+    session._reopen_dvt = fake_reopen  # type: ignore[method-assign]
+
+    # 跑循环一小会儿：3 次失败后应该触发重建
+    async def run() -> None:
+        import asyncio
+
+        task = asyncio.ensure_future(session._loop_shots())
+        await asyncio.sleep(1.2)
+        session._stop.set()
+        task.cancel()
+
+    import asyncio
+
+    asyncio.run(run())
+    assert calls, f"连续失败后应重建 DVT 会话（failures={session.failures}）"
+    assert session.failures >= 3
+
+
+def test_ios_controller_detects_stall() -> None:
+    """画面超过 6 秒没更新 → 判定卡住（触发重连）。"""
+    controller = ios.IosController(udid="UDID-TEST")
+    session = ios.TunnelSession("UDID-TEST")
+    controller._session = session
+
+    session.last_frame_at = time.time()
+    assert not controller._stalled()
+
+    session.last_frame_at = time.time() - 10
+    assert controller._stalled()
