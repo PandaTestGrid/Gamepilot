@@ -21,7 +21,7 @@ import type { RightTab } from '@/types';
 const TABS: ReadonlyArray<{ id: RightTab; label: string; hint: string }> = [
   {
     id: 'library',
-    label: '脚本库',
+    label: '项目',
     hint: '多张状态图（一个目录 = 一张图）：切换 / 新建 / 复制 / 重命名 / 移除',
   },
   { id: 'identifiers', label: '识别器', hint: '模板/颜色识别器的实时分数与阈值滑块' },
