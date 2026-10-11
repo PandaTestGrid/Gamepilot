@@ -81,7 +81,7 @@ export function WorkspaceTree(): ReactNode {
 
       {groups.map((workspace) => (
         <div key={workspace.name} className="w-full min-w-0">
-          <div className="mt-1 flex h-6 items-center gap-1 px-2 text-faint">
+          <div className="mt-1 flex h-[26px] items-center gap-1 px-2 text-faint">
             <span>▾</span>
             <span className="truncate">{workspace.name}</span>
           </div>
@@ -89,7 +89,7 @@ export function WorkspaceTree(): ReactNode {
             const folded = collapsed[project.root] === true;
             return (
               <div key={project.root} className="w-full min-w-0">
-                <div className="group flex h-6 w-full min-w-0 items-center gap-1 px-1 hover:bg-raised">
+                <div className="group flex h-[26px] w-full min-w-0 items-center gap-1 px-1 hover:bg-raised">
                   {/* 整行都能点：点名字就展开/收起（不用非得点那个小三角） */}
                   <button
                     type="button"
@@ -100,7 +100,7 @@ export function WorkspaceTree(): ReactNode {
                     <span className="w-3 shrink-0 text-faint">{folded ? '▸' : '▾'}</span>
                     <span className="min-w-0 flex-1 truncate text-fg">{project.name}</span>
                   </button>
-                  <span className="shrink-0 text-faint">{(project.tasks ?? []).length} 张状态图</span>
+                  <span className="shrink-0 text-faint">{(project.tasks ?? []).length} 图</span>
                   <button
                     type="button"
                     title="在这个项目下新建状态图"
@@ -124,7 +124,7 @@ export function WorkspaceTree(): ReactNode {
                 </div>
 
                 {!folded && (project.tasks ?? []).length > 0 && (
-                  <div className="ml-3 w-full min-w-0 border-l border-line pl-1 [&_button]:h-6 [&_button]:py-0 [&_button]:leading-6">
+                  <div className="ml-3 w-full min-w-0 border-l border-line pl-1 [&>*]:m-0 [&_button]:h-[26px] [&_button]:min-h-0 [&_button]:py-0 [&_button]:leading-[26px] [&_div]:h-[26px] [&_div]:min-h-0 [&>div]:flex [&>div]:items-center">
                     {(project.tasks ?? []).map((task) => {
                       const asScript: ProjectSummary = {
                         name: task.name,
@@ -178,7 +178,7 @@ export function WorkspaceTree(): ReactNode {
                 })();
               }
             }}
-            className="h-6 w-full px-4 text-left leading-6 text-faint hover:bg-raised hover:text-fg"
+            className="h-[26px] w-full px-4 text-left leading-[26px] text-faint hover:bg-raised hover:text-fg"
           >
             ＋项目
           </button>
