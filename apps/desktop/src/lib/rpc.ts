@@ -291,6 +291,14 @@ export function graphGet(deviceId: string): Promise<GraphPayload> {
   return rpc<GraphPayload>('graph.get', { deviceId });
 }
 
+/** 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置 */
+export function actionRun(
+  deviceId: string,
+  action: Record<string, unknown>,
+): Promise<{ ok: boolean; described: string }> {
+  return rpc<{ ok: boolean; described: string }>('action.run', { deviceId, action });
+}
+
 /** macOS 本机窗口列表（界面上的窗口选择器；也可手动输句柄） */
 export interface MacWindowInfo {
   readonly handle: number;

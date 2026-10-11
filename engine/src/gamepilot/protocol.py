@@ -78,6 +78,8 @@ METHOD_RECORD_TEMPLATE = "record.template"
 METHOD_RECOGNIZER_THRESHOLD = "recognizer.threshold"
 
 # 运行控制
+# 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置
+METHOD_ACTION_RUN = "action.run"
 METHOD_RUN_START = "run.start"
 METHOD_RUN_STOP = "run.stop"
 METHOD_TIMELINE = "timeline.get"

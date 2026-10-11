@@ -19,12 +19,14 @@ from urllib.parse import parse_qs, urlparse
 import cv2
 
 from .. import library
+from ..core.frame import Frame
 from ..core.geometry import Rect
 from ..core.graph import Graph
 from ..devices.base import Controller, controller_for_scheme
 from ..devices.mock import MOCK_DEVICE_ID
 from ..project import Project, resolve_project
 from ..protocol import (
+    METHOD_ACTION_RUN,
     METHOD_DEVICE_CONNECT,
     METHOD_DEVICE_DISCONNECT,
     METHOD_DEVICE_KEY,
@@ -312,6 +314,20 @@ def register(server: RpcServer) -> SessionManager:
             "linkNote": getattr(session.controller, "link_note", ""),
             "graph": session.graph.to_dict(),
         }
+
+    @server.method(METHOD_ACTION_RUN)
+    def _action_run(params: dict[str, Any]) -> dict[str, Any]:
+        """单独执行一个动作（界面上的"立即执行这一步"）。"""
+        session = manager.get(_require_str(params, "deviceId"))
+        action = params.get("action")
+        if not isinstance(action, dict):
+            raise ValueError("缺少 action 参数（对象，含 type 等）")
+        if not session.running:
+            # 没在跑状态机时也要能用：手动触发一次识别，动作里的识别器目标才解析得出来
+            image = session.controller.screenshot()
+            session.engine.perceive(Frame(image=image, size=session.controller.resolution, index=session.index))
+        described = session.engine.run_action(action)
+        return {"ok": True, "described": described}
 
     @server.method(METHOD_DEVICE_DISCONNECT)
     def _disconnect(params: dict[str, Any]) -> dict[str, Any]:

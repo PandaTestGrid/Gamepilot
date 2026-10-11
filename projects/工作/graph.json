@@ -16,8 +16,27 @@
         0.056492,
         0.194465
       ]
+    },
+    "main_region_2": {
+      "type": "template",
+      "template": "templates/main_region_2.png",
+      "threshold": 0.82,
+      "roi": [
+        0.411142,
+        0.491486,
+        0.172188,
+        0.264188
+      ]
     }
   },
-  "nodes": [],
+  "nodes": [
+    {
+      "id": "node_1",
+      "name": "新界面",
+      "enter": [
+        "main_region_2"
+      ]
+    }
+  ],
   "edges": []
 }

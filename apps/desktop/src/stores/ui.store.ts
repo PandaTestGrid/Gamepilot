@@ -10,6 +10,7 @@ import { create } from 'zustand';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { useSessionStore } from '@/stores/session.store';
+import type { DeviceTabId } from '@/features/device/device-kinds';
 import type { DockTab, RecordDraft, RecordMode, RightTab } from '@/types';
 
 const DEFAULT_THRESHOLD = 0.82;
@@ -18,6 +19,8 @@ interface UiState {
   readonly recordMode: RecordMode;
   readonly draft: RecordDraft | null;
   readonly devicePopoverOpen: boolean;
+  /** 设备弹层选中的分类（上次选哪类，下次打开还在那类） */
+  readonly deviceTab: DeviceTabId;
   readonly rightTab: RightTab;
   /** 底部调试抽屉：当前 Tab + 是否展开（点同一个 Tab = 收起） */
   readonly dockTab: DockTab;
@@ -32,6 +35,7 @@ interface UiState {
   readonly recordActionMode: boolean;
   readonly toggleRecordAction: () => void;
   readonly toggleDevicePopover: (open?: boolean) => void;
+  readonly setDeviceTab: (tab: DeviceTabId) => void;
   readonly setRightTab: (tab: RightTab) => void;
   readonly toggleDock: (tab: DockTab) => void;
   readonly closeDock: () => void;
@@ -48,6 +52,7 @@ export const useUiStore = create<UiState>()((set, get) => ({
   recordActionMode: false,
   draft: null,
   devicePopoverOpen: false,
+  deviceTab: 'all',
   rightTab: 'library',
   dockTab: 'events',
   dockOpen: false,
@@ -59,6 +64,7 @@ export const useUiStore = create<UiState>()((set, get) => ({
   toggleControl: () => set((state) => ({ controlMode: !state.controlMode })),
   toggleRecordAction: () => set((state) => ({ recordActionMode: !state.recordActionMode })),
   toggleDevicePopover: (open) => set((state) => ({ devicePopoverOpen: open ?? !state.devicePopoverOpen })),
+  setDeviceTab: (deviceTab) => set({ deviceTab }),
   setRightTab: (rightTab) => set({ rightTab }),
   toggleDock: (tab) =>
     set((state) =>

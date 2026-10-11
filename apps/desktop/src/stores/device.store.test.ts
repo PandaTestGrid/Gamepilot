@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useDeviceStore } from '@/stores/device.store';
+import { toRuntimeDevice, useDeviceStore } from '@/stores/device.store';
 import type { DeviceRuntime } from '@/types';
 
 /**
@@ -104,5 +104,37 @@ describe('多设备 store', () => {
     expect(device?.status).toBe('failed');
     expect(device?.error).toBe('端口被占用');
     expect(device?.suggestedFix).toBeTruthy();
+  });
+});
+
+describe('引擎 payload → 界面模型', () => {
+  const base = {
+    id: 'x',
+    uri: 'Uri:///?id=x',
+    name: 'X',
+    kind: 'android',
+    status: 'discovered',
+    serial: null,
+    model: null,
+    product: null,
+    resolution: null,
+    error: null,
+    suggestedFix: null,
+  };
+
+  it('每种来源都认得出来（ios 曾经被漏掉，iPhone 全被降级成"远程"→ 分类里看不见）', () => {
+    for (const kind of ['android', 'emulator', 'ios', 'windows', 'mock']) {
+      expect(toRuntimeDevice({ ...base, kind }).kind).toBe(kind);
+    }
+  });
+
+  it('未知来源降级成 remote，不抛异常', () => {
+    expect(toRuntimeDevice({ ...base, kind: 'harmony' }).kind).toBe('remote');
+    expect(toRuntimeDevice({ ...base, kind: 'not-a-string' }).kind).toBe('remote');
+  });
+
+  it('状态：认识的照原样，不认识的降级成 discovered（idle 是界面态，引擎给了也认）', () => {
+    expect(toRuntimeDevice({ ...base, status: 'idle' }).status).toBe('idle');
+    expect(toRuntimeDevice({ ...base, status: 'weird' }).status).toBe('discovered');
   });
 });

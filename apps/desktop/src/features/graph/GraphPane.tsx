@@ -37,6 +37,7 @@ import { RunButton } from '@/layout/RunButton';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { toGraphData } from '@/lib/graph-adapter';
+import { type EdgeStatus, evaluateEdge, markShadowed } from '@/lib/edge-status';
 import { edgeLabel } from '@/lib/graph-logic';
 import { devLog, graphGet, graphSave } from '@/lib/rpc';
 import { useGraphStore } from '@/stores/graph.store';
@@ -155,13 +156,40 @@ export function GraphPane(): ReactNode {
     [nodeSignature, dragging],
   );
 
+  // 每条边"现在走不走得通"：调试脚本时一眼看出卡在哪（纯逻辑在 lib/edge-status.ts）
+  const statuses = useMemo(() => {
+    if (!graph) {
+      return new Map<string, EdgeStatus>();
+    }
+    const detections = graph.recognizers.map((item) => ({
+      label: item.label,
+      score: item.score,
+      state: item.state,
+    }));
+    const raw = new Map(
+      (graph.edges ?? []).map(
+        (edge) => [edge.id, evaluateEdge(edge, detections, graph.activeNodeId)] as const,
+      ),
+    );
+    return markShadowed(graph.edges ?? [], raw);
+  }, [graph]);
+
   const edges = useMemo<Edge[]>(() => {
     const list = graph?.edges ?? [];
     return list
       .filter((edge) => !(edge.from === null || edge.to === null))
       .map((edge) => {
         const recovery = edge.kind === 'recovery';
-        const color = recovery ? 'var(--state-recovery)' : 'var(--state-confirmed)';
+        // 调试用：运行中按"这条边现在走不走得通"上色（逻辑见 lib/edge-status.ts）
+        const status = statuses.get(edge.id);
+        const color =
+          status?.kind === 'matched'
+            ? 'var(--state-confirmed)'
+            : status?.kind === 'blocked'
+              ? 'var(--state-failed, #ef6b6b)'
+              : recovery
+                ? 'var(--state-recovery)'
+                : 'var(--state-idle, #4b5563)';
         return {
           id: edge.id,
           source: edge.from ?? '',
@@ -180,7 +208,8 @@ export function GraphPane(): ReactNode {
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
         } satisfies Edge;
       });
-  }, [graph]);
+    // 上色跟着实时状态走，否则运行时边的颜色不会变
+  }, [graph, statuses]);
 
   const onNodeDragStop = useCallback(
     (_event: unknown, node: StateNodeType) => {

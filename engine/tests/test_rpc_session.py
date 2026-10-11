@@ -439,3 +439,24 @@ def test_device_id_uses_type_specific_keys() -> None:
     # 两个不同窗口不能撞成同一个 id
     assert device_id_for("Mac", {"window": "89"}) != device_id_for("Mac", {"window": "90"})
     assert device_id_for("iOS", {"udid": "A"}) != device_id_for("iOS", {"udid": "B"})
+
+
+def test_action_run_executes_one_step(engine: EngineProcess, tmp_path: Path) -> None:
+    """ "单独跑这一步"：不启动状态机也能执行一个动作，并在事件栏留痕。"""
+    engine.call("device.connect", {"uri": DEVICE_URI})
+    result = engine.call("action.run", {"deviceId": DEVICE_ID, "action": {"type": "click", "x": 0.4, "y": 0.4}})
+    assert result["ok"] is True
+    assert "点击" in result["described"], result
+    manual = [
+        item
+        for item in engine.seen
+        if item.get("method") == "engine.event" and item["params"]["type"] == "action_manual"
+    ]
+    assert manual, "单独执行要在事件栏留痕"
+
+
+def test_action_run_rejects_bad_action(engine: EngineProcess, tmp_path: Path) -> None:
+    engine.call("device.connect", {"uri": DEVICE_URI})
+    request_id = engine.send("action.run", {"deviceId": DEVICE_ID, "action": {"type": "click"}})
+    error = engine.wait_for(lambda item: item.get("id") == request_id)
+    assert "error" in error, error  # 点击必须给目标或坐标

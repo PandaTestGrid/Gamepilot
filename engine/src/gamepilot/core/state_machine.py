@@ -19,7 +19,7 @@ from typing import Any
 
 from ..devices.base import Controller
 from .actions import Action
-from .conditions import ConditionTimer
+from .conditions import Condition, ConditionTimer
 from .frame import Detection, Frame
 from .graph import Edge, Graph
 from .recognizer import VoteFilter, perceive
@@ -286,6 +286,26 @@ class Engine:
             self._emit(
                 "transition_failed", node=self.current, edge=pending.edge, message=f"进入 {pending.dst or '-'} 超时"
             )
+
+    def run_action(self, action: dict[str, Any]) -> str:
+        """只执行一个动作（调试用"单独跑这一步"），不影响状态机当前位置。
+
+        复用 _execute 那一套（识别器目标解析、等待、按键…），避免两处实现走偏。
+        """
+        from .actions import Action
+
+        parsed = Action.parse(action)
+        edge = Edge(
+            id="__manual__",
+            when="",
+            src=self.current,
+            dst=None,
+            action=parsed.to_dict(),
+            condition=Condition(always=True),
+        )
+        self._execute(edge)
+        self._emit("action_manual", node=self.current, edge=edge, message=f"单独执行：{parsed.describe()}")
+        return parsed.describe()
 
     def _execute(self, edge: Edge) -> None:
         """执行一条边上的动作。

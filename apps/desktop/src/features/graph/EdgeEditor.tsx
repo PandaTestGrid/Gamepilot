@@ -11,9 +11,12 @@
 import { type ReactNode, useState } from 'react';
 
 import { toActionPayload, toConditionPayload } from '@/lib/graph-adapter';
+import { type DetectionLike, evaluateEdge } from '@/lib/edge-status';
+import { devLog, actionRun } from '@/lib/rpc';
 import { describeEdgeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
+import { useSessionStore } from '@/stores/session.store';
 import type { EdgeAction, EdgeCondition, GraphData, GraphEdgeView } from '@/types';
 
 const KEY_OPTIONS = ['back', 'home', 'recents', 'power', 'volume_up', 'volume_down'] as const;
@@ -48,6 +51,28 @@ export function EdgeEditor({
   // 不用 effect 去同步 props → state（那样会多一次渲染，也被 lint 规则禁止）。
 
   const labels = (graph?.recognizers ?? []).map((item) => item.label);
+  const deviceReady = useSessionStore((state) => state.ready[deviceId] === true);
+  const runOnce = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await actionRun(deviceId, toActionPayload(edge.actionSpec));
+      devLog(`单独执行：${result.described}`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const live = evaluateEdge(
+    edge,
+    (graph?.recognizers ?? []).map<DetectionLike>((item) => ({
+      label: item.label,
+      score: item.score,
+      state: item.state,
+    })),
+    graph?.activeNodeId ?? null,
+  );
   const primary = edge.when;
 
   const toggleLabel = (group: 'allOf' | 'anyOf' | 'noneOf', label: string): void => {
@@ -121,6 +146,16 @@ export function EdgeEditor({
       <div className="mb-1 text-badge text-dim">
         <span className="text-faint">逻辑：</span>
         <span className="text-fg">{describeEdgeLogic(edge, graph)}</span>
+      </div>
+      <div className="mb-1 text-badge">
+        <span className="text-faint">此刻：</span>
+        <span
+          className={
+            live.kind === 'matched' ? 'text-confirmed' : live.kind === 'blocked' ? 'text-failed' : 'text-dim'
+          }
+        >
+          {live.kind === 'matched' ? '会走' : live.kind === 'blocked' ? '被挡' : '还没满足'} —— {live.reason}
+        </span>
       </div>
 
       <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-badge">
@@ -305,6 +340,17 @@ export function EdgeEditor({
 
         <div className="flex-1" />
         {error && <span className="text-failed">保存失败: {error}</span>}
+        <button
+          type="button"
+          disabled={busy || !deviceReady}
+          title={deviceReady ? '不改脚本，直接按这一步的动作操作设备（调试用）' : '设备未连接'}
+          onClick={() => {
+            void runOnce();
+          }}
+          className="h-5 rounded-sm border border-line px-2 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
+        >
+          立即执行这一步
+        </button>
         <button
           type="button"
           disabled={busy}

@@ -17,8 +17,34 @@ import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
 
 export const MAX_ACTIVE_DEVICES = 4;
 
-const KINDS: readonly DeviceKind[] = ['android', 'emulator', 'windows', 'mock', 'remote'];
-const STATUSES: readonly DeviceStatus[] = ['discovered', 'connecting', 'connected', 'failed'];
+/*
+ * 白名单写成"穷举 Record"而不是数组：`DeviceKind` 里加了新来源（比如 ios、以后的 harmony），
+ * 漏一行 TypeScript 直接报错。之前用数组 + includes，结果 `ios` 被漏掉 ——
+ * 所有 iPhone 都被降级成 remote，弹层里的「iOS」分类永远是空的（用户看到的是"设备没被分类"）。
+ */
+const KINDS: Record<DeviceKind, true> = {
+  android: true,
+  emulator: true,
+  windows: true,
+  ios: true,
+  mock: true,
+  remote: true,
+};
+const STATUSES: Record<DeviceStatus, true> = {
+  idle: true,
+  discovered: true,
+  connecting: true,
+  connected: true,
+  failed: true,
+};
+
+function asKind(value: unknown): DeviceKind {
+  return typeof value === 'string' && value in KINDS ? (value as DeviceKind) : 'remote';
+}
+
+function asStatus(value: unknown): DeviceStatus {
+  return typeof value === 'string' && value in STATUSES ? (value as DeviceStatus) : 'discovered';
+}
 
 export type ScanState = 'idle' | 'scanning' | 'error';
 
@@ -50,10 +76,8 @@ interface DeviceState {
 
 /** 引擎返回的 payload → 界面模型。未知枚举值一律降级，不抛异常。 */
 export function toRuntimeDevice(info: DeviceInfoPayload): DeviceRuntime {
-  const kind = (KINDS as readonly string[]).includes(info.kind) ? (info.kind as DeviceKind) : 'remote';
-  const status = (STATUSES as readonly string[]).includes(info.status)
-    ? (info.status as DeviceStatus)
-    : 'discovered';
+  const kind = asKind(info.kind);
+  const status = asStatus(info.status);
   return {
     id: info.id,
     name: info.name,
