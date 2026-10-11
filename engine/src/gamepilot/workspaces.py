@@ -165,3 +165,21 @@ def tree(base: str | None = None) -> list[dict[str, Any]]:
             project["workspaces"].insert(0, {"name": DEFAULT_WORKSPACE, "root": entry.root, "tasks": flat})
         projects.append(project)
     return projects
+
+
+def make_workspace_dir(project: str, name: str) -> str:
+    """在项目目录下建一个工作区目录（`<项目>/<工作区>/`），返回路径。
+
+    工作区只是"装任务的目录"，不写 graph.json —— 免得被当成一个老布局的任务。
+    """
+    clean = name.strip().strip("/")
+    if not clean or clean in {".", ".."}:
+        raise ValueError("工作区名字不合法")
+    root = os.path.abspath(os.path.expanduser(project))
+    if not os.path.isdir(root):
+        raise ValueError(f"项目目录不存在: {root}")
+    target = os.path.join(root, clean)
+    if os.path.exists(target):
+        raise ValueError(f"这个项目里已经有叫「{clean}」的工作区了")
+    os.makedirs(target, exist_ok=True)
+    return target

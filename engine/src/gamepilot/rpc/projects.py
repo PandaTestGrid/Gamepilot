@@ -32,6 +32,7 @@ from ..protocol import (
     METHOD_PROJECT_SET,
     METHOD_WORKSPACE_CREATE,
     METHOD_WORKSPACE_LIST,
+    METHOD_WORKSPACE_MKDIR,
     METHOD_WORKSPACE_TREE,
 )
 
@@ -87,6 +88,12 @@ def register(server: RpcServer, manager: SessionManager) -> None:
     def _project_list(params: dict[str, Any]) -> dict[str, Any]:
         base = params.get("base")
         return {"items": manager.list_projects(str(base) if base else None)}
+
+    @server.method(METHOD_WORKSPACE_MKDIR)
+    def _workspace_mkdir(params: dict[str, Any]) -> dict[str, Any]:
+        """在某个项目（库根）下建一个工作区目录：<项目>/<工作区>/。"""
+        made = workspaces.make_workspace_dir(_require_str(params, "project"), _require_str(params, "name"))
+        return {"created": made, "projects": workspaces.tree()}
 
     @server.method(METHOD_WORKSPACE_TREE)
     def _workspace_tree(params: dict[str, Any]) -> dict[str, Any]:

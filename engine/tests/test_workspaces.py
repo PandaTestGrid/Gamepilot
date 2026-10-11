@@ -65,3 +65,16 @@ def test_tree_three_levels(tmp_path: Path) -> None:
     buckets = workspaces.tree(str(tmp_path))[0]["workspaces"]
     assert [item["name"] for item in buckets] == ["阴阳师"], "中间那层目录就是工作区"
     assert [task["name"] for task in buckets[0]["tasks"]] == ["斗技", "百鬼"]
+
+
+def test_make_workspace_dir(tmp_path: Path) -> None:
+    """在项目下建工作区目录：不写 graph.json（免得被当成任务），同名报错。"""
+    project = tmp_path / "游戏自动化"
+    project.mkdir()
+    made = workspaces.make_workspace_dir(str(project), "阴阳师")
+    assert os.path.isdir(made)
+    assert not os.path.isfile(os.path.join(made, "graph.json")), "工作区本身不该是任务"
+    with pytest.raises(ValueError, match="已经有叫"):
+        workspaces.make_workspace_dir(str(project), "阴阳师")
+    with pytest.raises(ValueError, match="项目目录不存在"):
+        workspaces.make_workspace_dir(str(tmp_path / "不存在"), "x")
