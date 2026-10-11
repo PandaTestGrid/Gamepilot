@@ -16,6 +16,7 @@ import {
 } from '@/lib/node-positions';
 import { preloadTemplates } from '@/stores/template.store';
 import {
+  devLog,
   graphGet,
   graphEdgeAdd,
   graphNodeAdd,
@@ -72,6 +73,16 @@ interface GraphState {
   ) => Promise<void>;
   readonly removeNode: (deviceId: string, nodeId: string) => Promise<void>;
   readonly connectNodes: (deviceId: string, from: string, to: string) => Promise<void>;
+  /**
+   * 带着动作建一步（"＋操作"菜单选完类型/目标后调用）。
+   * 一次 RPC 建好并带上 action，省掉"先建再改"的两次往返；返回新边 id。
+   */
+  readonly addStep: (
+    deviceId: string,
+    from: string,
+    to: string | null,
+    patch?: { action?: Record<string, unknown>; when?: string; condition?: Record<string, unknown> },
+  ) => Promise<string | null>;
   /** 一键建分支：识别器出现 → 去 A；不出现 → 去 B */
   readonly addBranch: (
     deviceId: string,
@@ -237,7 +248,12 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
 
   selectNode: (nodeId) => set({ selectedNodeId: nodeId, selectedEdgeId: null }),
 
-  selectEdge: (edgeId) => set({ selectedEdgeId: edgeId, selectedNodeId: null }),
+  /*
+   * 选中边时**保留**节点选中：节点靠 `selectedNodeId` 摊开引脚（"这个界面有哪些操作"），
+   * 点节点里的某一步操作去编辑时，把节点收起来会让人失去上下文 —— 用户反馈过。
+   * 反过来点节点仍会收起边：焦点转到节点上（详情面板显示节点编辑器）。
+   */
+  selectEdge: (edgeId) => set({ selectedEdgeId: edgeId }),
 
   setGraph: (deviceId, graph, raw, options) => {
     // 状态图一到手就预取模板截图：画布上的缩略图、底部详情、识别器面板共用同一份缓存，
@@ -373,6 +389,20 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
       raws: { ...current.raws, [deviceId]: result.graph },
       graphs: { ...current.graphs, [deviceId]: placed(deviceId, result.graph, current) },
     }));
+  },
+
+  addStep: async (deviceId, from, to, patch) => {
+    try {
+      const result = await graphEdgeAdd(deviceId, { from, to, ...patch });
+      set((current) => ({
+        raws: { ...current.raws, [deviceId]: result.graph },
+        graphs: { ...current.graphs, [deviceId]: placed(deviceId, result.graph, current) },
+      }));
+      return result.edgeId ?? null;
+    } catch (error) {
+      devLog(`建这一步失败: ${String(error)}`);
+      return null;
+    }
   },
 
   updateLive: (deviceId, live) =>

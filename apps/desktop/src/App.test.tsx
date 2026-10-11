@@ -189,29 +189,35 @@ describe('画面栏渲染（回归：曾经连上了也不出图）', () => {
     expect(screen.getByText('scrcpy')).toBeInTheDocument();
   });
 
-  it('设备控制键贴在投屏下面（不在面板头）：返回 / 桌面 / 最近任务 / 电源 + 控制 / 录操作', () => {
+  it('设备按键贴在投屏下面；「控制 / 录操作」两个开关在面板头（用户反馈后分开的）', () => {
     render(<App />);
 
     const bar = screen.getByTestId('device-controls');
-    // 它属于"画面"那一格（跟着投屏一起被上下拖），不是面板头
+    // 按键属于"画面"那一格（跟着投屏一起被上下拖），不是面板头
     expect(bar.closest('[data-panel]')?.id).toBe('view');
     const section = bar.closest('section');
     expect(section?.firstElementChild?.contains(bar)).toBe(false);
 
-    for (const label of ['返回', '桌面', '最近任务', '电源', '控制', '录操作']) {
+    // 这条只剩设备按键
+    for (const label of ['返回', '桌面', '最近任务', '电源']) {
       expect(within(bar).getByText(label)).toBeInTheDocument();
     }
+    // App 自己的两个模式开关不在这里 —— 它们是开关，不是"手机上的键"
+    expect(within(bar).queryByText('控制')).not.toBeInTheDocument();
+    expect(within(bar).queryByText('录操作')).not.toBeInTheDocument();
 
-    // 会话还没就绪时按钮是灰的，并把原因写在 title 里（不是点了没反应）
+    // 会话还没就绪时按键是灰的，并把原因写在 title 里（不是点了没反应）
     expect(within(bar).getByText('返回').closest('button')).toBeDisabled();
     expect(within(bar).getByText('返回').closest('button')).toHaveAttribute(
       'title',
       expect.stringContaining('未连接'),
     );
 
-    // 面板头只留面板自己的工具：框选 / 点选 / 多开 / 读数
+    // 面板头：面板自己的工具 + 两个模式开关
     const header = section?.firstElementChild as HTMLElement;
     expect(within(header).getByText('框选')).toBeInTheDocument();
+    expect(within(header).getByText('控制')).toBeInTheDocument();
+    expect(within(header).getByText('录操作')).toBeInTheDocument();
     expect(within(header).queryByText('返回')).not.toBeInTheDocument();
   });
 });

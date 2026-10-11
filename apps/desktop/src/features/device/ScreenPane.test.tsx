@@ -79,7 +79,14 @@ const READOUT_ROWS: readonly RecognizerView[] = [
 ];
 
 /** 每测试一条独立用例：都从"控制开着、没在录制"开始。 */
-function renderScreen(options: { recordAction?: boolean; recognizers?: readonly RecognizerView[] } = {}): {
+function renderScreen(
+  options: {
+    recordAction?: boolean;
+    recognizers?: readonly RecognizerView[];
+    /** 设备是否已连接（默认连上；测"未连接"时显式给 false） */
+    ready?: boolean;
+  } = {},
+): {
   viewport: HTMLElement;
   touch: ReturnType<typeof vi.fn<TouchMock>>;
   recordStep: ReturnType<typeof vi.fn<RecordStepMock>>;
@@ -89,7 +96,7 @@ function renderScreen(options: { recordAction?: boolean; recognizers?: readonly 
   const recordStep = vi.fn<RecordStepMock>(() => Promise.resolve('e_1'));
   const rename = vi.fn<RenameMock>(() => Promise.resolve({ refs: { nodes: 0, edges: 0, scores: 0 } }));
   useSessionStore.setState({
-    ready: { [DEVICE]: true },
+    ready: { [DEVICE]: options.ready ?? true },
     frames: { [DEVICE]: frameAt(1) },
     touch,
     recordStep,
@@ -324,5 +331,67 @@ describe('识别读数接到画面上（筛选取数/改名/删除的详细行�
     renderScreen();
 
     expect(screen.getByText(/还没有识别器/)).toBeInTheDocument();
+  });
+});
+
+describe('画面栏面板头的两个模式开关（控制 / 录操作）', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ ready: { [DEVICE]: true }, frames: {}, touch: vi.fn(), recordStep: vi.fn() });
+    useUiStore.setState({ controlMode: true, recordActionMode: false, readoutOpen: true });
+  });
+
+  it('「控制」在面板头（不在下面的设备控制条里），点一下切 ui.store.controlMode', () => {
+    renderScreen();
+
+    const button = screen.getByText('控制').closest('button');
+    expect(button).toBeInTheDocument();
+    // 面板头 = 有「画面」标题那一行；设备控制条里不该有它
+    expect(screen.getByTestId('device-controls')).not.toContainElement(button);
+
+    fireEvent.click(button as HTMLButtonElement);
+    expect(useUiStore.getState().controlMode).toBe(false);
+  });
+
+  it('录操作开着时，+等 0.5s/1s/3s 就在它旁边（录一步等待属于录操作这件事）', () => {
+    const { recordStep } = renderScreen();
+
+    expect(screen.queryByTestId('record-wait-1')).toBeNull();
+
+    fireEvent.click(screen.getByText('录操作').closest('button') as HTMLButtonElement);
+    expect(useUiStore.getState().recordActionMode).toBe(true);
+
+    fireEvent.click(screen.getByTestId('record-wait-1'));
+    expect(recordStep).toHaveBeenCalledWith(DEVICE, { type: 'wait', seconds: 1 });
+  });
+
+  it('设备没连上：录操作灰掉并说明原因（控制开关不受影响，它只是画面上的行为开关）', () => {
+    renderScreen({ ready: false });
+
+    const record = screen.getByText('录操作').closest('button');
+    expect(record).toBeDisabled();
+    expect(record).toHaveAttribute('title', expect.stringContaining('未连接'));
+    expect(screen.getByText('控制').closest('button')).toBeEnabled();
+  });
+});
+
+describe('画面左下角浮层：帧信息 + 运行态合成一条（曾经两块叠在一起）', () => {
+  it('只渲染一条浮层，两边信息都在', () => {
+    renderScreen();
+    // renderScreen 会写自己的帧，所以这里在它之后再放"带 node/tick"的那一帧
+    act(() => {
+      useSessionStore.setState({
+        frames: { [DEVICE]: { ...frameAt(9), node: 'main', tick: 29082, fps: 7.7, pending: 'battle' } },
+      });
+    });
+
+    // 只有一条浮层（以前是两块都锚在 bottom-1 left-1，叠在一起字糊成一团）
+    const overlays = screen.getAllByTestId('frame-overlay');
+    expect(overlays).toHaveLength(1);
+    const overlay = overlays[0] as HTMLElement;
+    expect(overlay).toHaveTextContent('帧 #9');
+    expect(overlay).toHaveTextContent('node=main');
+    expect(overlay).toHaveTextContent('pending→battle');
+    // 同一段文字里出现两次 fps 就是又叠了一层
+    expect(overlay.textContent?.match(/fps/g)).toHaveLength(1);
   });
 });

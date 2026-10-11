@@ -43,3 +43,32 @@
 - 重新录制同一张模板（同名同路径、内容变了）必须 `clearTemplateCache([label])`，
   否则界面还在显示旧截图（`session.store.record` 里已经接了）。
 - 右键菜单只放"入口 + 删除"这类不会误操作的项：参数编辑留在下方详情面板。
+
+## 坐标、小地图、视图
+
+| 文件 | 职责 |
+|---|---|
+| `lib/node-positions.ts` | 坐标记忆：引擎回包不覆盖用户摆位、按脚本目录存 localStorage |
+| （官方）`MiniMap` / `Controls` | 右下角小地图 + 缩放/适配视图控件，直接用 xyflow 的 |
+
+规则：
+
+- **所有**引擎回包都必须走 `graph.store` 的 `placed(...)`（内部 `toGraphData` + 坐标套回）。
+  单独调 `toGraphData` 再塞进 store，等于把用户的摆位冲掉 —— 以前有 8 处这么干，
+  表现就是"拖动/建节点之后节点弹回网格（看起来像消失）"。
+- 节点状态用**官方 `useNodesState`**，不要再自造"拖动表/尺寸表"：官方 `applyNodeChanges`
+  会处理 position/dimensions/select，`measured` 也由它保管（自己实现容易漏掉尺寸回填，
+  然后小地图画不出节点、`nodesInitialized` 反复 false）。
+- 同步 store → React Flow 时：**不在拖动中的节点坐标取 store**（"重新布局"才生效）；
+  **正在拖动的节点（本地 `dragging === true`）坐标必须取本地** —— 拖动期间每帧的实时更新都会
+  触发同步，用 store 的旧坐标覆盖就是"抖动 + 松手回原位"。
+  - ⚠️ 重建节点时 `dragging` 标记要**一起带回去**：丢了它，下一次同步就会覆盖正在拖的节点（抖动根源）。
+  - ⚠️ 写回坐标读**本地最新坐标**（`nodesRef` 镜像本地数组），别用 `onNodeDragStop` 回调参数里的
+    `node.position`：它可能落后一帧，写回旧值 = "停下来弹回原位"。
+  - 拖动中每 90ms 节流写一次 store 兜底（画面跟手仍由 React Flow 本地负责），松手把
+    React Flow 报上来的**所有**被拖节点一次写全（多选拖动）。
+  - **尺寸沿用本地**（别重新测量），`data` 每次重建。
+- 连线必须用 `ConnectionMode.Strict`：Loose 允许从 target 圆点起拖并交换方向，
+  会出现"从左圆点拖，结果连成了反向边"。
+- 建节点、加分支之后自动 `fitView` 一次（`centerAll`）：引擎回包会重排、详情坞展开会让画布变矮，
+  不居中就很容易"建完看不见"。

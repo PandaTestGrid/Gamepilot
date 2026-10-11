@@ -5,7 +5,15 @@
  * 识别框、node/tick/fps 浮层全部是引擎的真实数据，前端只做展示与坐标换算
  * （而且坐标本来就是归一化的，连换算都不需要）。
  */
-import { ChevronDown, ChevronUp, Grid2x2, MousePointerSquareDashed, ScanLine } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronUp,
+  CircleDot,
+  Grid2x2,
+  MousePointerClick,
+  MousePointerSquareDashed,
+  ScanLine,
+} from 'lucide-react';
 import { type CSSProperties, type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { Group, Panel, type PanelImperativeHandle, Separator, usePanelRef } from 'react-resizable-panels';
 
@@ -47,6 +55,12 @@ export function ScreenPane(): ReactNode {
   const toggleGrid = useDeviceStore((state) => state.toggleGrid);
   const toggleDevicePopover = useUiStore((state) => state.toggleDevicePopover);
   const recordMode = useUiStore((state) => state.recordMode);
+  const controlMode = useUiStore((state) => state.controlMode);
+  const toggleControl = useUiStore((state) => state.toggleControl);
+  const recordActionMode = useUiStore((state) => state.recordActionMode);
+  const toggleRecordAction = useUiStore((state) => state.toggleRecordAction);
+  const recordStep = useSessionStore((state) => state.recordStep);
+  const isConnected = useSessionStore((state) => Boolean(state.ready[activeId]));
   const frame = useSessionStore((state) => state.frames[activeId]);
   const graph = useGraphStore((state) => state.graphs[activeId]);
 
@@ -114,6 +128,53 @@ export function ScreenPane(): ReactNode {
             多开{connected.length > 0 ? ` ${connected.length}` : ''}
           </GhostButton>
           <GhostButton title="当前帧命中的识别器数量">读数 {confirmedCount}</GhostButton>
+
+          {/* 两个模式开关（控制 / 录操作）放在这里而不是画面下面那条：
+              它们是**本 App 的开关**，和"手机上有什么键"不是一类东西 —— 混在设备按键里
+              会让人以为它们是手机上的功能。设备按键留在画面下方那条（和画面一体）。 */}
+          <span className="mx-0.5 h-3 w-px bg-line" />
+          <GhostButton
+            active={controlMode}
+            onClick={toggleControl}
+            title={
+              controlMode
+                ? '控制已开启：点击画面=轻触，拖拽=滑动（录制元素时自动让位）'
+                : '控制已关闭：画面上的操作只用于框选/点选录制'
+            }
+          >
+            <MousePointerClick className="size-3" />
+            控制
+          </GhostButton>
+          <GhostButton
+            active={recordActionMode}
+            disabled={!isConnected}
+            onClick={toggleRecordAction}
+            title={
+              isConnected
+                ? recordActionMode
+                  ? '正在录操作：画面上的每次点击/滑动都会变成脚本里的一步（再点一下关闭）'
+                  : '录操作：把点击/滑动录成脚本里的一步'
+                : `设备未连接：先连上设备才能录操作（当前 ${device?.name ?? '无设备'}）`
+            }
+          >
+            <CircleDot className="size-3" />
+            录操作
+          </GhostButton>
+          {/* 录操作开着时才出现的"录一步等待"：它属于录操作这件事，跟着它一起在这里 */}
+          {recordActionMode &&
+            isConnected &&
+            [0.5, 1, 3].map((seconds) => (
+              <button
+                key={seconds}
+                type="button"
+                data-testid={`record-wait-${seconds}`}
+                onClick={() => void recordStep(activeId, { type: 'wait', seconds })}
+                className="h-5 rounded-sm border border-line px-1 text-badge text-dim hover:bg-raised hover:text-fg"
+                title={`录一步"等待 ${seconds}s"`}
+              >
+                +等{seconds}s
+              </button>
+            ))}
         </>
       }
     >
@@ -144,7 +205,7 @@ export function ScreenPane(): ReactNode {
               )}
             </div>
             {device && device.status === 'connected' && (
-              <DeviceControls deviceId={device.id} deviceName={device.name} />
+              <DeviceControls deviceId={device.id} deviceName={device.name} kind={device.kind} />
             )}
           </div>
         </Panel>
@@ -673,13 +734,6 @@ function SingleScreen({
         <SwipeTrail from={feedback.from} to={feedback.to} box={imageBox} />
       )}
 
-      {/* 画面角标：一眼看出"有没有帧、多大、多少帧率"。排查"看不见画面"时这是最直接的证据 */}
-      {frame && (
-        <span className="pointer-events-none absolute bottom-1 left-1 rounded-sm bg-black/55 px-1.5 py-0.5 text-badge text-white/85">
-          帧 #{frame.index} · {frame.resolution[0]}×{frame.resolution[1]} · {frame.fps.toFixed(1)}fps
-        </span>
-      )}
-
       {/* 识别框：绿=投票已确认 / 橙=待确认；坐标是引擎给的归一化值 */}
       {detections.map((item) => {
         const [x, y, w, h] = item.rect;
@@ -746,12 +800,23 @@ function SingleScreen({
         </div>
       )}
 
-      {/* 运行态浮层：全部来自引擎帧 */}
+      {/* 画面左下角浮层（帧信息 + 运行态**合成一条**）：
+          排查"看不见画面/不推进"时这是最直接的证据。
+          以前这是两块都锚在 bottom-1 left-1 的浮层 —— 叠在一起，字糊成一团
+          （截图里 "node=64 tick=2908 7.7fps 7fps" 就是这么来的） */}
       {frame && (
-        <div className="pointer-events-none absolute bottom-1 left-1 rounded-sm bg-canvas/80 px-1.5 py-0.5 text-badge text-dim">
-          node={frame.node ?? '-'} · tick={frame.tick} · {frame.fps}fps
-          {frame.pending ? ` · pending→${frame.pending}` : ''}
-        </div>
+        <span
+          data-testid="frame-overlay"
+          className="pointer-events-none absolute bottom-1 left-1 flex max-w-[calc(100%-0.5rem)] flex-wrap items-center gap-x-2 rounded-sm bg-black/55 px-1.5 py-0.5 text-badge text-white/85"
+        >
+          <span>
+            帧 #{frame.index} · {frame.resolution[0]}×{frame.resolution[1]} · {frame.fps.toFixed(1)}fps
+          </span>
+          <span className="text-white/60">
+            node={frame.node ?? '-'} · tick={frame.tick}
+            {frame.pending ? ` · pending→${frame.pending}` : ''}
+          </span>
+        </span>
       )}
 
       {draft && imageBox && <RecordOverlay deviceId={deviceId} anchor={selectionViewportRect(draft.rect)} />}

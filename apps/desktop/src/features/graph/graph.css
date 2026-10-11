@@ -35,3 +35,62 @@
   stroke: var(--brand);
   stroke-width: 2;
 }
+
+/* 官方控件条（缩放 / 适配视图）：xyflow 默认是浅色皮肤，套上本项目的暗色 token */
+.react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+.react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+.react-flow__controls-button:hover {
+  background: var(--bg-raised);
+  color: var(--fg);
+}
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+/*
+ * 运行态：当前节点"呼吸"、待确认目标"闪烁"。
+ * 用描边/底色变化做动效（不用阴影，保持"层次=底色+1px 描边"的语言），
+ * 目的只是让"状态机现在停在哪"在余光里也能看见。
+ */
+@keyframes gp-breathe {
+  0%,
+  100% {
+    border-color: var(--brand);
+  }
+  50% {
+    border-color: color-mix(in oklab, var(--brand) 30%, var(--border));
+  }
+}
+@keyframes gp-blink {
+  0%,
+  100% {
+    border-color: var(--state-pending, var(--brand));
+  }
+  50% {
+    border-color: color-mix(in oklab, var(--state-pending, var(--brand)) 25%, var(--border));
+  }
+}
+.state-node[data-run='active'] {
+  animation: gp-breathe 1.5s ease-in-out infinite;
+}
+.state-node[data-run='pending'] {
+  animation: gp-blink 0.9s step-end infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .state-node[data-run='active'],
+  .state-node[data-run='pending'] {
+    animation: none;
+  }
+}

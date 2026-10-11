@@ -11,7 +11,7 @@
 import { type ReactNode, useState } from 'react';
 
 import { toActionPayload, toConditionPayload } from '@/lib/graph-adapter';
-import { type DetectionLike, evaluateEdge } from '@/lib/edge-status';
+import { conditionConflicts, type DetectionLike, evaluateEdge } from '@/lib/edge-status';
 import { extractParamsToVariables } from '@/lib/param-vars';
 import { actionRun, devLog, setBreakpoint } from '@/lib/rpc';
 import { describeEdgeLogic } from '@/lib/graph-logic';
@@ -21,6 +21,14 @@ import { useSessionStore } from '@/stores/session.store';
 import type { EdgeAction, ParamValue, EdgeCondition, GraphData, GraphEdgeView } from '@/types';
 
 const KEY_OPTIONS = ['back', 'home', 'recents', 'power', 'volume_up', 'volume_down'] as const;
+
+/** 这个面板里会报错的三件事：保存脚本 / 单独执行 / 设断点 —— 红字必须说清是哪一件。 */
+type EditorOp = 'save' | 'run' | 'breakpoint';
+const ERROR_LABELS: Record<EditorOp, string> = {
+  save: '保存失败',
+  run: '执行失败',
+  breakpoint: '断点设置失败',
+};
 
 const ACTION_OPTIONS: { value: EdgeAction['type']; label: string }[] = [
   { value: 'click', label: '点击' },
@@ -48,7 +56,9 @@ export function EdgeEditor({
   const [priority, setPriority] = useState(edge.priority);
   const [cooldownMs, setCooldownMs] = useState(edge.cooldownMs);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // 错误要带上"是哪件事失败了"：保存和执行共用一个位置，但按钮是两个
+  // （踩过：点「执行这一步」失败，红字却写"保存失败" —— 用户以为脚本没存上）
+  const [error, setError] = useState<{ op: EditorOp; message: string } | null>(null);
   // 注意：草稿用 useState 初始化。换边时由外面给 <EdgeEditor key={`步骤 ${edge.id.replace(/\D/g, '') || ''}`}> 重新挂载，
   // 不用 effect 去同步 props → state（那样会多一次渲染，也被 lint 规则禁止）。
 
@@ -62,11 +72,13 @@ export function EdgeEditor({
       const result = await actionRun(deviceId, toActionPayload(edge.actionSpec));
       devLog(`单独执行：${result.described}`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError({ op: 'run', message: reason instanceof Error ? reason.message : String(reason) });
     } finally {
       setBusy(false);
     }
   };
+  // 自相矛盾的条件（同一个识别器既在且/或、又在非里）：这条边永远不会走，直接说破
+  const conflicts = conditionConflicts(condition);
   const live = evaluateEdge(
     edge,
     (graph?.recognizers ?? []).map<DetectionLike>((item) => ({
@@ -97,7 +109,7 @@ export function EdgeEditor({
         cooldown_ms: cooldownMs,
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError({ op: 'save', message: reason instanceof Error ? reason.message : String(reason) });
     } finally {
       setBusy(false);
     }
@@ -160,6 +172,16 @@ export function EdgeEditor({
           {live.kind === 'matched' ? '会走' : live.kind === 'blocked' ? '被挡' : '还没满足'} —— {live.reason}
         </span>
       </div>
+
+      {conflicts.length > 0 && (
+        <div
+          data-testid="condition-conflict"
+          className="mb-1 rounded-sm border border-failed/50 px-1.5 py-0.5 text-badge text-failed"
+        >
+          ⚠ {conflicts.join('、')} 同时在「且/或」和「非」里 —— 这条边**永远不会触发**：
+          引擎先看「非」（命中就直接否），再看「且/或」（又要求它命中）。把其中一边的勾去掉。
+        </div>
+      )}
 
       <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-badge">
         <span className="text-dim">判断条件</span>
@@ -359,7 +381,11 @@ export function EdgeEditor({
         )}
 
         <div className="flex-1" />
-        {error && <span className="text-failed">保存失败: {error}</span>}
+        {error && (
+          <span className="text-failed">
+            {ERROR_LABELS[error.op]}: {error.message}
+          </span>
+        )}
         <button
           type="button"
           disabled={busy || !deviceReady}
@@ -402,7 +428,7 @@ export function EdgeEditor({
                 await save({ action: nextAction });
                 devLog(`已抽成变量：${Object.keys(variables).join('、')}`);
               } catch (reason) {
-                setError(reason instanceof Error ? reason.message : String(reason));
+                setError({ op: 'save', message: reason instanceof Error ? reason.message : String(reason) });
               } finally {
                 setBusy(false);
               }
@@ -422,7 +448,10 @@ export function EdgeEditor({
                 await setBreakpoint(deviceId, edge.id, true);
                 devLog(`已在这条边上设断点：${edge.id}`);
               } catch (reason) {
-                setError(reason instanceof Error ? reason.message : String(reason));
+                setError({
+                  op: 'breakpoint',
+                  message: reason instanceof Error ? reason.message : String(reason),
+                });
               }
             })();
           }}

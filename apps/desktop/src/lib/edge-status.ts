@@ -35,6 +35,18 @@ function hit(label: string, detections: Map<string, DetectionLike>): number | nu
   return found.score;
 }
 
+/**
+ * 条件自相矛盾：同一个识别器既要求"出现"（且/或），又被"非"要求"不出现"。
+ *
+ * 这种边**永远不会触发**，而且是静默的：引擎 `Condition.matches` 先看 none_of
+ * （命中就直接 False），再看 all_of / any_of（要求它命中）—— 两头堵死。
+ * 典型来源是在边编辑器里点错了「非」的勾（实测遇到过：`any_of=[相机]` + `none_of=[相机]`）。
+ */
+export function conditionConflicts(condition: EdgeCondition): string[] {
+  const positive = [...condition.allOf, ...condition.anyOf];
+  return [...new Set(positive.filter((label) => condition.noneOf.includes(label)))];
+}
+
 export function evaluateEdge(
   edge: GraphEdgeView,
   detections: ReadonlyArray<DetectionLike>,

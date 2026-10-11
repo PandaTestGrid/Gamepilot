@@ -14,10 +14,15 @@ import type { ComponentProps } from 'react';
 
 import { StateNode, type StateNodeData } from '@/features/graph/StateNode';
 import { useGraphStore } from '@/stores/graph.store';
+import { useUiStore } from '@/stores/ui.store';
 import { clearTemplateCache, preloadTemplates } from '@/stores/template.store';
 
+const runAction = vi.fn((_deviceId: string, _action: Record<string, unknown>) =>
+  Promise.resolve({ ok: true, described: '点击 (0.5, 0.5)' }),
+);
 vi.mock('@/lib/rpc', () => ({
   templateImage: (label: string) => Promise.resolve({ label, png: 'data:image/png;base64,AAAA' }),
+  actionRun: (deviceId: string, action: Record<string, unknown>) => runAction(deviceId, action),
   devLog: vi.fn(),
 }));
 
@@ -62,6 +67,8 @@ function nodeProps(patch: Partial<StateNodeData> = {}): ComponentProps<typeof St
 describe('节点卡片', () => {
   beforeEach(() => {
     useGraphStore.setState({ graphs: {}, raws: {}, selectedNodeId: null, selectedEdgeId: null });
+    useUiStore.setState({ nodeScale: 'md' });
+    runAction.mockClear();
     clearTemplateCache();
   });
 
@@ -166,10 +173,10 @@ describe('节点卡片', () => {
   it('选中的节点可以就地挂/摘「进入识别器」，也能加一步操作', async () => {
     const user = userEvent.setup();
     const updateNode = vi.fn(() => Promise.resolve());
-    const connectNodes = vi.fn(() => Promise.resolve());
+    const addStep = vi.fn(() => Promise.resolve('e_new'));
     useGraphStore.setState({
       updateNode,
-      connectNodes,
+      addStep,
       graphs: {
         dev: {
           deviceId: 'dev',
@@ -194,7 +201,156 @@ describe('节点卡片', () => {
     await user.click(screen.getByText('main_start'));
     expect(updateNode).toHaveBeenLastCalledWith('dev', 'main', { enter: [] });
 
-    await user.click(screen.getByText('+ 操作'));
-    expect(connectNodes).toHaveBeenCalledWith('dev', 'main', 'main');
+    // "＋操作"现在是菜单（选动作类型 / 绑定模板），建步骤走 addStep
+    await user.click(screen.getByText('＋操作'));
+    expect(screen.getByText('＋ 点击')).toBeInTheDocument();
+    await user.click(screen.getByText('＋ 等待'));
+    expect(addStep).toHaveBeenCalledWith('dev', 'main', 'main', { action: { type: 'wait' } });
+  });
+
+  it('节点内部的按钮/引脚点一下不会冒泡出去（否则外层会当成"点了节点"而收起）', async () => {
+    const user = userEvent.setup();
+    useGraphStore.setState({
+      graphs: {
+        dev: {
+          deviceId: 'dev',
+          nodes: [{ id: 'main', name: '主界面', enter: ['main_start'], x: 0, y: 0, visits: 1 }],
+          edges: [],
+          variables: [],
+          recognizers: [],
+          activeNodeId: null,
+          pendingNodeId: null,
+        },
+      },
+      raws: {},
+    });
+
+    const outer = vi.fn();
+    render(
+      <div onClick={outer}>
+        <StateNode
+          {...nodeProps({
+            expanded: true,
+            allTemplates: ['main_start', 'shop_home'],
+            pins: [
+              {
+                key: 'e1',
+                title: '点击',
+                action: { type: 'click', target: 'shop_home' },
+                pins: [{ label: 'x', value: '0.5', isVar: false }],
+              },
+            ],
+          })}
+        />
+      </div>,
+    );
+
+    // 挂/摘识别器、加操作、引脚：都是节点内部的操作，不能冒泡（外层收起卡片）
+    await user.click(screen.getByText('shop_home'));
+    await user.click(screen.getByText('＋操作'));
+    await user.click(screen.getByText('x:0.5'));
+
+    // 核心：没有一次冒泡上去（"各自干了各自的活"在另一条用例里验证）
+    expect(outer).not.toHaveBeenCalled();
+  });
+
+  it('点节点里的"操作"是选中那一步，不会收起节点（选中边不再清节点选中）', async () => {
+    const user = userEvent.setup();
+    const selectEdge = vi.fn();
+    useGraphStore.setState({
+      selectEdge,
+      graphs: {
+        dev: {
+          deviceId: 'dev',
+          nodes: [{ id: 'main', name: '主界面', enter: [], x: 0, y: 0, visits: 1 }],
+          edges: [],
+          variables: [],
+          recognizers: [],
+          activeNodeId: null,
+          pendingNodeId: null,
+        },
+      },
+      raws: {},
+      selectedNodeId: 'main',
+      selectedEdgeId: null,
+    });
+
+    const outer = vi.fn();
+    render(
+      <div onClick={outer}>
+        <StateNode
+          {...nodeProps({
+            expanded: true,
+            pins: [{ key: 'e1', title: '点击 商店', action: { type: 'click', target: 'x' }, pins: [] }],
+          })}
+        />
+      </div>,
+    );
+
+    await user.click(screen.getByText('点击 商店'));
+
+    expect(selectEdge).toHaveBeenCalledWith('e1');
+    expect(outer).not.toHaveBeenCalled(); // 不冒泡 → 不会被当成"点了节点"
+    // 节点仍然是选中的（引脚继续摊开，用户可以接着点下一步）
+    expect(useGraphStore.getState().selectedNodeId).toBe('main');
+  });
+
+  it('节点大小档位：小/中/大 改变卡片宽度', () => {
+    useGraphStore.setState({ graphs: {}, raws: {} });
+    const { unmount } = render(<StateNode {...nodeProps()} />);
+    expect(screen.getByTestId('state-node').className).toContain('w-[168px]'); // 默认中
+    unmount();
+
+    useUiStore.setState({ nodeScale: 'lg' });
+    render(<StateNode {...nodeProps()} />);
+    expect(screen.getByTestId('state-node').className).toContain('w-[220px]');
+  });
+
+  it('＋操作菜单：挑动作类型建一步；挑模板则把目标与条件一起绑上', async () => {
+    const user = userEvent.setup();
+    const addStep = vi.fn(() => Promise.resolve('e_new'));
+    const selectEdge = vi.fn();
+    useGraphStore.setState({ addStep, selectEdge, selectedNodeId: 'main', selectedEdgeId: null });
+
+    render(<StateNode {...nodeProps({ expanded: true, allTemplates: ['main_start'], pins: [] })} />);
+
+    await user.click(screen.getByText('＋操作'));
+    // ① 动作类型：只建类型，参数留给下方详情
+    await user.click(screen.getByText('＋ 点击'));
+    expect(addStep).toHaveBeenCalledWith('dev', 'main', 'main', { action: { type: 'click' } });
+
+    // ② 模板：目标 + 条件一起绑（"菜单里就能绑定对应的事件"）
+    await user.click(screen.getByText('＋操作'));
+    await user.click(screen.getByText('点击「main_start」'));
+    expect(addStep).toHaveBeenLastCalledWith('dev', 'main', 'main', {
+      action: { type: 'click', target: 'main_start' },
+      when: 'main_start',
+      condition: { all_of: ['main_start'] },
+    });
+    expect(selectEdge).toHaveBeenCalledWith('e_new');
+  });
+
+  it('每一步操作都能 ✕ 删除、▶ 直接执行（执行结果记进事件流）', async () => {
+    const user = userEvent.setup();
+    const removeEdge = vi.fn(() => Promise.resolve());
+    useGraphStore.setState({ removeEdge, selectedNodeId: 'main' });
+
+    render(
+      <StateNode
+        {...nodeProps({
+          expanded: true,
+          pins: [{ key: 'e1', title: '点击 商店', action: { type: 'click', target: 'x' }, pins: [] }],
+        })}
+      />,
+    );
+
+    await user.click(screen.getByTitle('删除这一步操作'));
+    expect(removeEdge).toHaveBeenCalledWith('dev', 'e1');
+
+    await user.click(screen.getByTitle(/立即执行这一步/));
+    // toActionPayload 会补默认参数（比如 click 的 duration_ms），这里只校验关键字段
+    await vi.waitFor(() =>
+      expect(runAction).toHaveBeenCalledWith('dev', expect.objectContaining({ type: 'click', target: 'x' })),
+    );
   });
 });

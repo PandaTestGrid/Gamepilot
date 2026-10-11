@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { evaluateEdge, markShadowed, type DetectionLike } from '@/lib/edge-status';
+import { conditionConflicts, evaluateEdge, markShadowed, type DetectionLike } from '@/lib/edge-status';
 import type { EdgeCondition, GraphEdgeView } from '@/types';
 
 const base: EdgeCondition = { allOf: ['icon'], anyOf: [], noneOf: [], minScore: 0, withinMs: 0 };
@@ -93,5 +93,30 @@ describe('优先级遮挡', () => {
     );
     expect(marked.get('high')?.kind).toBe('matched');
     expect(marked.get('low')?.reason).toContain('优先级');
+  });
+});
+
+describe('条件自相矛盾（conditionConflicts）', () => {
+  it('同一个识别器既在「或」又在「非」：永远不会触发，要点出来', () => {
+    // 实测遇到过的一条边：any_of=[相机] + none_of=[相机]
+    const found = conditionConflicts({ ...base, allOf: [], anyOf: ['相机'], noneOf: ['相机'] });
+
+    expect(found).toEqual(['相机']);
+  });
+
+  it('「且」和「非」撞上也算（all_of 要求出现，none_of 要求不出现）', () => {
+    expect(conditionConflicts({ ...base, allOf: ['icon', 'start'], noneOf: ['start'] })).toEqual(['start']);
+  });
+
+  it('不同标签各管各的：不报', () => {
+    expect(conditionConflicts({ ...base, allOf: ['icon'], anyOf: ['start'], noneOf: ['popup'] })).toEqual([]);
+  });
+
+  it('重复出现在两边也只报一次', () => {
+    expect(conditionConflicts({ ...base, allOf: ['x'], anyOf: ['x'], noneOf: ['x'] })).toEqual(['x']);
+  });
+
+  it('无条件边（always）没有矛盾可说', () => {
+    expect(conditionConflicts({ ...base, allOf: [], anyOf: [], noneOf: [], always: true })).toEqual([]);
   });
 });

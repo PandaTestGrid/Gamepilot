@@ -22,6 +22,27 @@ const DEFAULT_THRESHOLD = 0.82;
  */
 export type ReadoutFilter = 'all' | 'hit';
 
+/**
+ * 状态图节点大小：画布上的卡片尺寸档位（小/中/大）。
+ *
+ * 用户反馈"节点能放大么" —— 卡片里塞了模板缩略图和引脚，默认尺寸在 1080p 下偏小。
+ * 写进 ui store 并落 localStorage：这是个人的阅读偏好，重启后应当保持。
+ */
+export type NodeScale = 'sm' | 'md' | 'lg';
+
+export const NODE_SCALES: readonly NodeScale[] = ['sm', 'md', 'lg'];
+
+const NODE_SCALE_KEY = 'gamepilot.node-scale';
+
+function loadNodeScale(): NodeScale {
+  try {
+    const raw = window.localStorage.getItem(NODE_SCALE_KEY);
+    return raw === 'sm' || raw === 'md' || raw === 'lg' ? raw : 'md';
+  } catch {
+    return 'md';
+  }
+}
+
 interface UiState {
   readonly recordMode: RecordMode;
   readonly draft: RecordDraft | null;
@@ -44,6 +65,9 @@ interface UiState {
   /** 画面栏「识别读数」列表的筛选：全部（默认）/ 只看命中的 */
   readonly readoutFilter: ReadoutFilter;
   readonly setReadoutFilter: (filter: ReadoutFilter) => void;
+  /** 画布节点卡片尺寸（小/中/大） */
+  readonly nodeScale: NodeScale;
+  readonly setNodeScale: (scale: NodeScale) => void;
   /** 画面栏下半格（识别读数）是否展开：收起时只留一行标题，画面拿走全部高度 */
   readonly readoutOpen: boolean;
   /** 面板尺寸跟着它走（`Panel` 的 collapse/expand，见 ScreenPane） */
@@ -65,6 +89,7 @@ export const useUiStore = create<UiState>()((set, get) => ({
   controlMode: true,
   recordActionMode: false,
   readoutFilter: 'all',
+  nodeScale: loadNodeScale(),
   readoutOpen: true,
   draft: null,
   devicePopoverOpen: false,
@@ -80,6 +105,14 @@ export const useUiStore = create<UiState>()((set, get) => ({
   toggleControl: () => set((state) => ({ controlMode: !state.controlMode })),
   toggleRecordAction: () => set((state) => ({ recordActionMode: !state.recordActionMode })),
   setReadoutFilter: (readoutFilter) => set({ readoutFilter }),
+  setNodeScale: (nodeScale) => {
+    try {
+      window.localStorage.setItem(NODE_SCALE_KEY, nodeScale);
+    } catch {
+      // 记不住就算了，本次会话内照常生效
+    }
+    set({ nodeScale });
+  },
   setReadoutOpen: (readoutOpen) => set({ readoutOpen }),
   toggleDevicePopover: (open) => set((state) => ({ devicePopoverOpen: open ?? !state.devicePopoverOpen })),
   setDeviceTab: (deviceTab) => set({ deviceTab }),

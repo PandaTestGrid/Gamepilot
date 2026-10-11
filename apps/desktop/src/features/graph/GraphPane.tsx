@@ -13,22 +13,23 @@ import {
   ConnectionMode,
   type ReactFlowInstance,
   MarkerType,
+  Controls,
   MiniMap,
   ReactFlow,
   type Edge,
-  type NodeChange,
   type NodeTypes,
-  type XYPosition,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import '@/features/graph/graph.css';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNodesState } from '@xyflow/react';
 import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
 import { NodeEditor } from '@/features/graph/NodeEditor';
+import { DockBar } from '@/features/graph/DockBar';
 import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContextMenu';
-import { ViewportControls } from '@/features/graph/ViewportControls';
+import { RunStatusStrip } from '@/features/graph/RunStatusStrip';
 import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
@@ -39,6 +40,7 @@ import { GhostButton, PanelShell } from '@/layout/PanelShell';
 import { RunButton } from '@/layout/RunButton';
 import { useDeviceStore } from '@/stores/device.store';
 import { useSessionStore } from '@/stores/session.store';
+import { NODE_SCALES, useUiStore, type NodeScale } from '@/stores/ui.store';
 import type { EdgeAction } from '@/types';
 import { toGraphData } from '@/lib/graph-adapter';
 import { actionPins, summarizePins } from '@/lib/action-pins';
@@ -54,10 +56,17 @@ const EDITOR_COLLAPSED_PX = 28;
 /** 编辑坞展开态的最小高度；小于它的尺寸都是"正在往收起过渡"，不记 */
 const EDITOR_MIN_PX = 72;
 
+/** 节点大小档位的中文名（按钮上显示） */
+const NODE_SCALE_LABEL: Record<NodeScale, string> = { sm: '小', md: '中', lg: '大' };
+
 export function GraphPane(): ReactNode {
   // 状态图 / 脚本：同一份数据的两种看法（一个看结构、一个看执行顺序）
   const [view, setView] = useState<'graph' | 'script' | 'variables'>('graph');
   const activeId = useDeviceStore((state) => state.activeId);
+  const nodeScale = useUiStore((state) => state.nodeScale);
+  // 运行中（引擎在跑状态机）：条件边流动、当前节点呼吸、顶部显示当前状态
+  const running = useSessionStore((state) => state.running[activeId] === true);
+  const setNodeScale = useUiStore((state) => state.setNodeScale);
   /*
    * ReactFlow 实例：右键空白处要"在鼠标位置"建节点，需要 screen → flow 坐标换算。
    * 这里不能用 `useReactFlow()`：GraphPane 本身就是渲染 `<ReactFlow>` 的那个组件，
@@ -123,73 +132,89 @@ export function GraphPane(): ReactNode {
     .concat(`|${graph?.activeNodeId ?? ''}|${graph?.pendingNodeId ?? ''}|${selectedNodeId ?? ''}`);
 
   /*
-   * 拖动过程中的实时坐标。
+   * 节点状态用**官方的 useNodesState**（等价于 `const [nodes, setNodes, onNodesChange]`）。
    *
-   * 被控模式（传了 nodes）下 React Flow **不会**自己落位置：内核里
-   * `triggerNodeChanges` 只在非受控时才 `applyNodeChanges`，受控时只是回调 `onNodesChange`
-   * —— 官方示例都接了 `onNodesChange`（useNodesState 那一套），我们没接，
-   * 于是"按住拖动画面不动、松手才跳过去"。
-   *
-   * 这里接住回调，但只把坐标记在本地：状态图 store 仍是唯一真源，落盘依旧走
-   * `onNodeDragStop`（一次写图 + 通知引擎），不会每移动一像素就写一次盘。
+   * 之前这里是自己维护的 dragging / measured 两张表，问题一堆：
+   *   - 受控模式不回填 `dimensions` → React Flow 每次重建节点都会清掉 `measured`
+   *     （小地图画不出节点、nodesInitialized 反复 false）；
+   *   - 拖动靠自定义 map 兜住，等于把官方状态机拆了一半自己拼。
+   * 官方的做法：`useNodesState` 内部用 `applyNodeChanges` 处理**所有**变化
+   * （position/dimensions/select…），我们只负责"什么时候把 store 的新数据同步进来"，
+   * 而同步时保留本地已有的坐标与尺寸（那是用户拖的、React Flow 量到的）。
    */
-  const [dragging, setDragging] = useState<Record<string, XYPosition>>({});
+  const [rfNodes, setRfNodes, applyNodeChanges] = useNodesState<StateNodeType>([]);
   // 鼠标停在哪条边上：边的线宽是**内联样式**（每条边按状态上色），CSS 的 :hover 盖不住，
   // 所以悬停反馈只能走 React 状态（顺带能在单测里断言）
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   // 右键菜单：空白 / 节点 / 边 三种目标各一套（内容见 openPaneMenu/openNodeMenu/openEdgeMenu）
   const [menu, setMenu] = useState<MenuAnchor | null>(null);
-  const onNodesChange = useCallback((changes: NodeChange<StateNodeType>[]) => {
-    setDragging((current) => {
-      let next = current;
-      for (const change of changes) {
-        if (change.type !== 'position') {
-          continue; // 选中/尺寸之类的变化本项目自有一套（store 里的 selectedNodeId），这里不掺和
-        }
-        next = { ...(next === current ? current : next) };
-        if (change.dragging && change.position) {
-          next[change.id] = change.position;
-        } else {
-          delete next[change.id]; // 松手：交回 store 的坐标（onNodeDragStop 已写进去）
-        }
-      }
-      return next;
-    });
-  }, []);
 
-  const nodes = useMemo<StateNodeType[]>(
-    () =>
-      (graph?.nodes ?? []).map((node) => ({
-        id: node.id,
-        type: 'state' as const,
-        position: dragging[node.id] ?? { x: node.x, y: node.y },
-        data: {
-          label: node.name,
-          sub: node.id,
-          deviceId: activeId,
-          expanded: node.id === selectedNodeId,
-          // 这个界面靠哪些模板认出来（画布上直接显示缩略图："主界面长这样"）
-          enterTemplates: node.enter.filter((label) => templateLabels.has(label)),
-          // 图里所有有截图的模板：节点上就地挂/摘"进入识别器"
-          allTemplates: [...templateLabels],
-          pins: (graph?.edges ?? [])
-            .filter((edge) => edge.from === node.id)
-            .map((edge) => ({
-              key: edge.id,
-              title: describeAction(edge.actionSpec, true),
-              action: edge.actionSpec,
-              // 这一步点的是哪个模板（有截图就直接画在画布上，不用去翻识别器面板）
-              template: actionTargetTemplate(edge.actionSpec),
-              pins: summarizePins(actionPins(edge.actionSpec)),
-            })),
-          visits: node.visits,
-          active: graph?.activeNodeId === node.id,
-          pending: graph?.pendingNodeId === node.id,
-        },
-      })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 用签名代替 graph 整体：实时分数不该触发重建
-    [nodeSignature, pinSignature, dragging, templateSignature],
+  /**
+   * store 的图 → React Flow 节点。
+   *
+   * 分工（官方模式）：
+   *   - **坐标**：不在拖动中的节点以 store 为准（持久真源，`lib/node-positions.ts` 负责不被
+   *     引擎回包冲掉）；**正在拖动**的节点（React Flow 会在本地状态上打 `dragging`）以本地为准 ——
+   *     拖动期间引擎每帧都在推送实时分数/激活态，一旦同步用 store 的旧坐标覆盖，
+   *     画面就是"抖一下、松手回到原位"（真踩过）。松手由 `onNodeDragStop` 写回 store，值相同 → 不跳。
+   *   - **尺寸**（`measured`）由 React Flow 量出来、交给我们保管，重建时要带回去，否则又要重新测量。
+   *   - `data` 一律重建：激活态/引脚/模板截图都是活的。
+   */
+  const buildNodes = useCallback(
+    (previous: StateNodeType[]): StateNodeType[] => {
+      const known = new Map(previous.map((node) => [node.id, node] as const));
+      return (graph?.nodes ?? []).map((node) => {
+        const local = known.get(node.id);
+        return {
+          id: node.id,
+          type: 'state' as const,
+          // React Flow 自己的选中态跟 store 对齐：否则它会偷偷累积多选，拖动时整组一起动
+          selected: node.id === selectedNodeId,
+          // 正在拖的节点：位置归 React Flow（本地跟手）；其余以 store 为准（"重新布局"才生效）
+          position: local?.dragging === true ? local.position : { x: node.x, y: node.y },
+          /*
+           * ⚠️ `dragging` 必须一起带回去。
+           * 它是 React Flow 打在本地状态上的"正在拖动"标记；重建时丢掉它，
+           * 下一次同步就会拿 store 的坐标覆盖正在拖的节点 —— 表现正是"抖一下/像回到原位"（真踩过）。
+           * 拖完 React Flow 会把标记清掉，所以这里照抄本地值不会把节点永久锁在拖动态。
+           */
+          dragging: local?.dragging === true ? true : undefined,
+          // 尺寸由 React Flow 量出来并交给我们保管，重建时要带回去（否则又要重新测量）
+          measured: local?.measured,
+          data: {
+            label: node.name,
+            sub: node.id,
+            deviceId: activeId,
+            expanded: node.id === selectedNodeId,
+            // 这个界面靠哪些模板认出来（画布上直接显示缩略图："主界面这样"）
+            enterTemplates: node.enter.filter((label) => templateLabels.has(label)),
+            // 图里所有有截图的模板：节点上就地挂/摘"进入识别器"
+            allTemplates: [...templateLabels],
+            pins: (graph?.edges ?? [])
+              .filter((edge) => edge.from === node.id)
+              .map((edge) => ({
+                key: edge.id,
+                title: describeAction(edge.actionSpec, true),
+                action: edge.actionSpec,
+                // 这一步点的是哪个模板（有截图就直接画在画布上，不用去翻识别器面板）
+                template: actionTargetTemplate(edge.actionSpec),
+                pins: summarizePins(actionPins(edge.actionSpec)),
+              })),
+            visits: node.visits,
+            active: graph?.activeNodeId === node.id,
+            pending: graph?.pendingNodeId === node.id,
+          },
+        };
+      });
+    },
+    [graph, activeId, selectedNodeId, templateLabels, actionTargetTemplate],
   );
+
+  // 只有"图的结构/内容/激活态"变了才同步（用签名当依赖，避免每帧重建节点）
+  useEffect(() => {
+    setRfNodes((previous) => buildNodes(previous));
+    // 用签名当依赖：实时分数每帧都在变，直接依赖 graph 会把节点每帧重建一遍
+  }, [nodeSignature, pinSignature, templateSignature, buildNodes, setRfNodes]);
 
   // 每条边"现在走不走得通"：调试脚本时一眼看出卡在哪（纯逻辑在 lib/edge-status.ts）
   const statuses = useMemo(() => {
@@ -237,7 +262,15 @@ export function GraphPane(): ReactNode {
           type: 'smoothstep',
           // 标签先显示"这一步做什么"，比只显示识别器标签直观得多
           label: edgeLabel(edge, graph),
-          animated: false,
+          /*
+           * 运行中的"条件边动画"：
+           *   - 可以走（matched）→ 流动，一眼看出下一步会走哪条
+           *   - 当前界面的出边正在等条件（waiting）→ 也流动，表示"正在盯着这条"
+           *   - 被排除条件挡住（blocked）→ 不动（它本来就走不了）
+           */
+          animated:
+            running &&
+            (status?.kind === 'matched' || (status?.kind === 'waiting' && edge.from === graph?.activeNodeId)),
           style: {
             stroke: color,
             // 选中（正在编辑）> 悬停（鼠标指到）> 默认，三级粗细
@@ -249,8 +282,8 @@ export function GraphPane(): ReactNode {
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
         } satisfies Edge;
       });
-    // 上色跟着实时状态走，否则运行时边的颜色不会变；选中态也要跟着（编辑器换了一条边）
-  }, [graph, statuses, selectedEdgeId, hoveredEdge]);
+    // 上色/流动跟着实时状态走，否则运行时边的颜色与动画不会变；选中态也要跟着（编辑器换了一条边）
+  }, [graph, statuses, selectedEdgeId, hoveredEdge, running]);
 
   /**
    * 把全部节点收进视野（= 右下角「居中」）。
@@ -410,11 +443,60 @@ export function GraphPane(): ReactNode {
     [activeId, focusEdgeAction, removeEdge, selectEdge],
   );
 
-  const onNodeDragStop = useCallback(
-    (_event: unknown, node: StateNodeType) => {
-      moveNode(activeId, node.id, Math.round(node.position.x), Math.round(node.position.y));
+  /*
+   * 写回坐标时**以本地节点状态为准**，不用回调参数里的 `node.position`。
+   *
+   * 原因：`onNodeDragStop` 的 `node` 参数可能落后一帧（它来自 React Flow 内部快照），
+   * 而 `applyNodeChanges` 维护的本地数组一定是最新的 —— 拿旧值写回 store，
+   * 下一次同步就会把节点按回起始位置，表现就是"停下来抖一下、像回到原位"。
+   * 这里用 ref 镜像本地数组（事件回调里读 ref 是安全的，渲染期不读）。
+   */
+  const nodesRef = useRef<StateNodeType[]>([]);
+  useEffect(() => {
+    nodesRef.current = rfNodes;
+  }, [rfNodes]);
+
+  const persistPositions = useCallback(
+    (ids: readonly string[]) => {
+      const current = new Map(nodesRef.current.map((node) => [node.id, node.position] as const));
+      for (const id of ids) {
+        const position = current.get(id);
+        if (position) {
+          moveNode(activeId, id, Math.round(position.x), Math.round(position.y));
+        }
+      }
     },
     [activeId, moveNode],
+  );
+
+  /**
+   * 拖动中把坐标**节流**写回 store。
+   *
+   * 只在松手时写的话，松手那一瞬间只要有一次重建（实时推送/选中变化），
+   * 节点就会被 store 里的旧坐标按回去 —— 抖动就是这么来的。节流 90ms 兜底即可，
+   * 画面跟手仍然完全由 React Flow 本地负责。
+   */
+  const lastDragWrite = useRef(0);
+  const onNodeDrag = useCallback(
+    (_event: unknown, node: StateNodeType) => {
+      const now = performance.now();
+      if (now - lastDragWrite.current < 90) {
+        return;
+      }
+      lastDragWrite.current = now;
+      persistPositions([node.id]);
+    },
+    [persistPositions],
+  );
+
+  /** 松手：React Flow 会把这次一起移动的节点都报上来（多选拖动），一个都不能漏 */
+  const onNodeDragStop = useCallback(
+    (_event: unknown, node: StateNodeType, nodes?: StateNodeType[]) => {
+      const moved = nodes && nodes.length > 0 ? nodes : [node];
+      persistPositions(moved.map((item) => item.id));
+      lastDragWrite.current = 0;
+    },
+    [persistPositions],
   );
 
   const selected = (graph?.edges ?? []).find((edge) => edge.id === selectedEdgeId) ?? null;
@@ -482,8 +564,8 @@ export function GraphPane(): ReactNode {
 
   // 诊断：节点数组只在"真正变化"时重建（每帧重建会导致拖动被 props 抢位置）
   useEffect(() => {
-    devLog(`状态图: 重建 ${nodes.length} 个节点（拖不动就是这里刷太频）`);
-  }, [nodes]);
+    devLog(`状态图: 重建 ${rfNodes.length} 个节点（拖不动就是这里刷太频）`);
+  }, [rfNodes]);
   const recoveries = (graph?.edges ?? []).filter((edge) => edge.kind === 'recovery');
 
   return (
@@ -538,6 +620,16 @@ export function GraphPane(): ReactNode {
           >
             重新布局
           </GhostButton>
+          {/* 节点卡片大小：小/中/大（卡片、字号、缩略图一起缩放），选择记在 ui store 里 */}
+          <GhostButton
+            onClick={() => {
+              const next = NODE_SCALES[(NODE_SCALES.indexOf(nodeScale) + 1) % NODE_SCALES.length];
+              setNodeScale(next ?? 'md');
+            }}
+            title="节点卡片大小（小 / 中 / 大）—— 放大后卡片里的模板缩略图也能看清"
+          >
+            节点 {NODE_SCALE_LABEL[nodeScale]}
+          </GhostButton>
         </>
       }
     >
@@ -551,7 +643,7 @@ export function GraphPane(): ReactNode {
       >
         <Panel id="canvas" defaultSize="68%" minSize="30%" style={{ overflow: 'hidden' }}>
           <div className="relative h-full bg-canvas">
-            {nodes.length === 0 ? (
+            {rfNodes.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-1 text-badge text-faint">
                 <span>这台设备还没有状态图</span>
                 <span>先连接设备，然后在画面栏点「框选」，在画面上拖一个矩形即生成第一个节点</span>
@@ -562,12 +654,14 @@ export function GraphPane(): ReactNode {
               <VariablesPanel deviceId={activeId} graph={graph} />
             ) : (
               <ReactFlow
-                nodes={nodes}
+                nodes={rfNodes}
                 edges={edges}
                 nodeTypes={nodeTypes}
-                onNodesChange={onNodesChange}
+                onNodesChange={applyNodeChanges}
+                onNodeDrag={onNodeDrag}
                 onNodeDragStop={onNodeDragStop}
-                onEdgeClick={(_event, edge) => selectEdge(edge.id === selectedEdgeId ? null : edge.id)}
+                // 点边 = 选中（幂等）：以前是 toggle，点到已选中的边会顺手关掉编辑器
+                onEdgeClick={(_event, edge) => selectEdge(edge.id)}
                 onEdgeMouseEnter={(_event, edge) => setHoveredEdge(edge.id)}
                 onEdgeMouseLeave={() => setHoveredEdge(null)}
                 // 双击边 = 直接进编辑（底部面板会聚焦到动作区）
@@ -575,7 +669,13 @@ export function GraphPane(): ReactNode {
                   selectEdge(edge.id);
                   focusEdgeAction();
                 }}
-                onNodeClick={(_event, node) => selectNode(node.id === selectedNodeId ? null : node.id)}
+                /*
+                 * 点节点 = 选中（**幂等**，不再 toggle）。
+                 * 以前点已展开的节点会"取消选中 → 收起"，而节点内部的空白/文字/改名输入框
+                 * 点一下也会冒泡到这里 —— 用户反馈"点节点里的东西也会收起"就是这个。
+                 * 收起统一由画布空白（onPaneClick）负责。
+                 */
+                onNodeClick={(_event, node) => selectNode(node.id)}
                 onConnect={(connection) => {
                   if (connection.source && connection.target) {
                     void connectNodes(activeId, connection.source, connection.target);
@@ -597,7 +697,18 @@ export function GraphPane(): ReactNode {
                   selectEdge(edge.id);
                   openEdgeMenu(event, edge.id, typeof edge.label === 'string' ? edge.label : edge.id);
                 }}
-                onPaneClick={() => {
+                /*
+                 * 点画布空白 = 收起。
+                 *
+                 * ⚠️ xyflow 的 pane click 是挂在 `.react-flow__pane` 上的，而节点就在它里面 ——
+                 * 点节点/边时这个回调**也会被触发**（冒泡）。不排掉的话：点节点会"先选中、再被清空"，
+                 * 点节点里的操作更是直接收起（用户反馈的两次"收起"都是这个）。
+                 */
+                onPaneClick={(event) => {
+                  const target = event.target as HTMLElement | null;
+                  if (target?.closest('.react-flow__node') || target?.closest('.react-flow__edge')) {
+                    return; // 点在节点/边里面：不是"点空白"
+                  }
                   selectEdge(null);
                   selectNode(null);
                 }}
@@ -611,7 +722,9 @@ export function GraphPane(): ReactNode {
                 nodesDraggable
                 nodesConnectable
                 // 允许从任意一侧的圆点连（Loose）：用户不用记住"左边是入、右边是出"
-                connectionMode={ConnectionMode.Loose}
+                // 用官方的严格模式：右圆点(出) → 左圆点(入)。Loose 模式下从**左**（target）
+                // 圆点拖出去也允许连线，得到的是反向边（用户反馈"选左侧却连到右侧"）
+                connectionMode={ConnectionMode.Strict}
                 connectionLineStyle={{ stroke: 'var(--brand, #6ea8fe)', strokeWidth: 2 }}
                 proOptions={{ hideAttribution: false }}
               >
@@ -627,18 +740,27 @@ export function GraphPane(): ReactNode {
                   style={{
                     width: 148,
                     height: 104,
-                    bottom: 34, // 让出右下角给「居中 / 缩放」控制条
+                    // 官方控件放在小地图左边（两个都在右下角会叠在一起）
+                    bottom: 8,
                     right: 8,
                     background: 'var(--bg-panel)',
                     border: '1px solid var(--border)',
                   }}
-                  maskColor="rgba(10,12,16,0.6)"
+                  maskColor="rgba(10,12,16,0.55)"
+                  // 节点颜色要能看清：原来用面板灰，和底色几乎一样，小地图等于白给
                   nodeColor={(node) =>
-                    (node.data as { active?: boolean } | undefined)?.active ? '#4da3ff' : '#3b4250'
+                    (node.data as { active?: boolean } | undefined)?.active ? '#4da3ff' : '#8b95a7'
                   }
-                  nodeStrokeWidth={2}
+                  nodeStrokeColor="#1a1d24"
+                  nodeStrokeWidth={1}
+                  nodeBorderRadius={2}
                 />
-                <ViewportControls flow={flowRef} />
+                {/* 官方控件：缩放 / 适配视图（fitView）/ 锁定，比自己画一套稳 */}
+                <Controls
+                  showInteractive={false}
+                  position="bottom-right"
+                  style={{ bottom: 8, right: 164 }} // 挨着小地图左侧
+                />
               </ReactFlow>
             )}
 
@@ -663,6 +785,9 @@ export function GraphPane(): ReactNode {
             </div>
 
             {menu && <GraphContextMenu anchor={menu} onClose={() => setMenu(null)} />}
+
+            {/* 运行状态条：现在停在哪 / 下一步走哪条 / 还差什么 */}
+            <RunStatusStrip graph={graph} statuses={statuses} running={running} />
 
             {recoveries.length > 0 && (
               <div className="pointer-events-none absolute right-2 bottom-2 flex flex-col items-end gap-1">
@@ -698,19 +823,39 @@ export function GraphPane(): ReactNode {
           onResize={(size) => rememberEditorHeight(size.inPixels)}
           style={{ overflow: 'hidden' }}
         >
-          <div className="h-full overflow-auto bg-panel">
-            {selected ? (
-              <EdgeEditor key={selected.id} deviceId={activeId} edge={selected} graph={graph} />
-            ) : selectedNode ? (
-              <NodeEditor key={selectedNode.id} deviceId={activeId} node={selectedNode} graph={graph} />
-            ) : (
-              <div
-                className="truncate px-2 py-1 text-badge text-faint"
-                title="点画布上的节点或边，编辑区在这里展开；拖上面那道横线也能拉开/收起"
-              >
-                点画布上的节点或边，编辑区在这里展开（拖上面那道横线也能拉开/收起）
-              </div>
-            )}
+          <div className="flex h-full flex-col bg-panel">
+            {/* 显式 展开/收起 + 当前在编辑什么（收起时也看得见） */}
+            <DockBar
+              panelRef={editorRef}
+              title={
+                selected
+                  ? `这一步操作 · ${selected.from ?? '?'} → ${selected.to ?? '原地'}`
+                  : selectedNode
+                    ? `界面 · ${selectedNode.name}`
+                    : '详情'
+              }
+              subtitle={
+                selected
+                  ? selected.action
+                  : selectedNode
+                    ? `${selectedNode.enter.length} 个进入识别器`
+                    : '未选中任何节点/边'
+              }
+            />
+            <div className="min-h-0 flex-1 overflow-auto">
+              {selected ? (
+                <EdgeEditor key={selected.id} deviceId={activeId} edge={selected} graph={graph} />
+              ) : selectedNode ? (
+                <NodeEditor key={selectedNode.id} deviceId={activeId} node={selectedNode} graph={graph} />
+              ) : (
+                <div
+                  className="truncate px-2 py-1 text-badge text-faint"
+                  title="点画布上的节点或边，编辑区在这里展开；拖上面那道横线也能拉开/收起"
+                >
+                  点画布上的节点或边，编辑区在这里展开（拖上面那道横线也能拉开/收起）
+                </div>
+              )}
+            </div>
           </div>
         </Panel>
       </Group>
