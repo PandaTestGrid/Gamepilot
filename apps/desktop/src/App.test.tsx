@@ -27,7 +27,7 @@ describe('主壳渲染', () => {
     expect(screen.getByText('录制')).toBeInTheDocument();
 
     expect(screen.getByText('画面')).toBeInTheDocument();
-    expect(screen.getByText('状态图')).toBeInTheDocument();
+    expect(screen.getAllByText('状态图').length).toBeGreaterThan(0);
     // 右栏 = Tab（脚本库 / 识别器）；事件流搬到了底部调试抽屉，Tab 名是「事件流」
     expect(screen.getByText('脚本库')).toBeInTheDocument();
     expect(screen.getByText('识别器')).toBeInTheDocument();

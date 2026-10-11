@@ -28,6 +28,7 @@ import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
 import { NodeEditor } from '@/features/graph/NodeEditor';
+import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
 
 import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
@@ -86,6 +87,8 @@ const EDITOR_COLLAPSED_PX = 28;
 const EDITOR_MIN_PX = 72;
 
 export function GraphPane(): ReactNode {
+  // 状态图 / 脚本：同一份数据的两种看法（一个看结构、一个看执行顺序）
+  const [view, setView] = useState<'graph' | 'script'>('graph');
   const activeId = useDeviceStore((state) => state.activeId);
   const graph = useGraphStore((state) => state.graphs[activeId]);
   const moveNode = useGraphStore((state) => state.moveNode);
@@ -268,6 +271,20 @@ export function GraphPane(): ReactNode {
           <RunButton size="compact" />
           <span className="mx-0.5 h-3 w-px bg-line" />
           <GhostButton
+            active={view === 'graph'}
+            onClick={() => setView('graph')}
+            title="看结构：界面与操作怎么连"
+          >
+            状态图
+          </GhostButton>
+          <GhostButton
+            active={view === 'script'}
+            onClick={() => setView('script')}
+            title="看执行顺序：第一步做什么、第二步做什么"
+          >
+            脚本
+          </GhostButton>
+          <GhostButton
             onClick={() => {
               void createNode(activeId, `界面${(graph?.nodes.length ?? 0) + 1}`).then((nodeId) => {
                 if (nodeId) {
@@ -309,6 +326,8 @@ export function GraphPane(): ReactNode {
                 <span>这台设备还没有状态图</span>
                 <span>先连接设备，然后在画面栏点「框选」，在画面上拖一个矩形即生成第一个节点</span>
               </div>
+            ) : view === 'script' ? (
+              <ScriptStepsView graph={graph} />
             ) : (
               <ReactFlow
                 nodes={nodes}

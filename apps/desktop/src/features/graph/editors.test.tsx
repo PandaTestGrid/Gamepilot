@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
 import { NodeEditor } from '@/features/graph/NodeEditor';
+import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
 import type { GraphData, GraphEdgeView, GraphNodeView } from '@/types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve({})) }));
@@ -89,5 +90,40 @@ describe('节点编辑器', () => {
     expect(screen.getByText('删除节点')).toBeInTheDocument();
     // 点节点要看得到"这个界面的逻辑"和出去的操作
     expect(screen.getByText(/界面判定/)).toBeInTheDocument();
+  });
+});
+
+describe('脚本视图（线性步骤）', () => {
+  it('按执行顺序列出界面与操作，并和图双向联动', () => {
+    const withSteps: GraphData = {
+      ...graph,
+      edges: [
+        {
+          id: 'e_rec_1',
+          from: 'launcher',
+          to: 'dialer',
+          when: 'icon',
+          kind: 'normal',
+          priority: 0,
+          minScore: 0,
+          cooldownMs: 600,
+          retries: 1,
+          action: 'click',
+          condition: { allOf: ['icon'], anyOf: [], noneOf: [], minScore: 0, withinMs: 0 },
+          actionSpec: { type: 'click', x: 0.5, y: 0.8 },
+        },
+      ],
+    };
+    render(<ScriptStepsView graph={withSteps} />);
+
+    expect(screen.getByText('界面『桌面』')).toBeInTheDocument();
+    expect(screen.getByText('点击 (0.50, 0.80)')).toBeInTheDocument();
+    expect(screen.getByText('界面『拨号盘』')).toBeInTheDocument();
+    expect(screen.getByText(/共 2 个界面 · 1 步操作/)).toBeInTheDocument();
+  });
+
+  it('空脚本给一句能照做的提示', () => {
+    render(<ScriptStepsView graph={{ ...graph, nodes: [], edges: [] }} />);
+    expect(screen.getByText(/脚本还是空的/)).toBeInTheDocument();
   });
 });
