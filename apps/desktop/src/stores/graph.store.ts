@@ -7,6 +7,7 @@
 import { create } from 'zustand';
 
 import { toGraphData } from '@/lib/graph-adapter';
+import { preloadTemplates } from '@/stores/template.store';
 import {
   graphGet,
   graphEdgeAdd,
@@ -171,11 +172,15 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
 
   selectEdge: (edgeId) => set({ selectedEdgeId: edgeId, selectedNodeId: null }),
 
-  setGraph: (deviceId, graph, raw) =>
+  setGraph: (deviceId, graph, raw) => {
+    // 状态图一到手就预取模板截图：画布上的缩略图、底部详情、识别器面板共用同一份缓存，
+    // 免得每个组件各请求一次（引擎保存重载时的瞬时失败会让它们同时变成"×"，看着像模板丢了）
+    preloadTemplates(graph.recognizers.map((item) => item.label));
     set((state) => ({
       graphs: { ...state.graphs, [deviceId]: graph },
       raws: raw ? { ...state.raws, [deviceId]: raw } : state.raws,
-    })),
+    }));
+  },
 
   saveEdge: async (deviceId, edgeId, patch) => {
     const state = get();

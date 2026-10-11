@@ -127,6 +127,7 @@ export type TraceEventType =
   | 'device_reconnected'
   | 'device_scan'
   | 'recognizer_added'
+  | 'recognizer_renamed'
   | 'node_added'
   | 'edge_added'
   | 'error';

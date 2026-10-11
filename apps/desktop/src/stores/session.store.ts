@@ -31,6 +31,7 @@ import {
   type GraphPayload,
   onEngineMessage,
   recordTemplate as recordTemplateRpc,
+  renameRecognizer as renameRecognizerRpc,
   runStart,
   runStop,
   setRecognizerThreshold,
@@ -74,6 +75,12 @@ interface SessionState {
   readonly stopRun: (deviceId: string) => Promise<void>;
   readonly record: (deviceId: string, draft: RecordDraft) => Promise<void>;
   readonly setThreshold: (deviceId: string, label: string, threshold: number) => Promise<void>;
+  /** 识别器改名：引擎级联改掉所有引用，返回改了几处（界面拿它做提示） */
+  readonly renameRecognizer: (
+    deviceId: string,
+    label: string,
+    to: string,
+  ) => Promise<{ refs: { nodes: number; edges: number; scores: number } } | null>;
   readonly isReady: (deviceId: string) => boolean;
   readonly clearError: () => void;
   /** blob 渲染失败时改用 data URL（保证画面一定显示得出来） */
@@ -422,6 +429,29 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       await setRecognizerThreshold(deviceId, label, threshold);
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
+    }
+  },
+
+  renameRecognizer: async (deviceId, label, to) => {
+    try {
+      const result = await renameRecognizerRpc(deviceId, label, to);
+      // 引擎把改完的整张图返回来了（引用都改好了）：直接换掉本地图，别自己拼
+      applyGraph(deviceId, result.graph, get().frames[deviceId]);
+      const changed = result.refs.nodes + result.refs.edges + result.refs.scores;
+      useEventStore.getState().append(deviceId, 'recognizer_renamed', {
+        node: label,
+        message:
+          `${result.from} → ${result.to}` +
+          (changed > 0
+            ? `（顺带更新 ${result.refs.nodes} 个界面 / ${result.refs.edges} 条边 / ${result.refs.scores} 处 $score 引用）`
+            : '（没有被引用，只改了名字）'),
+      });
+      return { refs: result.refs };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ error: message });
+      useEventStore.getState().append(deviceId, 'error', { message: `改名失败: ${message}` });
+      return null;
     }
   },
 

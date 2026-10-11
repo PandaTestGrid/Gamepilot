@@ -25,6 +25,7 @@ import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
 import { NodeEditor } from '@/features/graph/NodeEditor';
+import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContextMenu';
 import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
@@ -34,6 +35,7 @@ import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell } from '@/layout/PanelShell';
 import { RunButton } from '@/layout/RunButton';
 import { useDeviceStore } from '@/stores/device.store';
+import type { EdgeAction } from '@/types';
 import { toGraphData } from '@/lib/graph-adapter';
 import { actionPins, summarizePins } from '@/lib/action-pins';
 import { type EdgeStatus, evaluateEdge, markShadowed } from '@/lib/edge-status';
@@ -65,9 +67,34 @@ export function GraphPane(): ReactNode {
   // 直接用 [graph] 当依赖的话，每帧的实时分数更新都会造出一批新节点对象，
   // React Flow 是被控模式，拖动过程中会被新 props 按回旧坐标 —— 表现就是"拖不动/不跟手"。
   // 引脚内容也要进签名：改了动作参数或选中项，节点要重建
+  const recognizerSignature = (graph?.recognizers ?? [])
+    .map((item) => `${item.label}:${item.template ?? ''}:${item.type}`)
+    .join(';');
+  const templateSignature = recognizerSignature;
   const pinSignature = `${selectedNodeId ?? ''}|${(graph?.edges ?? [])
     .map((edge) => `${edge.id}:${JSON.stringify(edge.actionSpec)}`)
     .join(';')}`;
+  /** 有模板截图的识别器（画布上只给这些画缩略图；颜色/OCR 识别器没有图） */
+  const templateLabels = useMemo(
+    () =>
+      new Set(
+        (graph?.recognizers ?? [])
+          .filter((item) => item.type === 'template' && item.template)
+          .map((item) => item.label),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 用签名代替：识别器数组每帧都会换新对象
+    [recognizerSignature],
+  );
+
+  /** 动作的目标识别器（有模板的话，画布上给这一步配张截图） */
+  const actionTargetTemplate = useCallback(
+    (action: EdgeAction | undefined): string | undefined => {
+      const target = action?.target;
+      return target && templateLabels.has(target) ? target : undefined;
+    },
+    [templateLabels],
+  );
+
   // 选中态也算进签名：点节点要给"正在编辑的是哪个"画出边框（点击不会发生在拖拽中，安全）
   const nodeSignature = (graph?.nodes ?? [])
     .map((node) => `${node.id}:${node.x},${node.y},${node.name},${node.enter.join('|')}`)
@@ -89,6 +116,8 @@ export function GraphPane(): ReactNode {
   // 鼠标停在哪条边上：边的线宽是**内联样式**（每条边按状态上色），CSS 的 :hover 盖不住，
   // 所以悬停反馈只能走 React 状态（顺带能在单测里断言）
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
+  // 右键菜单：空白 / 节点 / 边 三种目标各一套（内容见 openPaneMenu/openNodeMenu/openEdgeMenu）
+  const [menu, setMenu] = useState<MenuAnchor | null>(null);
   const onNodesChange = useCallback((changes: NodeChange<StateNodeType>[]) => {
     setDragging((current) => {
       let next = current;
@@ -118,12 +147,18 @@ export function GraphPane(): ReactNode {
           sub: node.id,
           deviceId: activeId,
           expanded: node.id === selectedNodeId,
+          // 这个界面靠哪些模板认出来（画布上直接显示缩略图："主界面长这样"）
+          enterTemplates: node.enter.filter((label) => templateLabels.has(label)),
+          // 图里所有有截图的模板：节点上就地挂/摘"进入识别器"
+          allTemplates: [...templateLabels],
           pins: (graph?.edges ?? [])
             .filter((edge) => edge.from === node.id)
             .map((edge) => ({
               key: edge.id,
               title: describeAction(edge.actionSpec, true),
               action: edge.actionSpec,
+              // 这一步点的是哪个模板（有截图就直接画在画布上，不用去翻识别器面板）
+              template: actionTargetTemplate(edge.actionSpec),
               pins: summarizePins(actionPins(edge.actionSpec)),
             })),
           visits: node.visits,
@@ -132,7 +167,7 @@ export function GraphPane(): ReactNode {
         },
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 用签名代替 graph 整体：实时分数不该触发重建
-    [nodeSignature, pinSignature, dragging],
+    [nodeSignature, pinSignature, dragging, templateSignature],
   );
 
   // 每条边"现在走不走得通"：调试脚本时一眼看出卡在哪（纯逻辑在 lib/edge-status.ts）
@@ -195,6 +230,123 @@ export function GraphPane(): ReactNode {
       });
     // 上色跟着实时状态走，否则运行时边的颜色不会变；选中态也要跟着（编辑器换了一条边）
   }, [graph, statuses, selectedEdgeId, hoveredEdge]);
+
+  /** 空白画布右键：在鼠标处新建界面节点。 */
+  const openPaneMenu = useCallback(
+    (event: React.MouseEvent | MouseEvent, flow: { x: number; y: number }) => {
+      setMenu({
+        kind: 'pane',
+        flow,
+        screen: { x: event.clientX, y: event.clientY },
+        title: '空白处',
+        items: [
+          {
+            label: '新建界面节点',
+            hint: '在这里',
+            onSelect: () => {
+              void createNode(activeId, `界面${(graph?.nodes.length ?? 0) + 1}`).then((nodeId) => {
+                if (nodeId) {
+                  moveNode(activeId, nodeId, Math.round(flow.x), Math.round(flow.y));
+                  selectNode(nodeId);
+                }
+              });
+            },
+          },
+          { label: '新建界面节点并挂上第一个模板', onSelect: () => void createNode(activeId, '新界面') },
+        ],
+      });
+    },
+    [activeId, createNode, graph?.nodes.length, moveNode, selectNode],
+  );
+
+  /** 节点右键：加操作 / 加分支 / 重命名 / 删除（参数编辑仍在下方详情里）。 */
+  const openNodeMenu = useCallback(
+    (event: React.MouseEvent | MouseEvent, nodeId: string, label: string) => {
+      setMenu({
+        kind: 'node',
+        id: nodeId,
+        flow: { x: 0, y: 0 },
+        screen: { x: event.clientX, y: event.clientY },
+        title: `节点 ${label}`,
+        items: [
+          {
+            label: '加一步操作',
+            hint: '原地动作',
+            onSelect: () => {
+              void connectNodes(activeId, nodeId, nodeId).then(() => {
+                const edges = useGraphStore.getState().graphs[activeId]?.edges ?? [];
+                const created = edges.filter((edge) => edge.from === nodeId).at(-1);
+                if (created) {
+                  selectEdge(created.id);
+                }
+              });
+            },
+          },
+          {
+            label: '加分支（出现 → A，不出现 → B）',
+            onSelect: () => {
+              const other = (graph?.nodes ?? []).find((item) => item.id !== nodeId)?.id;
+              const recognizer = (graph?.recognizers ?? [])[0]?.label;
+              if (!other || !recognizer) {
+                useSessionStore.setState({ error: '加分支需要：至少两个界面 + 一个识别器' });
+                return;
+              }
+              void addBranch(activeId, nodeId, recognizer, other, nodeId);
+            },
+          },
+          {
+            label: '重命名（也可以双击节点）',
+            onSelect: () => selectNode(nodeId),
+          },
+          {
+            label: '跳到详情面板',
+            divider: true,
+            onSelect: () => selectNode(nodeId),
+          },
+          {
+            label: '删除这个界面',
+            danger: true,
+            onSelect: () => {
+              void removeNode(activeId, nodeId);
+              selectNode(null);
+            },
+          },
+        ],
+      });
+    },
+    [activeId, addBranch, connectNodes, graph?.nodes, graph?.recognizers, removeNode, selectEdge, selectNode],
+  );
+
+  /** 边右键：改这一步（滚到动作区）/ 删除这条边。 */
+  const openEdgeMenu = useCallback(
+    (event: React.MouseEvent | MouseEvent, edgeId: string, label: string) => {
+      setMenu({
+        kind: 'edge',
+        id: edgeId,
+        flow: { x: 0, y: 0 },
+        screen: { x: event.clientX, y: event.clientY },
+        title: `步骤 ${label}`,
+        items: [
+          {
+            label: '改这一步的参数',
+            hint: '详情面板',
+            onSelect: () => {
+              selectEdge(edgeId);
+              focusEdgeAction();
+            },
+          },
+          {
+            label: '删除这一步',
+            danger: true,
+            onSelect: () => {
+              void removeEdge(activeId, edgeId);
+            },
+          },
+        ],
+      });
+    },
+    [activeId, focusEdgeAction, removeEdge, selectEdge],
+  );
 
   /** 让底部边编辑器把"动作"区滚进视野（双击边时用）。 */
   const focusEdgeAction = useCallback(() => {
@@ -372,6 +524,19 @@ export function GraphPane(): ReactNode {
                     void connectNodes(activeId, connection.source, connection.target);
                   }
                 }}
+                onPaneContextMenu={(event) => {
+                  const mouse = event as unknown as MouseEvent;
+                  const flow = screenToFlowPosition({ x: mouse.clientX, y: mouse.clientY });
+                  openPaneMenu(mouse, flow);
+                }}
+                onNodeContextMenu={(event, node) => {
+                  selectNode(node.id);
+                  openNodeMenu(event as unknown as MouseEvent, node.id, String(node.data.label ?? node.id));
+                }}
+                onEdgeContextMenu={(event, edge) => {
+                  selectEdge(edge.id);
+                  openEdgeMenu(event as unknown as MouseEvent, edge.id, String(edge.label ?? edge.id));
+                }}
                 onPaneClick={() => {
                   selectEdge(null);
                   selectNode(null);
@@ -410,6 +575,8 @@ export function GraphPane(): ReactNode {
                 </button>
               )}
             </div>
+
+            {menu && <GraphContextMenu anchor={menu} onClose={() => setMenu(null)} />}
 
             {recoveries.length > 0 && (
               <div className="pointer-events-none absolute right-2 bottom-2 flex flex-col items-end gap-1">

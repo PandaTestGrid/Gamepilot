@@ -320,6 +320,23 @@ export function removeRecognizer(deviceId: string, label: string): Promise<{ rem
   return rpc<{ removed: string }>('recognizer.remove', { deviceId, label });
 }
 
+/** 识别器改名（引用由引擎级联改掉：节点进入条件 / 边条件 / 动作目标 / $score） */
+export interface RenameRecognizerResult {
+  readonly from: string;
+  readonly to: string;
+  /** 顺带改动了几处引用（nodes / edges / scores） */
+  readonly refs: { readonly nodes: number; readonly edges: number; readonly scores: number };
+  readonly graph: GraphPayload;
+}
+
+export function renameRecognizer(
+  deviceId: string,
+  label: string,
+  to: string,
+): Promise<RenameRecognizerResult> {
+  return rpc<RenameRecognizerResult>('recognizer.rename', { deviceId, label, to });
+}
+
 /** macOS 本机窗口列表（界面上的窗口选择器；也可手动输句柄） */
 export interface MacWindowInfo {
   readonly handle: number;

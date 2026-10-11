@@ -23,6 +23,7 @@ const TONE: Partial<Record<TraceEventType, DotTone>> = {
   error: 'failed',
   device_reconnected: 'confirmed',
   recognizer_added: 'confirmed',
+  recognizer_renamed: 'confirmed',
   node_added: 'confirmed',
   edge_added: 'confirmed',
 };

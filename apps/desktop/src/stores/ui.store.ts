@@ -34,6 +34,9 @@ interface UiState {
   /** 录操作：把画面上的每次点击/滑动录成脚本里的一步 */
   readonly recordActionMode: boolean;
   readonly toggleRecordAction: () => void;
+  /** 画面栏「识别读数」列表的筛选：全部（默认）/ 只看命中的 */
+  readonly readoutFilter: ReadoutFilter;
+  readonly setReadoutFilter: (filter: ReadoutFilter) => void;
   readonly toggleDevicePopover: (open?: boolean) => void;
   readonly setDeviceTab: (tab: DeviceTabId) => void;
   readonly setRightTab: (tab: RightTab) => void;

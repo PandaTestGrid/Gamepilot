@@ -16,6 +16,7 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { type ReactNode, useState } from 'react';
 
+import { TemplateMini } from '@/features/recognizers/TemplateThumb';
 import { PIN_KEYS, togglePin } from '@/lib/param-vars';
 import type { ActionPin } from '@/lib/action-pins';
 import { toActionPayload } from '@/lib/graph-adapter';
@@ -27,11 +28,17 @@ export interface StateNodeData extends Record<string, unknown> {
   label: string;
   sub: string;
   deviceId: string;
+  /** 这个界面靠哪些模板认出来（有截图的才列）——画布上直接画缩略图 */
+  enterTemplates?: readonly string[];
+  /** 图里所有有截图的模板（节点上就地挂/摘识别器时用） */
+  allTemplates?: readonly string[];
   /** 这个界面的出口操作（选中时摊开成"引脚"） */
   pins: ReadonlyArray<{
     key: string;
     title: string;
     action: EdgeAction;
+    /** 这一步点的是哪个模板（有截图就在画布上给一张） */
+    template?: string;
     pins: readonly ActionPin[];
   }>;
   expanded?: boolean;
@@ -56,6 +63,12 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
   const graphVariables = useGraphStore((state) => state.graphs[String(data.deviceId)])?.variables ?? [];
   // 双击就地改名：这是最常用的一次编辑，不该每次都跑到下面的面板
   const updateNode = useGraphStore((state) => state.updateNode);
+  // 就地改"进入识别器"与加操作（不用每次都跑到下面的详情面板）
+  const enterLabels = useGraphStore(
+    (state) => state.graphs[String(data.deviceId)]?.nodes.find((node) => node.id === data.sub)?.enter,
+  );
+  const addEdge = useGraphStore((state) => state.connectNodes);
+  const selectEdge = useGraphStore((state) => state.selectEdge);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(data.label);
 
@@ -119,12 +132,74 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
       ) : (
         <div className="truncate text-body">{data.label}</div>
       )}
-      <div className="text-badge text-faint">
-        {data.sub} · {data.visits} 次
+      <div className="flex items-center gap-1 text-badge text-faint">
+        {/* 这个界面靠哪些模板认出来：画布上直接给截图，一眼看出"主界面长这样" */}
+        {(data.enterTemplates ?? []).map((label) => (
+          <TemplateMini key={label} label={label} size={20} />
+        ))}
+        <span className="truncate">
+          {data.sub} · {data.visits} 次
+        </span>
       </div>
+
+      {/* 选中的节点：就地改配置 —— 挂/摘"进入识别器"、加一步操作 */}
+      {data.expanded && (
+        <div className="mt-1 flex flex-col gap-0.5 border-t border-line/60 pt-1">
+          <div className="flex flex-wrap items-center gap-0.5">
+            <span className="text-badge text-faint">认得这个界面：</span>
+            {(data.allTemplates ?? []).map((label) => {
+              const on = (enterLabels ?? []).includes(label);
+              return (
+                <button
+                  key={label}
+                  type="button"
+                  title={on ? `摘掉 ${label}（不再用它认这个界面）` : `挂上 ${label}（命中就认为在这个界面）`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    const next = on
+                      ? (enterLabels ?? []).filter((item) => item !== label)
+                      : [...(enterLabels ?? []), label];
+                    void updateNode(String(data.deviceId), data.sub, { enter: next });
+                  }}
+                  className={cn(
+                    'flex items-center gap-0.5 rounded-sm border px-0.5 text-badge',
+                    on ? 'border-confirmed text-confirmed' : 'border-line text-faint hover:text-fg',
+                  )}
+                >
+                  <TemplateMini label={label} size={14} />
+                  {label}
+                </button>
+              );
+            })}
+            {(data.allTemplates ?? []).length === 0 && (
+              <span className="text-badge text-faint">（还没有模板：先去画面栏框选录制）</span>
+            )}
+          </div>
+          <button
+            type="button"
+            title="从这一步加一个动作（原地动作：不切界面）；加完在下方详情里改参数"
+            onClick={(event) => {
+              event.stopPropagation();
+              void addEdge(String(data.deviceId), data.sub, data.sub).then(() => {
+                const edges = useGraphStore.getState().graphs[String(data.deviceId)]?.edges ?? [];
+                const created = edges.filter((edge) => edge.from === data.sub).at(-1);
+                if (created) {
+                  selectEdge(created.id);
+                }
+              });
+            }}
+            className="self-start rounded-sm border border-line px-1 text-badge text-dim hover:bg-raised hover:text-fg"
+          >
+            + 操作
+          </button>
+        </div>
+      )}
+
       {showPins &&
         data.pins.map((item) => (
           <div key={item.key} className="mt-0.5 flex flex-wrap items-center gap-0.5">
+            {/* 这一步点的是哪个图标：画布上直接给缩略图，不用去翻识别器面板 */}
+            {item.template && <TemplateMini label={item.template} size={18} />}
             <span className="text-badge text-dim">{item.title}</span>
             {item.pins.map((pin) => (
               <button

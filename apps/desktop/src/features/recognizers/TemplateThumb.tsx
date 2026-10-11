@@ -1,56 +1,42 @@
 /**
  * 模版缩略图：小图列表里看得清、鼠标一放就弹大图。
  *
- * 之前只有 22~26px，录制出来的模板根本看不清（用户反馈"太小了"）。现在：
- * - 小图放大到 40px 起步，并按"像素化"渲染：模板本身可能很小，放大后不该是糊的
- * - **悬停弹出大预览**（200px，固定定位，不会被面板裁切）：看清录的是什么
- * - 点一下仍然切黑白（模板匹配本来就是按灰度算的）
+ * 数据来自 `stores/template.store.ts` 的**进程级缓存**（一张模板只取一次）：
+ * 以前每个缩略图各自取图，组件一重挂就重新请求 —— 引擎保存重载的那一瞬间失败，
+ * 所有缩略图会同时变成"×"，也就是用户说的"拖动后模板突然都没了"。
+ * 现在：取到过的图不会再消失；只有从没成功过才算失败，而且**点一下可以重试**。
+ *
+ * 交互：
+ * - 小图按"像素化"渲染（模板本身可能很小，放大后不该是糊的）
+ * - 悬停弹出 200px 大预览（固定定位，不会被面板裁切）
+ * - 点一下切黑白（模板匹配本来就是按灰度算的）
  */
 import { type ReactNode, useEffect, useState } from 'react';
 
-import { templateImage } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
+import { useTemplateStore } from '@/stores/template.store';
 
 export function TemplateThumb({ label, size = 26 }: { label: string; size?: number }): ReactNode {
   const [grayscale, setGrayscale] = useState(false);
-  const [cache, setCache] = useState<Record<string, string>>({});
-  const [failed, setFailed] = useState(false);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
 
   const key = `${label}:${grayscale ? 'gray' : 'color'}`;
+  const entry = useTemplateStore((state) => state.entries[key]);
+  const load = useTemplateStore((state) => state.load);
+  const retry = useTemplateStore((state) => state.retry);
 
   useEffect(() => {
-    if (cache[key]) {
-      return;
-    }
-    let alive = true;
-    void templateImage(label, grayscale)
-      .then((data) => {
-        // 引擎返回 { label, mode, width, height, png }：图片在 png 字段（data URL）
-        const url = typeof data === 'string' ? data : String((data as { png?: string })?.png ?? '');
-        if (alive && url) {
-          setCache((current) => ({ ...current, [key]: url }));
-        } else if (alive) {
-          setFailed(true);
-        }
-      })
-      .catch(() => {
-        if (alive) {
-          setFailed(true);
-        }
-      });
-    return () => {
-      alive = false;
-    };
-  }, [cache, grayscale, key, label]);
+    load(label, grayscale);
+  }, [label, grayscale, load]);
 
-  const src = cache[key];
+  const src = entry?.url;
+  const failed = Boolean(entry?.error) && !src;
 
   return (
     <>
       <button
         type="button"
-        title={`${label}（点一下切黑白，悬停看大图）`}
+        title={failed ? `${label}：取图失败 —— 点一下重试` : `${label}（点一下切黑白，悬停看大图）`}
         onMouseEnter={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
           setHover({ x: rect.right + 8, y: rect.top });
@@ -58,12 +44,16 @@ export function TemplateThumb({ label, size = 26 }: { label: string; size?: numb
         onMouseLeave={() => setHover(null)}
         onClick={(event) => {
           event.stopPropagation();
+          if (failed) {
+            retry(label, grayscale); // 失败态下点击 = 重试（不再"一次失败就永远 ×"）
+            return;
+          }
           setGrayscale((value) => !value);
         }}
         style={{ width: size, height: size }}
         className={cn(
-          'shrink-0 overflow-hidden rounded-sm border border-line bg-canvas',
-          'hover:border-brand',
+          'shrink-0 overflow-hidden rounded-sm border bg-canvas',
+          failed ? 'border-failed/60' : 'border-line hover:border-brand',
         )}
       >
         {src ? (
@@ -74,8 +64,13 @@ export function TemplateThumb({ label, size = 26 }: { label: string; size?: numb
             className="size-full object-contain"
           />
         ) : (
-          <span className="flex size-full items-center justify-center text-badge text-faint">
-            {failed ? '×' : '…'}
+          <span
+            className={cn(
+              'flex size-full items-center justify-center text-badge',
+              failed ? 'text-failed' : 'text-faint',
+            )}
+          >
+            {failed ? '↻' : '…'}
           </span>
         )}
       </button>
@@ -98,5 +93,37 @@ export function TemplateThumb({ label, size = 26 }: { label: string; size?: numb
         </span>
       )}
     </>
+  );
+}
+
+/**
+ * 画布/引脚上用的极简版本：只画图，不带外框与交互
+ * （画布上的鼠标要留给拖动节点，缩略图不能抢事件）。
+ */
+export function TemplateMini({ label, size = 22 }: { label: string; size?: number }): ReactNode {
+  const entry = useTemplateStore((state) => state.entries[`${label}:color`]);
+  const load = useTemplateStore((state) => state.load);
+
+  useEffect(() => {
+    load(label, false);
+  }, [label, load]);
+
+  return (
+    <span
+      title={`模板 ${label}`}
+      style={{ width: size, height: size }}
+      className="pointer-events-none inline-flex shrink-0 items-center justify-center overflow-hidden rounded-sm border border-line bg-canvas"
+    >
+      {entry?.url ? (
+        <img
+          src={entry.url}
+          alt={label}
+          style={{ imageRendering: 'pixelated' }}
+          className="size-full object-contain"
+        />
+      ) : (
+        <span className="text-[9px] text-faint">{entry?.error ? '·' : '…'}</span>
+      )}
+    </span>
   );
 }
