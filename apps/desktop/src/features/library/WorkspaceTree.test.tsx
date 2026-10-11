@@ -70,13 +70,17 @@ describe('工作区树', () => {
     expect(switchProject).toHaveBeenCalledWith('/p/阴阳师/百鬼');
   });
 
-  it('「＋状态图」建在当前项目目录下（base 传对）', async () => {
+  it('「＋状态图」弹内联表单（不是 window.prompt），提交后建在当前项目目录下', async () => {
     const user = userEvent.setup();
-    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('新图');
     render(<WorkspaceTree />);
     await user.click(await screen.findByTitle('在这个项目下新建状态图'));
+
+    // 内联表单出现（Tauri 的 webview 不支持 window.prompt，所以绝不能用它）
+    const input = await screen.findByPlaceholderText(/例如/);
+    await user.type(input, '新图');
+    await user.click(screen.getByRole('button', { name: /创建/ }));
+
     expect(projectCreate).toHaveBeenCalledWith('新图', '/p/阴阳师');
-    prompt.mockRestore();
   });
 
   it('目录树为空时不崩（渲染空壳）', async () => {

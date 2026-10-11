@@ -17,6 +17,7 @@ import {
   type TreeProject,
 } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
+import { ScriptNameForm } from '@/features/library/ScriptNameForm';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
 
@@ -30,6 +31,12 @@ export function WorkspaceTree(): ReactNode {
   const remove = useLibraryStore((state) => state.remove);
   const [groups, setGroups] = useState<TreeProject[]>([]);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  // 内联表单：**不能用 window.prompt** —— Tauri 的系统 webview 不实现它，点了没反应（踩过）
+  const [pending, setPending] = useState<{
+    kind: 'workspace' | 'project' | 'task' | 'rename' | 'duplicate';
+    dir?: string;
+    initial?: string;
+  } | null>(null);
 
   const load = async (): Promise<void> => {
     try {
@@ -45,9 +52,33 @@ export function WorkspaceTree(): ReactNode {
     void Promise.resolve().then(load);
   }, [currentRoot]);
 
-  const ask = (title: string, fallback = ''): string | null => {
-    const value = window.prompt(title, fallback);
-    return value && value.trim() ? value.trim() : null;
+  const submit = (name: string): void => {
+    const form = pending;
+    setPending(null);
+    if (!form) {
+      return;
+    }
+    const done = (): void => void load();
+    const fail = (reason: unknown): void => devLog(String(reason));
+    if (form.kind === 'workspace') {
+      void workspaceCreate(name).then(done).catch(fail);
+    } else if (form.kind === 'project') {
+      void workspaceMkdir(form.dir ?? '', name)
+        .then(done)
+        .catch(fail);
+    } else if (form.kind === 'task') {
+      void projectCreate(name, form.dir ?? '')
+        .then(done)
+        .catch(fail);
+    } else if (form.kind === 'rename') {
+      void rename(form.dir ?? '', name)
+        .then(done)
+        .catch(fail);
+    } else {
+      void duplicate(form.dir ?? '', name)
+        .then(done)
+        .catch(fail);
+    }
   };
 
   return (
@@ -58,18 +89,35 @@ export function WorkspaceTree(): ReactNode {
           type="button"
           title="新建工作区（最外层，例如「游戏自动化」）"
           onClick={() => {
-            const name = ask('新工作区名字（最外层，例如「游戏自动化」）');
-            if (name) {
-              void workspaceCreate(name)
-                .then(load)
-                .catch((reason: unknown) => devLog(String(reason)));
-            }
+            setPending({ kind: 'workspace' });
           }}
           className="ml-auto rounded-sm border border-line px-1.5 text-dim hover:bg-raised hover:text-fg"
         >
           ＋工作区
         </button>
       </div>
+
+      {pending && (
+        <div className="border-b border-line px-1 py-1">
+          <ScriptNameForm
+            title={
+              pending.kind === 'workspace'
+                ? '新建工作区（最外层，例如「游戏自动化」）'
+                : pending.kind === 'project'
+                  ? '新建项目（一个游戏/一个空间，例如「阴阳师」）'
+                  : pending.kind === 'task'
+                    ? '新建状态图（一个状态图 = 一个脚本目录）'
+                    : pending.kind === 'rename'
+                      ? '重命名'
+                      : '复制一份'
+            }
+            initial={pending.initial ?? ''}
+            submitLabel={pending.kind === 'rename' ? '改名' : '创建'}
+            onSubmit={submit}
+            onCancel={() => setPending(null)}
+          />
+        </div>
+      )}
 
       {groups.map((workspace) => (
         <div key={workspace.name} className="w-full min-w-0">
@@ -98,12 +146,7 @@ export function WorkspaceTree(): ReactNode {
                     type="button"
                     title="在这个项目下新建状态图"
                     onClick={() => {
-                      const name = ask('新状态图名字（一个状态图 = 一个脚本目录）');
-                      if (name) {
-                        void projectCreate(name, project.root)
-                          .then(load)
-                          .catch((reason: unknown) => devLog(String(reason)));
-                      }
+                      setPending({ kind: 'task', dir: project.root });
                     }}
                     className="shrink-0 rounded-sm border border-line px-1 text-dim opacity-0 group-hover:opacity-100 hover:bg-raised hover:text-fg"
                   >
@@ -140,10 +183,7 @@ export function WorkspaceTree(): ReactNode {
                               type="button"
                               title="重命名"
                               onClick={() => {
-                                const name = ask('改成什么名字', task.name);
-                                if (name) {
-                                  void rename(task.root, name).then(load);
-                                }
+                                setPending({ kind: 'rename', dir: task.root, initial: task.name });
                               }}
                               className="rounded-sm border border-line px-1 text-faint hover:text-fg"
                             >
@@ -153,10 +193,11 @@ export function WorkspaceTree(): ReactNode {
                               type="button"
                               title="复制一份"
                               onClick={() => {
-                                const name = ask('复制成什么名字', `${task.name}-副本`);
-                                if (name) {
-                                  void duplicate(task.root, name).then(load);
-                                }
+                                setPending({
+                                  kind: 'duplicate',
+                                  dir: task.root,
+                                  initial: `${task.name}-副本`,
+                                });
                               }}
                               className="rounded-sm border border-line px-1 text-faint hover:text-fg"
                             >
@@ -184,12 +225,7 @@ export function WorkspaceTree(): ReactNode {
             type="button"
             title="在这个工作区下新建项目（一个游戏/一个空间）"
             onClick={() => {
-              const name = ask('新项目名字（一个游戏/一个空间，例如「阴阳师」）');
-              if (name) {
-                void workspaceMkdir(workspace.root, name)
-                  .then(load)
-                  .catch((reason: unknown) => devLog(String(reason)));
-              }
+              setPending({ kind: 'project', dir: workspace.root });
             }}
             className={cn(ROW, 'pl-4 text-left text-faint')}
           >
