@@ -125,11 +125,23 @@ export function GraphPane(): ReactNode {
     [templateLabels],
   );
 
-  // 选中态也算进签名：点节点要给"正在编辑的是哪个"画出边框（点击不会发生在拖拽中，安全）
+  /*
+   * 画布上**框选**出来的界面（多选）。
+   *
+   * 为什么不并进 `selectedNodeId`：那个是"下方编辑器正在编辑哪一个"，永远只有一个；
+   * 框选是画布上的临时状态，可以有一串。两者取并集画边框。
+   * 也不放进 store：它不该跨设备/跨面板活着（换图就该清掉）。
+   */
+  const [selectedIds, setSelectedIds] = useState<readonly string[]>([]);
+
+  // 选中态也算进签名：点节点要给"正在编辑的是哪个"画出边框（点击不会发生在拖拽中，安全）；
+  // 框选出来的那一串同理 —— 它变了就要重建节点，否则边框不会跟着亮/灭
   const nodeSignature = (graph?.nodes ?? [])
     .map((node) => `${node.id}:${node.x},${node.y},${node.name},${node.enter.join('|')}`)
     .join(';')
-    .concat(`|${graph?.activeNodeId ?? ''}|${graph?.pendingNodeId ?? ''}|${selectedNodeId ?? ''}`);
+    .concat(
+      `|${graph?.activeNodeId ?? ''}|${graph?.pendingNodeId ?? ''}|${selectedNodeId ?? ''}|${selectedIds.join(',')}`,
+    );
 
   /*
    * 节点状态用**官方的 useNodesState**（等价于 `const [nodes, setNodes, onNodesChange]`）。
@@ -168,8 +180,9 @@ export function GraphPane(): ReactNode {
         return {
           id: node.id,
           type: 'state' as const,
-          // React Flow 自己的选中态跟 store 对齐：否则它会偷偷累积多选，拖动时整组一起动
-          selected: node.id === selectedNodeId,
+          // 选中态 = "编辑器里那个" ∪ "框选出来的"。必须显式喂给 React Flow：
+          // 每次同步（引擎每帧推数据）都会重建节点，不带上选中态的话，框选结果下一次同步就没了
+          selected: node.id === selectedNodeId || selectedIds.includes(node.id),
           // 正在拖的节点：位置归 React Flow（本地跟手）；其余以 store 为准（"重新布局"才生效）
           position: local?.dragging === true ? local.position : { x: node.x, y: node.y },
           /*
@@ -207,7 +220,7 @@ export function GraphPane(): ReactNode {
         };
       });
     },
-    [graph, activeId, selectedNodeId, templateLabels, actionTargetTemplate],
+    [graph, activeId, selectedNodeId, selectedIds, templateLabels, actionTargetTemplate],
   );
 
   // 只有"图的结构/内容/激活态"变了才同步（用签名当依赖，避免每帧重建节点）
@@ -499,6 +512,43 @@ export function GraphPane(): ReactNode {
     [persistPositions],
   );
 
+  /** 选中集合变了（框选 / 点节点 / shift 加选 / 点空白清空）——React Flow 是"真源"，这里只镜像一份给删除按钮用 */
+  const onSelectionChange = useCallback((params: { nodes: Array<{ id: string }> }): void => {
+    const ids = params.nodes.map((node) => node.id);
+    setSelectedIds((current) =>
+      current.length === ids.length && current.every((id, index) => id === ids[index]) ? current : ids,
+    );
+  }, []);
+
+  /**
+   * 删除一组界面（Delete 键 / 框选后的「删除选中」都走这里）。
+   *
+   * - **逐个删**：引擎每个节点一次 `graph.node.remove`（它会把连着的边一并删掉，见
+   *   `session.py: graph_node_remove`），所以这里不用自己先删边；
+   * - 先清选中态再发请求：否则删到一半时被删的节点还亮着边框，看着像卡住；
+   * - 正在下方编辑的那个被删了 → 收起编辑器（否则面板里编辑的是一个不存在的界面）。
+   */
+  const deleteSelection = useCallback(
+    async (ids: readonly string[]): Promise<void> => {
+      if (ids.length === 0) {
+        return;
+      }
+      devLog(`删除界面：${ids.join('、')}（${ids.length} 个）`);
+      setSelectedIds([]);
+      if (selectedNodeId && ids.includes(selectedNodeId)) {
+        selectNode(null);
+      }
+      for (const id of ids) {
+        try {
+          await removeNode(activeId, id);
+        } catch (error) {
+          devLog(`删不掉 ${id}：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    },
+    [activeId, removeNode, selectNode, selectedNodeId],
+  );
+
   const selected = (graph?.edges ?? []).find((edge) => edge.id === selectedEdgeId) ?? null;
   const selectedNode = (graph?.nodes ?? []).find((node) => node.id === selectedNodeId) ?? null;
   // 画布 / 编辑区 上下可拖；没选中节点或边时编辑区自动收起成提示条，画布回到满高（拖那道横线也能拉开）
@@ -715,6 +765,26 @@ export function GraphPane(): ReactNode {
                 onInit={(instance) => {
                   flowRef.current = instance;
                 }}
+                /*
+                 * 画布手势（用户反馈"鼠标一放上去就是小手，而且没法框选多个"）：
+                 *   - `selectionOnDrag`：**左键拖空白 = 框选**多个界面；
+                 *   - `panOnDrag={[1]}`：平移只留给**中键**（外加 xyflow 默认的"空格+拖动"）——
+                 *     原来左键拖 = 平移，所以画布常驻 `cursor: grab`（那个小手），而且框选只能靠 Shift；
+                 *   - 右键空出来给右键菜单（原本就是它）。
+                 */
+                selectionOnDrag
+                panOnDrag={[1]}
+                multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
+                // Delete 和 Backspace 都能删（macOS 键盘上 Delete 是 Fn+Backspace，不给 Backspace 就没人删得动）
+                deleteKeyCode={['Delete', 'Backspace']}
+                onSelectionChange={onSelectionChange}
+                /* Delete 键删：xyflow 先从自己的状态里摘掉再回调 → 这里同步到引擎（真源在 graph.json） */
+                onNodesDelete={(nodes) => void deleteSelection(nodes.map((node) => node.id))}
+                onEdgesDelete={(edges) => {
+                  for (const edge of edges) {
+                    void removeEdge(activeId, edge.id);
+                  }
+                }}
                 fitView
                 fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
                 minZoom={0.3}
@@ -772,6 +842,34 @@ export function GraphPane(): ReactNode {
               <span className="pointer-events-none">
                 拖节点右侧圆点连到另一个节点 = 连一条边；点节点/边可在下方编辑
               </span>
+              <span className="pointer-events-none">
+                拖动空白 = 框选多个界面（Delete 删除选中）· 空格/中键拖动 = 平移画布
+              </span>
+              {selectedIds.length > 0 && (
+                <span className="pointer-events-auto flex items-center gap-1 rounded-sm border border-brand bg-panel px-1 text-brand">
+                  <span data-testid="selection-count">已选 {selectedIds.length} 个界面</span>
+                  <button
+                    type="button"
+                    data-testid="delete-selection"
+                    onClick={() => void deleteSelection(selectedIds)}
+                    title="删除选中的界面（连在它们身上的边会一起删）"
+                    className="rounded-sm border border-failed/60 px-1 text-failed hover:bg-raised"
+                  >
+                    删除
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedIds([]);
+                      selectNode(null);
+                    }}
+                    title="取消选择（也可以点一下画布空白）"
+                    className="rounded-sm px-1 text-dim hover:bg-raised hover:text-fg"
+                  >
+                    取消选择
+                  </button>
+                </span>
+              )}
               {orphanEdges.length > 0 && (
                 <button
                   type="button"

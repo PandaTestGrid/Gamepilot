@@ -8,12 +8,12 @@
  *   且（all_of）所有标签都命中 / 或（any_of）任一命中 / 非（none_of）都不得出现，
  *   分数门槛 是分数门槛，within_ms 是"限时等待"（进节点后最多等这么久，超时这条边就不走）。
  */
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 
 import { toActionPayload, toConditionPayload } from '@/lib/graph-adapter';
 import { conditionConflicts, type DetectionLike, evaluateEdge } from '@/lib/edge-status';
 import { extractParamsToVariables } from '@/lib/param-vars';
-import { actionRun, devLog, setBreakpoint } from '@/lib/rpc';
+import { actionRun, devLog, projectList, type ProjectSummary, setBreakpoint } from '@/lib/rpc';
 import { describeEdgeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
@@ -50,6 +50,20 @@ export function EdgeEditor({
 }): ReactNode {
   const saveEdge = useGraphStore((state) => state.saveEdge);
   const setVariables = useGraphStore((state) => state.setVariables);
+  // 「跳到任务」：列同工作区里的其它任务（不再手填名字）
+  const projectRoot = useSessionStore((state) => state.project?.root ?? '');
+  const [tasks, setTasks] = useState<ProjectSummary[]>([]);
+  const workspaceBase = projectRoot.replace(/\/[^/]+$/, '');
+  const currentTask = projectRoot.split('/').filter(Boolean).pop() ?? '';
+
+  useEffect(() => {
+    if (!workspaceBase) {
+      return;
+    }
+    void projectList(workspaceBase)
+      .then((result) => setTasks(result.items))
+      .catch(() => setTasks([]));
+  }, [workspaceBase]);
   const removeEdge = useGraphStore((state) => state.removeEdge);
   const [condition, setCondition] = useState<EdgeCondition>(edge.condition);
   const [action, setAction] = useState<EdgeAction>(edge.actionSpec);
@@ -335,12 +349,20 @@ export function EdgeEditor({
         {action.type === 'call' && (
           <label className="flex items-center gap-1 text-dim">
             脚本名
-            <input
+            <select
               value={action.script ?? ''}
               onChange={(event) => setAction({ ...action, script: event.target.value })}
-              placeholder="同级脚本目录名"
-              className="h-5 w-40 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
-            />
+              className="h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+            >
+              <option value="">（选一个任务）</option>
+              {tasks
+                .filter((item) => item.name !== currentTask)
+                .map((item) => (
+                  <option key={item.root} value={item.name}>
+                    {item.name}
+                  </option>
+                ))}
+            </select>
           </label>
         )}
         {action.type === 'wait' && (

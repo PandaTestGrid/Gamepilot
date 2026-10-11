@@ -8,6 +8,21 @@
  *   2. 边是 xyflow 渲染的，我们只给了 stroke 内联样式 → 悬停/选中的反馈只能用 CSS。
  */
 
+/*
+ * 空白画布：左键拖 = **框选**（不是平移），所以光标默认就是箭头，不能是"小手" ——
+ * 那个 `cursor: grab` 是 xyflow 给"左键能平移"的画布加的（`.react-flow__pane.draggable`），
+ * 用户反馈"鼠标一放上去就是个小手"就是它。平移现在是中键 / 空格+拖动，
+ * 所以这里连 `.draggable` 都不会出现；框选进行中给个十字（比 xyflow 默认的 pointer 贴切）。
+ */
+.react-flow__pane.selection {
+  cursor: crosshair;
+}
+/* 框选出来的矩形：用品牌色（xyflow 默认是浅蓝，在暗色主题上像系统高亮） */
+.react-flow__nodesselection-rect {
+  background: color-mix(in oklab, var(--brand) 12%, transparent);
+  border: 1px solid var(--brand);
+}
+
 /* 拖拽中：光标换成"抓住"，卡片描边点亮（和鼠标按下这件事对上） */
 .react-flow__node.draggable {
   cursor: grab;
