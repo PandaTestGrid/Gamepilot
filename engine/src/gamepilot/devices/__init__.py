@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from . import android, mock
+from . import android, ios, mock
 from .base import (  # noqa: F401
     KIND_ANDROID,
     KIND_EMULATOR,
@@ -37,6 +37,7 @@ def _providers() -> list[tuple[str, Callable[[], list[DeviceInfo]]]]:
     """设备来源清单。新增平台（iOS / Windows / 鸿蒙）在这里加一行即可。"""
     return [
         ("android", android.discover),
+        ("ios", ios.discover),  # 仅 iOS 17.4+；没装 pymobiledevice3 时返回空列表
         ("mock", mock.discover),
     ]
 

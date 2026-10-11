@@ -5,7 +5,7 @@
  *   - 四个折叠区 → 一个列表 + 来源徽标
  *   - 「先选下拉再点连接」 → 点行任意位置即连
  *   - 裸的「刷新/重启 ADB」 → 收进 ⋯ 高级
- *   - iOS 只留一行灰字，不摆用不了的输入框
+ *   - iOS 设备由引擎发现（pymobiledevice3 usbmux，仅 17.4+），点一下就连；
  */
 import { MoreHorizontal, RefreshCw, Search } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
@@ -23,6 +23,7 @@ const TABS: Array<{ id: 'all' | DeviceKind; label: string }> = [
   { id: 'android', label: '安卓' },
   { id: 'emulator', label: '模拟器' },
   { id: 'windows', label: 'Windows' },
+  { id: 'ios', label: 'iOS' },
   { id: 'mock', label: 'Mock' },
 ];
 
@@ -172,7 +173,12 @@ export function DevicePopover(): ReactNode {
             <MoreHorizontal className="size-3" /> 高级
           </button>
           <div className="flex-1" />
-          <span className="text-faint">iOS 支持：计划中（暂不提供）</span>
+          <span
+            className="text-faint"
+            title="QuickTime 采集 + pymobiledevice3 CoreDevice HID；需要 iOS 17.4+"
+          >
+            iOS：17.4+（QuickTime 采集）· 用前需切 USB config2
+          </span>
 
           {advanced && (
             <div className="absolute bottom-8 left-12 w-52 rounded-sm border border-line bg-raised py-1">
@@ -264,6 +270,8 @@ function kindLabel(kind: DeviceKind): string {
   switch (kind) {
     case 'android':
       return '安卓';
+    case 'ios':
+      return 'iOS';
     case 'emulator':
       return '模拟器';
     case 'windows':

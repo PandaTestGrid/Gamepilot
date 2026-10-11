@@ -82,6 +82,28 @@ pnpm tauri dev        # 启动（窗口几秒后出现）
 
 > 灰色不可点的按钮把鼠标停上去会说明原因（例如「状态图里还没有节点：先在画面栏点『框选』…」）。
 
+### iOS（仅 17.4+）
+
+| 能力 | 实现 |
+|---|---|
+| 投屏 | **QuickTime 管线**：macOS 的 CoreMediaIO iOS Screen Capture → `ffmpeg -f avfoundation` → MJPEG → PyAV 解码 |
+| 控制 | **pymobiledevice3** CoreDevice HID（RSD 用户态隧道，不用 sudo）：触摸 0..65535 digitizer、Indigo 按键、虚拟键盘输入 |
+| 发现 | `pymobiledevice3 usbmux list`，自动过滤掉低于 17.4 的设备 |
+
+**两个前提**（都是踩过的坑）：
+
+1. **先切 USB 配置再起 QuickTime**：macOS 上 QuickTime 会独占 USB 设备，之后 usbmux / RSD 隧道都连不上。
+   用环境变量指定你机器上的切换命令：
+   ```bash
+   export GAMEPILOT_IOS_USB_CONFIG_CMD='<你用来切 config2 的命令>'
+   ```
+   没设置时引擎只记一条提示，不阻塞（也许你已经手动切好了）。
+2. **触摸注入要求"已有视频流在跑"**：pymobiledevice3 的 HID 文档写明，没有活动媒体流时
+   backboardd 会把触摸 report 丢掉。所以 `connect()` 的顺序是"先起 QuickTime 采集，再连 HID"。
+
+其他：需要在「系统设置 → 隐私与安全性 → **屏幕录制**」里给终端/应用授权（否则 avfoundation 看不到设备）；
+`UserspaceRsdTunnel` 是进程级单例，**一个进程同时只能带一台 iOS 设备**（多台要拆进程）。
+
 ### 脚本（工程）目录
 
 一个目录就是一个脚本：`graph.json`（状态图）+ `templates/`（录制下来的模板截图）。

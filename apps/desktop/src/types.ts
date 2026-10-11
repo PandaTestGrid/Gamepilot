@@ -1,4 +1,4 @@
-export type DeviceKind = 'android' | 'emulator' | 'windows' | 'mock' | 'remote';
+export type DeviceKind = 'android' | 'ios' | 'emulator' | 'windows' | 'mock' | 'remote';
 
 export type DeviceStatus = 'idle' | 'discovered' | 'connecting' | 'connected' | 'failed';
 

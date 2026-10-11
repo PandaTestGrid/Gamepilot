@@ -90,7 +90,7 @@ def _require_str(params: dict[str, Any], key: str) -> str:
 def _create_controller(scheme: str, device_id: str, options: dict[str, Any]) -> Controller:
     cls = controller_for_scheme(scheme)
     if cls is None:
-        raise ValueError(f"暂不支持该设备类型: {scheme}（当前支持 Android / Mock）")
+        raise ValueError(f"暂不支持该设备类型: {scheme}（当前支持 Android / iOS / Mock）")
     return cls(device_id=device_id, **options)
 
 

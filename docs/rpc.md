@@ -226,6 +226,17 @@ Rust 桥的调度规则：
 `{ deviceId }` → `{ ok: true, running: boolean }`。
 `run.start` 要求状态图里至少有一个节点，否则报「状态图还没有节点：先在画面上框选录制一个界面」。
 
+### iOS 设备（`iOS:///?udid=xxx`）
+
+URI 里用 `udid`（`pymobiledevice3 usbmux list` 的 `Identifier`）。
+
+- **仅 iOS ≥ 17.4**：低版本没有可用的用户态 RSD 隧道，连接时会直接报错说明
+- `channel` 返回 `quicktime`（QuickTime/CoreMediaIO 采集），`linkNote` 里带采集设备名与 USB 配置状态
+- 控制走 pymobiledevice3 CoreDevice HID：`device.touch/tap/swipe/key/text` 全部可用；
+  `back`/`recents` 映射到 Home（iOS 没有这两个键）
+- 依赖：`ffmpeg`（采集）+ `pymobiledevice3`（控制，`uv sync --extra ios` 或 brew 安装）；
+  缺哪个都会给出明确提示，不影响 Android/Mock
+
 ### `record.action`（把手动操作录成脚本里的一步）
 
 `{ deviceId, action: {type, ...}, to? }` → `{ edgeId, graph }`。

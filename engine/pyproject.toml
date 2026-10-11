@@ -16,6 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# iOS 控制（QuickTime 采集 + CoreDevice HID，需要 iOS 17.4+）
+ios = ["pymobiledevice3>=10"]
 # OCR 识别器是可选能力：装了 rapidocr 才出现 ocr 类型识别器
 ocr = ["rapidocr-onnxruntime>=1.3"]
 
@@ -72,6 +74,12 @@ strict = true
 files = ["src", "tests"]
 warn_unused_ignores = true
 show_error_codes = true
+
+# pymobiledevice3 是**可选**依赖（iOS 控制用）：本机装了 brew 版就能直接跑，
+# 没装时 iOS 那一路会给出明确提示，其它平台不受影响
+[[tool.mypy.overrides]]
+module = ["pymobiledevice3.*"]
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]
