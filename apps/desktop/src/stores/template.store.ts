@@ -92,7 +92,10 @@ export const useTemplateStore = create<TemplateState>()((set, get) => {
         const raw = typeof data === 'string' ? data : String((data as { png?: string })?.png ?? '');
         const url = !raw ? '' : raw.startsWith('data:') ? raw : `data:image/png;base64,${raw}`;
         if (!url) {
-          throw new Error('引擎没返回图片数据');
+          // 颜色识别器本来就没有截图（引擎返回空 png）→ 静默当作"没有图"，
+          // 不要报错（之前把它当失败，日志里刷"取模板截图失败"）
+          patch(key, { loading: false });
+          return;
         }
         cache.set(key, url); // 先落缓存：之后无论如何都不会再"消失"
         patch(key, { url, loading: false });
