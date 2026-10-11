@@ -45,6 +45,7 @@ import { useGraphStore } from '@/stores/graph.store';
 interface StateNodeData extends Record<string, unknown> {
   label: string;
   sub: string;
+  deviceId: string;
   visits: number;
   active: boolean;
   pending: boolean;
@@ -53,6 +54,21 @@ interface StateNodeData extends Record<string, unknown> {
 type StateNodeType = Node<StateNodeData, 'state'>;
 
 function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
+  // 双击就地改名：这是最常用的一次编辑，不该每次都跑到下面的面板
+  const updateNode = useGraphStore((state) => state.updateNode);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(data.label);
+
+  const commit = (): void => {
+    setEditing(false);
+    const name = draft.trim();
+    if (name && name !== data.label) {
+      void updateNode(String(data.deviceId), String(data.id), { name });
+    } else {
+      setDraft(data.label);
+    }
+  };
+
   return (
     <div
       className={cn(
@@ -60,6 +76,11 @@ function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
         data.active ? 'border border-brand' : 'border border-line',
         data.pending && 'border-dashed',
       )}
+      onDoubleClick={() => {
+        setDraft(data.label);
+        setEditing(true);
+      }}
+      title="双击改名"
     >
       {/* 圆点做大一点（原来 6px，很难抓住），并加一圈描边方便对准 */}
       <Handle
@@ -67,7 +88,27 @@ function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
         position={Position.Left}
         className="!size-2.5 !border-2 !border-canvas !bg-idle hover:!bg-brand"
       />
-      <div className="text-body">{data.label}</div>
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              commit();
+            }
+            if (event.key === 'Escape') {
+              setDraft(data.label);
+              setEditing(false);
+            }
+            event.stopPropagation();
+          }}
+          className="w-full rounded-sm border border-brand bg-canvas px-1 text-body text-fg"
+        />
+      ) : (
+        <div className="truncate text-body">{data.label}</div>
+      )}
       <div className="text-badge text-faint">
         {data.sub} · {data.visits} 次
       </div>
@@ -147,6 +188,7 @@ export function GraphPane(): ReactNode {
         data: {
           label: node.name,
           sub: node.id,
+          deviceId: activeId,
           visits: node.visits,
           active: graph?.activeNodeId === node.id,
           pending: graph?.pendingNodeId === node.id,
@@ -210,6 +252,13 @@ export function GraphPane(): ReactNode {
       });
     // 上色跟着实时状态走，否则运行时边的颜色不会变
   }, [graph, statuses]);
+
+  /** 让底部边编辑器把"动作"区滚进视野（双击边时用）。 */
+  const focusEdgeAction = useCallback(() => {
+    window.setTimeout(() => {
+      document.querySelector('[data-edge-action]')?.scrollIntoView({ block: 'nearest' });
+    }, 60);
+  }, []);
 
   const onNodeDragStop = useCallback(
     (_event: unknown, node: StateNodeType) => {
@@ -365,6 +414,11 @@ export function GraphPane(): ReactNode {
                 onNodesChange={onNodesChange}
                 onNodeDragStop={onNodeDragStop}
                 onEdgeClick={(_event, edge) => selectEdge(edge.id === selectedEdgeId ? null : edge.id)}
+                // 双击边 = 直接进编辑（底部面板会聚焦到动作区）
+                onEdgeDoubleClick={(_event, edge) => {
+                  selectEdge(edge.id);
+                  focusEdgeAction();
+                }}
                 onNodeClick={(_event, node) => selectNode(node.id === selectedNodeId ? null : node.id)}
                 onConnect={(connection) => {
                   if (connection.source && connection.target) {
