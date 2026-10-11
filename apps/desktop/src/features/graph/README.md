@@ -33,7 +33,9 @@
 
 | 文件 | 职责 |
 |---|---|
-| `GraphContextMenu.tsx` | 右键菜单（空白 / 节点 / 边 三套；贴边翻转、Esc/点别处关闭） |
+| `GraphContextMenu.tsx` | 右键菜单 + 节点里的「＋操作」菜单（**portal 到 body**，见下） |
+| `DockBar.tsx` | 详情坞的 `▸展开/▾收起` 控制条（收起时也显示在编辑什么） |
+| `RunStatusStrip.tsx` | 运行状态条：当前界面 / 下一步 / 还差什么 |
 | `stores/template.store.ts` | 模板截图**进程级缓存**：一张模板只取一次，取到过就不再消失，失败可重试 |
 
 规则：
@@ -70,5 +72,11 @@
   - **尺寸沿用本地**（别重新测量），`data` 每次重建。
 - 连线必须用 `ConnectionMode.Strict`：Loose 允许从 target 圆点起拖并交换方向，
   会出现"从左圆点拖，结果连成了反向边"。
+- 弹菜单/浮层一律 **portal 到 `document.body`**：节点卡片在 React Flow 的
+  `scale()/translate()` 变换里，卡片内 `position: fixed` 会被变换劫持（菜单飞到视口外、点不到）。
+- 节点里的操作：点行 = 选中那一步；`▶` = `action.run` 立即执行（结果进事件流）；`✕` = 删除。
+  加操作走 `graph.store.addStep`（一次 RPC 带上 action，别"先建后改"）。
+- 运行态：`data-run="active|pending"` 驱动 `graph.css` 的呼吸/闪烁；条件边用 `animated`（matched
+  或当前界面的 waiting）表示"正在盯这条"；状态条读 `graph.activeNodeId` + 每帧算出的边状态。
 - 建节点、加分支之后自动 `fitView` 一次（`centerAll`）：引擎回包会重排、详情坞展开会让画布变矮，
   不居中就很容易"建完看不见"。

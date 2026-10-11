@@ -102,13 +102,17 @@ describe('节点卡片', () => {
     expect(classes).toContain('bg-active');
   });
 
-  it('当前节点（运行中）实线 brand，pending 目标节点虚线', () => {
+  it('当前节点（运行中）实线 brand + 呼吸，pending 目标节点虚线 + 闪烁', () => {
     const { unmount } = render(<StateNode {...nodeProps({ active: true })} />);
     expect(card().className).toContain('border-brand');
+    // data-run 是 graph.css 运行态动画（呼吸/闪烁）的挂钩，类名 `state-node` 也必须有
+    expect(card().getAttribute('data-run')).toBe('active');
+    expect(card().className).toContain('state-node');
     unmount();
 
     render(<StateNode {...nodeProps({ pending: true })} />);
     expect(card().className).toContain('border-dashed');
+    expect(card().getAttribute('data-run')).toBe('pending');
   });
 
   it('双击就地改名：Enter 提交给 store', async () => {
@@ -201,11 +205,12 @@ describe('节点卡片', () => {
     await user.click(screen.getByText('main_start'));
     expect(updateNode).toHaveBeenLastCalledWith('dev', 'main', { enter: [] });
 
-    // "＋操作"现在是菜单（选动作类型 / 绑定模板），建步骤走 addStep
-    await user.click(screen.getByText('＋操作'));
-    expect(screen.getByText('＋ 点击')).toBeInTheDocument();
-    await user.click(screen.getByText('＋ 等待'));
-    expect(addStep).toHaveBeenCalledWith('dev', 'main', 'main', { action: { type: 'wait' } });
+    // "＋ 添加操作"是**二级菜单**：一级选类型，二级选参数
+    await user.click(screen.getByTestId('add-action'));
+    expect(screen.getByText('等待')).toBeInTheDocument();
+    await user.click(screen.getByText('等待')); // 展开二级
+    await user.click(screen.getByText('0.5 秒'));
+    expect(addStep).toHaveBeenCalledWith('dev', 'main', 'main', { action: { type: 'wait', seconds: 0.5 } });
   });
 
   it('节点内部的按钮/引脚点一下不会冒泡出去（否则外层会当成"点了节点"而收起）', async () => {
@@ -247,7 +252,7 @@ describe('节点卡片', () => {
 
     // 挂/摘识别器、加操作、引脚：都是节点内部的操作，不能冒泡（外层收起卡片）
     await user.click(screen.getByText('shop_home'));
-    await user.click(screen.getByText('＋操作'));
+    await user.click(screen.getByTestId('add-action'));
     await user.click(screen.getByText('x:0.5'));
 
     // 核心：没有一次冒泡上去（"各自干了各自的活"在另一条用例里验证）
@@ -306,7 +311,7 @@ describe('节点卡片', () => {
     expect(screen.getByTestId('state-node').className).toContain('w-[220px]');
   });
 
-  it('＋操作菜单：挑动作类型建一步；挑模板则把目标与条件一起绑上', async () => {
+  it('添加操作是二级菜单：一级选类型、二级选参数（等待 0.5 秒）', async () => {
     const user = userEvent.setup();
     const addStep = vi.fn(() => Promise.resolve('e_new'));
     const selectEdge = vi.fn();
@@ -314,20 +319,37 @@ describe('节点卡片', () => {
 
     render(<StateNode {...nodeProps({ expanded: true, allTemplates: ['main_start'], pins: [] })} />);
 
-    await user.click(screen.getByText('＋操作'));
-    // ① 动作类型：只建类型，参数留给下方详情
-    await user.click(screen.getByText('＋ 点击'));
-    expect(addStep).toHaveBeenCalledWith('dev', 'main', 'main', { action: { type: 'click' } });
+    await user.click(screen.getByTestId('add-action'));
+    // 一级：动作类型
+    expect(screen.getByText('点击')).toBeInTheDocument();
+    expect(screen.getByText('等待')).toBeInTheDocument();
+    expect(screen.getByText('按键')).toBeInTheDocument();
 
-    // ② 模板：目标 + 条件一起绑（"菜单里就能绑定对应的事件"）
-    await user.click(screen.getByText('＋操作'));
-    await user.click(screen.getByText('点击「main_start」'));
-    expect(addStep).toHaveBeenLastCalledWith('dev', 'main', 'main', {
+    await user.click(screen.getByText('等待'));
+    // 二级：具体参数
+    expect(screen.getByText('0.5 秒')).toBeInTheDocument();
+    await user.click(screen.getByText('0.5 秒'));
+
+    expect(addStep).toHaveBeenCalledWith('dev', 'main', 'main', { action: { type: 'wait', seconds: 0.5 } });
+    expect(selectEdge).toHaveBeenCalledWith('e_new');
+  });
+
+  it('点击的二级菜单直接绑定模板（目标 + 条件一起绑）', async () => {
+    const user = userEvent.setup();
+    const addStep = vi.fn(() => Promise.resolve('e_new'));
+    useGraphStore.setState({ addStep, selectedNodeId: 'main' });
+
+    render(<StateNode {...nodeProps({ expanded: true, allTemplates: ['main_start'], pins: [] })} />);
+
+    await user.click(screen.getByTestId('add-action'));
+    await user.click(screen.getByText('点击'));
+    await user.click(screen.getByText('「main_start」'));
+
+    expect(addStep).toHaveBeenCalledWith('dev', 'main', 'main', {
       action: { type: 'click', target: 'main_start' },
       when: 'main_start',
       condition: { all_of: ['main_start'] },
     });
-    expect(selectEdge).toHaveBeenCalledWith('e_new');
   });
 
   it('每一步操作都能 ✕ 删除、▶ 直接执行（执行结果记进事件流）', async () => {

@@ -12,6 +12,7 @@ import {
   Grid2x2,
   MousePointerClick,
   MousePointerSquareDashed,
+  Power,
   ScanLine,
 } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
@@ -19,6 +20,7 @@ import { Group, Panel, type PanelImperativeHandle, Separator, usePanelRef } from
 
 import { DeviceControls } from '@/features/device/DeviceControls';
 import { RecordOverlay } from '@/features/device/RecordOverlay';
+import { powerKeyFor } from '@/features/device/nav-keys';
 import { type GesturePoint, isSwipeGesture } from '@/features/device/touch-gesture';
 import { checkRecognizerName, trimRecognizerName } from '@/features/recognizers/recognizer-name';
 import { SCREEN_LAYOUT } from '@/layout/layout-specs';
@@ -60,6 +62,7 @@ export function ScreenPane(): ReactNode {
   const recordActionMode = useUiStore((state) => state.recordActionMode);
   const toggleRecordAction = useUiStore((state) => state.toggleRecordAction);
   const recordStep = useSessionStore((state) => state.recordStep);
+  const pressKey = useSessionStore((state) => state.pressKey);
   const isConnected = useSessionStore((state) => Boolean(state.ready[activeId]));
   const frame = useSessionStore((state) => state.frames[activeId]);
   const graph = useGraphStore((state) => state.graphs[activeId]);
@@ -86,6 +89,9 @@ export function ScreenPane(): ReactNode {
   }, [activeId, device?.name, device?.status, gridView, connected.length, frame]);
   const recognizers = graph?.recognizers ?? [];
   const confirmedCount = recognizers.filter((item) => item.state !== 'idle').length;
+  // 电源键不是导航键（不在投屏下面那条里）：跟着"设备功能"放面板头。
+  // macOS 本机窗口发不了电源键 → 这台设备就不显示
+  const powerKey = device ? powerKeyFor(device.kind) : null;
   // 画面 / 识别读数 上下可拖：识别器多的时候读数区要能拖高，单看画面时又要能压扁
   const view = useLayoutGroup(SCREEN_LAYOUT);
 
@@ -175,6 +181,24 @@ export function ScreenPane(): ReactNode {
                 +等{seconds}s
               </button>
             ))}
+          {/* 电源键：不属于"导航键"，所以不占投屏下面那条；这台设备没有就不显示 */}
+          {powerKey && (
+            <>
+              <span className="mx-0.5 h-3 w-px bg-line" />
+              <GhostButton
+                disabled={!isConnected}
+                onClick={() => void pressKey(activeId, powerKey.id)}
+                title={
+                  isConnected
+                    ? powerKey.hint
+                    : `设备未连接：先连上设备才能按键（当前 ${device?.name ?? '无设备'}）`
+                }
+              >
+                <Power className="size-3" />
+                {powerKey.label}
+              </GhostButton>
+            </>
+          )}
         </>
       }
     >

@@ -502,6 +502,22 @@ export function projectSet(dir: string): Promise<ProjectInfo> {
   return rpc<ProjectInfo>('project.set', { dir });
 }
 
+/** 工作区 = 一个"库根"目录，里面每个子目录是一个任务（脚本） */
+export interface WorkspaceSummary {
+  readonly name: string;
+  readonly root: string;
+  readonly exists: boolean;
+}
+
+export function workspaceList(): Promise<{ items: WorkspaceSummary[] }> {
+  return rpc<{ items: WorkspaceSummary[] }>('workspace.list', {});
+}
+
+/** 新建工作区（在仓库根 workspaces/<名字>/，不覆盖同名） */
+export function workspaceCreate(name: string): Promise<{ items: WorkspaceSummary[] }> {
+  return rpc<{ items: WorkspaceSummary[] }>('workspace.create', { name });
+}
+
 export function projectList(base?: string): Promise<{ items: ProjectSummary[] }> {
   return rpc<{ items: ProjectSummary[] }>('project.list', base ? { base } : {});
 }

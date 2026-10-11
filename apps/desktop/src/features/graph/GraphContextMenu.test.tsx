@@ -79,4 +79,48 @@ describe('画布右键菜单', () => {
     await user.click(screen.getByText('别处'));
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('二级菜单：点一级项展开子菜单，点子项才执行', async () => {
+    const user = userEvent.setup();
+    const createWait = vi.fn();
+    render(
+      <GraphContextMenu
+        anchor={anchor([
+          {
+            label: '等待',
+            submenu: [
+              { label: '0.5 秒', onSelect: createWait },
+              { label: '自定义…', onSelect: vi.fn() },
+            ],
+          },
+        ])}
+        onClose={vi.fn()}
+      />,
+    );
+
+    // 一级项本身不该执行任何东西，只展开二级
+    await user.click(screen.getByText('等待'));
+    expect(createWait).not.toHaveBeenCalled();
+    expect(screen.getByText('0.5 秒')).toBeInTheDocument();
+
+    await user.click(screen.getByText('0.5 秒'));
+    expect(createWait).toHaveBeenCalledTimes(1);
+  });
+
+  it('二级项执行后关闭整个菜单', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const pick = vi.fn();
+    render(
+      <GraphContextMenu
+        anchor={anchor([{ label: '按键', submenu: [{ label: '返回', onSelect: pick }] }])}
+        onClose={onClose}
+      />,
+    );
+
+    await user.click(screen.getByText('按键'));
+    await user.click(screen.getByText('返回'));
+    expect(pick).toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
 });

@@ -9,7 +9,15 @@ import { type ReactNode, useEffect, useState } from 'react';
 import { FolderOpen } from 'lucide-react';
 
 import { GhostButton } from '@/layout/PanelShell';
-import { devLog, projectList, type ProjectSummary } from '@/lib/rpc';
+import {
+  devLog,
+  projectCreate,
+  projectList,
+  type ProjectSummary,
+  workspaceCreate,
+  workspaceList,
+  type WorkspaceSummary,
+} from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useSessionStore } from '@/stores/session.store';
 
@@ -21,6 +29,9 @@ export function ProjectMenu(): ReactNode {
   // null = 用户还没改过 → 直接跟随当前目录（派生值，不用 effect 同步）
   const [edited, setEdited] = useState<string | null>(null);
   const [siblings, setSiblings] = useState<ProjectSummary[]>([]);
+  // 工作区（库根）与其中的任务（脚本）
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [picked, setPicked] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const root = project?.root ?? '';
@@ -30,12 +41,19 @@ export function ProjectMenu(): ReactNode {
     if (!root) {
       return; // 引擎还没回话（或测试里的空响应）：别拿 undefined 当路径用
     }
-    // 兄弟工程（同目录下别的脚本）
-    const parent = root.replace(/\/[^/]+$/, '');
-    void projectList(parent)
+    // 工作区列表（库根）+ 当前工作区里的任务
+    void workspaceList()
+      .then((result) => {
+        setWorkspaces(result.items);
+        const parent = root.replace(/\/[^/]+$/, '');
+        const matched = result.items.find((item) => item.root === parent) ?? result.items[0];
+        setPicked((current) => current ?? matched?.name ?? null);
+        const base = result.items.find((item) => item.name === (picked ?? matched?.name))?.root ?? parent;
+        return projectList(base);
+      })
       .then((result) => setSiblings(result.items))
-      .catch((error: unknown) => devLog(`project.list 失败: ${String(error)}`));
-  }, [root, open]);
+      .catch((error: unknown) => devLog(`工作区/任务列表失败: ${String(error)}`));
+  }, [root, open, picked]);
 
   const name = root ? (root.split('/').filter(Boolean).pop() ?? root) : '未加载';
 
@@ -65,7 +83,7 @@ export function ProjectMenu(): ReactNode {
       {open && (
         <div className="absolute top-7 left-0 z-30 w-[440px] rounded-sm border border-line bg-panel p-2 shadow-lg">
           <div className="mb-1 text-badge text-faint">
-            脚本目录（graph.json + templates/ 放这里）
+            工作区 &gt; 任务（任务 = 一个脚本目录：graph.json + templates/）
             <button type="button" className="ml-2 hover:text-fg" onClick={() => void refreshProject()}>
               刷新
             </button>
@@ -89,9 +107,72 @@ export function ProjectMenu(): ReactNode {
             </button>
           </div>
 
+          <div className="mb-2 flex items-center gap-1 text-badge text-faint">
+            工作区
+            <select
+              value={picked ?? ''}
+              onChange={(event) => setPicked(event.target.value)}
+              className="h-6 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+            >
+              {workspaces.map((item) => (
+                <option key={item.name} value={item.name}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              title="新建工作区（workspaces/<名字>/）"
+              onClick={() => {
+                const name = window.prompt('新工作区名字');
+                if (!name) {
+                  return;
+                }
+                void (async () => {
+                  try {
+                    const result = await workspaceCreate(name);
+                    setWorkspaces(result.items);
+                    setPicked(name);
+                  } catch (reason) {
+                    devLog(`新建工作区失败: ${String(reason)}`);
+                  }
+                })();
+              }}
+              className="h-6 rounded-sm border border-line px-1.5 hover:text-fg"
+            >
+              ＋ 新建工作区
+            </button>
+          </div>
+
           <div className="max-h-40 overflow-auto">
-            <div className="mb-0.5 text-badge text-faint">同目录下的其它脚本</div>
-            {siblings.length === 0 && <div className="px-1 py-1 text-badge text-faint">（没有别的脚本）</div>}
+            <div className="mb-0.5 flex items-center gap-2 text-badge text-faint">
+              这个工作区里的任务（点一下切换状态图）
+              <button
+                type="button"
+                className="hover:text-fg"
+                onClick={() => {
+                  const name = window.prompt('新任务名字');
+                  if (!name) {
+                    return;
+                  }
+                  const base = workspaces.find((item) => item.name === picked)?.root;
+                  void (async () => {
+                    try {
+                      await projectCreate(name, base);
+                      await refreshProject();
+                      setSiblings((await projectList(base)).items);
+                    } catch (reason) {
+                      devLog(`新建任务失败: ${String(reason)}`);
+                    }
+                  })();
+                }}
+              >
+                ＋ 新建任务
+              </button>
+            </div>
+            {siblings.length === 0 && (
+              <div className="px-1 py-1 text-badge text-faint">（这个工作区里还没有任务）</div>
+            )}
             {siblings.map((item) => (
               <button
                 key={item.root}

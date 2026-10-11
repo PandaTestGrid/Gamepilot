@@ -48,7 +48,7 @@ describe('设备控制条（设备按键）', () => {
     expect(pressKey).not.toHaveBeenCalled();
   });
 
-  it('Android：返回 / 桌面 / 最近任务 / 电源 分别发 back / home / recents / power', async () => {
+  it('Android：返回 / 桌面 / 最近任务 分别发 back / home / recents', async () => {
     const user = userEvent.setup();
     const pressKey = vi.fn(() => Promise.resolve());
     useSessionStore.setState({ ready: { [DEVICE]: true }, pressKey });
@@ -58,7 +58,6 @@ describe('设备控制条（设备按键）', () => {
       ['返回', 'back'],
       ['桌面', 'home'],
       ['最近任务', 'recents'],
-      ['电源', 'power'],
     ] as const) {
       const button = screen.getByText(label).closest('button');
       expect(button).toBeEnabled();
@@ -67,14 +66,13 @@ describe('设备控制条（设备按键）', () => {
     }
   });
 
-  it('iOS：只有「主页」和「电源」，没有返回/最近任务（引擎把那两个也映射成 Home）', async () => {
+  it('iOS：只有「主页」，没有返回/最近任务（引擎把那两个也映射成 Home）', async () => {
     const user = userEvent.setup();
     const pressKey = vi.fn(() => Promise.resolve());
     useSessionStore.setState({ ready: { [DEVICE]: true }, pressKey });
     renderBar('ios');
 
     expect(screen.getByText('主页')).toBeInTheDocument();
-    expect(screen.getByText('电源')).toBeInTheDocument();
     expect(screen.queryByText('返回')).toBeNull();
     expect(screen.queryByText('最近任务')).toBeNull();
     expect(screen.queryByText('桌面')).toBeNull();
@@ -88,16 +86,28 @@ describe('设备控制条（设备按键）', () => {
     renderBar('windows');
 
     expect(screen.queryByText('返回')).toBeNull();
-    expect(screen.queryByText('电源')).toBeNull();
     expect(screen.getByText(/没有实体导航键/)).toBeInTheDocument();
   });
 
-  it('「控制」「录操作」不在这条里（它们是 App 的开关，在面板头）', () => {
+  it('「控制」「录操作」「电源」都不在这条里（开关在面板头，电源也在面板头）', () => {
     useSessionStore.setState({ ready: { [DEVICE]: true } });
     renderBar();
 
     expect(screen.queryByText('控制')).toBeNull();
     expect(screen.queryByText('录操作')).toBeNull();
     expect(screen.queryByText('+等1s')).toBeNull();
+    expect(screen.queryByText('电源')).toBeNull();
+  });
+
+  it('按键是**居中**的：三栏网格（两侧等宽留白），提示不参与居中', () => {
+    useSessionStore.setState({ ready: { [DEVICE]: true } });
+    renderBar();
+
+    const bar = screen.getByTestId('device-controls');
+    expect(bar.className).toContain('grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]');
+    // 中间那栏才是按键，左右各一栏（右栏放提示）
+    expect(bar.children).toHaveLength(3);
+    const middle = bar.children[1] as HTMLElement;
+    expect(middle).toContainElement(screen.getByText('返回'));
   });
 });

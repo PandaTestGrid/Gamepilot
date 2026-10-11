@@ -14,7 +14,7 @@
  *
  * 数据全走 store（session.store 的 pressKey），所以它自己不持有状态，换设备也不会串。
  */
-import { House, Layers, Power, Undo2 } from 'lucide-react';
+import { House, Layers, Undo2 } from 'lucide-react';
 import { type ReactNode } from 'react';
 
 import { navKeysFor, type NavKeyId } from '@/features/device/nav-keys';
@@ -28,7 +28,6 @@ const ICONS: Record<NavKeyId, ReactNode> = {
   back: <Undo2 className="size-3" />,
   home: <House className="size-3" />,
   recents: <Layers className="size-3" />,
-  power: <Power className="size-3" />,
 };
 
 export function DeviceControls({
@@ -54,30 +53,34 @@ export function DeviceControls({
   return (
     <div
       data-testid="device-controls"
-      // @container：窄面板时右侧那句提示自动让位（否则会换行成两排，把这格吃掉 46px 高）
-      className="@container flex min-h-7 shrink-0 flex-wrap items-center gap-x-1 gap-y-0.5 border border-line bg-panel px-2 py-0.5"
+      // 三栏网格：左 1fr · 中间按键 · 右 1fr 放提示 —— 两侧等宽，所以按键是**真居中**
+      // （flex + justify-center 会被右边那句提示顶偏）。minmax(0,1fr) 让提示在窄面板里截断，
+      // 而不是把按键挤出去；@container 控制提示什么时候让位。
+      className="@container grid min-h-7 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-2 border border-line bg-panel px-2 py-0.5"
     >
-      {keys.map((item, index) => (
-        <span key={item.id} className="flex items-center">
-          {index > 0 && <span className="mx-1 h-3 w-px bg-line" />}
-          <GhostButton
-            disabled={Boolean(blocked)}
-            onClick={() => void pressKey(deviceId, item.id)}
-            title={blocked ?? item.hint}
-          >
-            {ICONS[item.id]}
-            {item.label}
-          </GhostButton>
-        </span>
-      ))}
+      <span aria-hidden="true" />
 
-      <span className="flex-1" />
+      <span className="flex items-center">
+        {keys.map((item, index) => (
+          <span key={item.id} className="flex items-center">
+            {index > 0 && <span className="mx-1 h-3 w-px bg-line" />}
+            <GhostButton
+              disabled={Boolean(blocked)}
+              onClick={() => void pressKey(deviceId, item.id)}
+              title={blocked ?? item.hint}
+            >
+              {ICONS[item.id]}
+              {item.label}
+            </GhostButton>
+          </span>
+        ))}
+      </span>
 
       <span
         className={cn(
-          'truncate text-badge',
+          'min-w-0 truncate text-right text-badge',
           // 没连上时无论如何都要留着原因；连上了就只在够宽时显示操作提示
-          blocked || emptyHint ? 'text-pending' : 'hidden text-faint @[560px]:inline',
+          blocked || emptyHint ? 'text-pending' : 'hidden text-faint @[620px]:inline',
         )}
       >
         {blocked ?? emptyHint ?? (controlMode ? '点画面=轻触 · 拖拽=滑动' : '控制已关：画面只用于框选/点选')}

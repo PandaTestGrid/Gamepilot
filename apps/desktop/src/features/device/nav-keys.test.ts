@@ -1,30 +1,29 @@
 import { describe, expect, it } from 'vitest';
 
-import { navKeysFor } from '@/features/device/nav-keys';
+import { navKeysFor, powerKeyFor } from '@/features/device/nav-keys';
 
-describe('每台设备有哪些实体导航键', () => {
-  it('Android / 模拟器：三大金刚 + 电源', () => {
-    expect(navKeysFor('android').map((item) => item.id)).toEqual(['back', 'home', 'recents', 'power']);
-    expect(navKeysFor('emulator').map((item) => item.id)).toEqual(['back', 'home', 'recents', 'power']);
-    expect(navKeysFor('android')[1]?.label).toBe('桌面');
+describe('投屏下面那条：导航键（按平台）', () => {
+  it('Android / 模拟器：三大金刚（电源不在这条里，它在面板头）', () => {
+    expect(navKeysFor('android').map((item) => item.id)).toEqual(['back', 'home', 'recents']);
+    expect(navKeysFor('emulator').map((item) => item.id)).toEqual(['back', 'home', 'recents']);
+    expect(navKeysFor('android').map((item) => item.id)).not.toContain('power');
+    expect(navKeysFor('android').find((item) => item.id === 'home')?.label).toBe('桌面');
   });
 
-  it('iOS：只有主页 + 电源（引擎把 back/recents 都映射成 Home，界面不能照搬 Android）', () => {
+  it('iOS：只有主页（引擎把 back/recents 都映射成 Home，界面不能照搬 Android）', () => {
     const keys = navKeysFor('ios');
 
-    expect(keys.map((item) => item.id)).toEqual(['home', 'power']);
+    expect(keys.map((item) => item.id)).toEqual(['home']);
     expect(keys[0]?.label).toBe('主页');
-    expect(keys.map((item) => item.id)).not.toContain('back');
-    expect(keys.map((item) => item.id)).not.toContain('recents');
   });
 
-  it('macOS 本机窗口（引擎报成 windows）：一个都不给，点了必然报不支持', () => {
+  it('macOS 本机窗口（引擎报成 windows）：一条都没有，点了必然报不支持', () => {
     expect(navKeysFor('windows')).toEqual([]);
   });
 
-  it('mock / 未知来源：四个都留着（报错文案是明确的，别悄悄藏按钮）', () => {
-    expect(navKeysFor('mock').map((item) => item.id)).toEqual(['back', 'home', 'recents', 'power']);
-    expect(navKeysFor('remote').map((item) => item.id)).toEqual(['back', 'home', 'recents', 'power']);
+  it('mock / 未知来源：三大金刚都给（报错文案是明确的，别悄悄藏按钮）', () => {
+    expect(navKeysFor('mock').map((item) => item.id)).toEqual(['back', 'home', 'recents']);
+    expect(navKeysFor('remote').map((item) => item.id)).toEqual(['back', 'home', 'recents']);
   });
 
   it('每个键都有 label 和 hint（按钮不能只有图标）', () => {
@@ -34,5 +33,17 @@ describe('每台设备有哪些实体导航键', () => {
         expect(item.hint.length).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe('面板头那颗电源键', () => {
+  it('Android / iOS / mock 都有，只是文案不同（iOS 是侧边按钮）', () => {
+    expect(powerKeyFor('android')?.id).toBe('power');
+    expect(powerKeyFor('ios')?.hint).toContain('侧边按钮');
+    expect(powerKeyFor('mock')?.label).toBe('电源');
+  });
+
+  it('macOS 本机窗口没有：MAC_KEYS 里没有 power', () => {
+    expect(powerKeyFor('windows')).toBeNull();
   });
 });

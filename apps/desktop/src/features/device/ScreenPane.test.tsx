@@ -372,6 +372,41 @@ describe('画面栏面板头的两个模式开关（控制 / 录操作）', () =
     expect(record).toHaveAttribute('title', expect.stringContaining('未连接'));
     expect(screen.getByText('控制').closest('button')).toBeEnabled();
   });
+
+  it('电源键在面板头（不占投屏下面那条）：点了发 power', () => {
+    const pressKey = vi.fn(() => Promise.resolve());
+    useSessionStore.setState({ pressKey });
+    renderScreen();
+
+    const power = screen.getByText('电源').closest('button');
+    expect(power).toBeInTheDocument();
+    expect(screen.getByTestId('device-controls')).not.toContainElement(power);
+
+    fireEvent.click(power as HTMLButtonElement);
+    expect(pressKey).toHaveBeenCalledWith(DEVICE, 'power');
+  });
+
+  it('macOS 本机窗口（kind=windows）：面板头上没有电源键（发了也只会报不支持）', () => {
+    renderScreen();
+    // 换成一台 macOS 本机窗口（引擎把它报成 windows）：kind 变了，面板头要跟着去掉电源键
+    act(() => {
+      useDeviceStore.setState({
+        devices: [
+          {
+            id: DEVICE,
+            name: 'Safari',
+            uri: 'Mac:///?window=89',
+            kind: 'windows',
+            status: 'connected',
+            resolution: [1200, 800],
+            fps: 9,
+          },
+        ],
+      });
+    });
+
+    expect(screen.queryByText('电源')).toBeNull();
+  });
 });
 
 describe('画面左下角浮层：帧信息 + 运行态合成一条（曾经两块叠在一起）', () => {

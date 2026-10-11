@@ -16,6 +16,7 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { type ReactNode, useState } from 'react';
 
+import { buildActionMenu } from '@/features/graph/action-menu';
 import { GraphContextMenu } from '@/features/graph/GraphContextMenu';
 import { TemplateMini } from '@/features/recognizers/TemplateThumb';
 import { PIN_KEYS, togglePin } from '@/lib/param-vars';
@@ -25,6 +26,7 @@ import { actionRun as runAction } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
+import { useLibraryStore } from '@/stores/library.store';
 import { useUiStore } from '@/stores/ui.store';
 import type { EdgeAction } from '@/types';
 
@@ -49,21 +51,6 @@ const SIZES = {
     pin: 'text-body',
   },
 } as const;
-
-/**
- * "＋操作"菜单里的动作类型（对齐引擎 ActionSpec.type，见 docs/rpc.md）。
- * 参数和目标都在下方详情面板里绑 —— 菜单只负责"加哪一类"。
- */
-const ACTION_KINDS = [
-  { type: 'click', label: '点击', hint: '坐标/模板目标' },
-  { type: 'long_press', label: '长按', hint: '' },
-  { type: 'swipe', label: '滑动', hint: '起点→终点' },
-  { type: 'wait', label: '等待', hint: '秒' },
-  { type: 'key', label: '按键', hint: 'back/home 等' },
-  { type: 'text', label: '输入文字', hint: '' },
-  { type: 'set', label: '赋值', hint: '写变量' },
-  { type: 'call', label: '调用子脚本', hint: '' },
-] as const;
 
 export interface StateNodeData extends Record<string, unknown> {
   label: string;
@@ -110,10 +97,14 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
   );
   const selectEdge = useGraphStore((state) => state.selectEdge);
   const removeEdge = useGraphStore((state) => state.removeEdge);
+  const removeNode = useGraphStore((state) => state.removeNode);
   const addStep = useGraphStore((state) => state.addStep);
   const selectNode = useGraphStore((state) => state.selectNode);
-  /** ＋操作菜单的锚点（屏幕坐标）；null = 关闭 */
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * 菜单锚点（屏幕坐标）：null = 关闭。
+   * `kind` 决定弹哪套菜单 —— 节点级操作（改名/分支/删除）还是"添加操作"的二级菜单。
+   */
+  const [menu, setMenu] = useState<{ x: number; y: number; kind: 'node' | 'actions' } | null>(null);
   /** 正在执行的那一步（按钮转圈用） */
   const [running, setRunning] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -121,6 +112,13 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
   const scale = useUiStore((state) => state.nodeScale);
   const size = SIZES[scale];
   const thumb = size.thumb;
+  /*
+   * 脚本库（"调用子脚本"的二级菜单要用）。
+   * ⚠️ selector 里**不能** `.map()`：每次返回新数组 → useSyncExternalStore 认为状态一直在变
+   * → 无限重渲染（"Maximum update depth exceeded"，和 graphVariables 那个坑同一个）。
+   */
+  const scripts = useLibraryStore((state) => state.items);
+  const scriptNames = scripts.map((item) => item.name);
 
   const commit = (): void => {
     setEditing(false);
@@ -171,7 +169,8 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
       data-run={data.active ? 'active' : data.pending ? 'pending' : undefined}
       className={cn(
         // group：悬停卡片时，连线圆点跟着变亮（不然 10px 的点很难瞄准）
-        'group relative rounded-sm border bg-panel',
+        // state-node：graph.css 的悬停/拖拽/运行态（呼吸、闪烁）都挂在这个类上，别删
+        'state-node group relative rounded-sm border bg-panel',
         size.card,
         // 悬停：描边提亮 + 底色抬一级（以前只有 grab 光标，鼠标放上去毫无变化）
         'transition-colors duration-120 hover:border-brand/60 hover:bg-raised',
@@ -194,34 +193,52 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
         position={Position.Left}
         className="!size-2.5 !border-2 !border-canvas !bg-idle group-hover:!bg-brand"
       />
-      {editing ? (
-        <input
-          autoFocus
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={commit}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              commit();
-            }
-            if (event.key === 'Escape') {
-              setDraft(data.label);
-              setEditing(false);
-            }
+      {/* 标题行：名字 + ⋯ 菜单。命中区域够大（h-5），不再是一排 10px 的小按钮 */}
+      <div className="flex items-center gap-1">
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <input
+              autoFocus
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onBlur={commit}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  commit();
+                }
+                if (event.key === 'Escape') {
+                  setDraft(data.label);
+                  setEditing(false);
+                }
+                event.stopPropagation();
+              }}
+              className={cn('w-full rounded-sm border border-brand bg-canvas px-1 text-fg', size.title)}
+            />
+          ) : (
+            <div className={cn('truncate', size.title)}>{data.label}</div>
+          )}
+        </div>
+        <button
+          type="button"
+          title="这个界面的操作：改名 / 加分支 / 删除"
+          data-testid="node-more"
+          onClick={(event) => {
             event.stopPropagation();
+            const rect = event.currentTarget.getBoundingClientRect();
+            setMenu({ x: rect.right - 8, y: rect.bottom + 4, kind: 'node' });
           }}
-          className={cn('w-full rounded-sm border border-brand bg-canvas px-1 text-fg', size.title)}
-        />
-      ) : (
-        <div className={cn('truncate', size.title)}>{data.label}</div>
-      )}
+          className="grid size-5 shrink-0 place-items-center rounded-sm text-faint hover:bg-raised hover:text-fg"
+        >
+          ⋯
+        </button>
+      </div>
       <div className={cn('flex items-center gap-1 text-faint', size.meta)}>
         {/* 这个界面靠哪些模板认出来：画布上直接给截图，一眼看出"主界面长这样" */}
         {(data.enterTemplates ?? []).map((label) => (
           <TemplateMini key={label} label={label} size={thumb} />
         ))}
         <span className="truncate">
-          {data.sub} · {data.visits} 次
+          {data.sub} · {data.visits} 次{data.pins.length > 0 ? ` · ${data.pins.length} 步` : ''}
         </span>
       </div>
 
@@ -259,47 +276,31 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
               <span className="text-badge text-faint">（还没有模板：先去画面栏框选录制）</span>
             )}
           </div>
-          <div className="flex items-center gap-1">
-            {/*
-              ＋操作：**先出菜单选动作类型**（以前直接建一个 click，用户不知道建了什么、也不知道怎么改）。
-              菜单里还能直接绑定识别器（"点击某个模板"），建完自动选中那一步，参数在下方详情里改。
-            */}
-            <button
-              type="button"
-              title="加一步操作：先选动作类型，也可以直接选一个模板当目标"
-              onClick={(event) => {
-                event.stopPropagation();
-                const rect = event.currentTarget.getBoundingClientRect();
-                setMenu({ x: rect.left, y: rect.bottom + 4 });
-              }}
-              className={cn(
-                'self-start rounded-sm border border-line px-1 text-dim hover:bg-raised hover:text-fg',
-                size.pin,
-              )}
-            >
-              ＋操作
-            </button>
-            <button
-              type="button"
-              title="加分支：识别器出现 → 去 A；不出现 → 去 B"
-              onClick={(event) => {
-                event.stopPropagation();
-                selectNode(data.sub); // 分支在下方详情里配置（需要选目标节点）
-              }}
-              className={cn(
-                'self-start rounded-sm border border-line px-1 text-dim hover:bg-raised hover:text-fg',
-                size.pin,
-              )}
-            >
-              分支
-            </button>
-          </div>
+          {/* 添加操作：一级选类型、二级选参数（模板/时长/按键/变量/脚本） */}
+          <button
+            type="button"
+            title="加一步操作：先选类型，再选参数（也可以直接绑定某个模板）"
+            data-testid="add-action"
+            onClick={(event) => {
+              event.stopPropagation();
+              const rect = event.currentTarget.getBoundingClientRect();
+              setMenu({ x: rect.left, y: rect.bottom + 4, kind: 'actions' });
+            }}
+            className={cn(
+              'flex h-6 w-full items-center justify-center gap-1 rounded-sm border border-line',
+              'text-dim hover:border-brand/60 hover:bg-raised hover:text-fg',
+              size.pin,
+            )}
+          >
+            <span>＋ 添加操作</span>
+            <span className="text-faint">▸</span>
+          </button>
         </div>
       )}
 
       {showPins &&
         data.pins.map((item) => (
-          <div key={item.key} className="mt-0.5 flex flex-wrap items-center gap-0.5">
+          <div key={item.key} className="mt-0.5 flex flex-wrap items-center gap-1">
             {/* 这一步点的是哪个图标：画布上直接给缩略图，不用去翻识别器面板 */}
             {item.template && <TemplateMini label={item.template} size={thumb} />}
             {/*
@@ -313,7 +314,10 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
                 event.stopPropagation();
                 selectEdge(item.key);
               }}
-              className={cn('rounded-sm px-0.5 text-dim hover:bg-raised hover:text-fg', size.pin)}
+              className={cn(
+                'h-5 min-w-0 flex-1 truncate rounded-sm px-1 text-left text-dim hover:bg-raised hover:text-fg',
+                size.pin,
+              )}
             >
               {item.title}
             </button>
@@ -327,8 +331,8 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
                 void runStep(item);
               }}
               className={cn(
-                'rounded-sm border border-line px-0.5 text-dim hover:bg-raised hover:text-fg',
-                size.pin,
+                'grid size-5 shrink-0 place-items-center rounded-sm border border-line',
+                'text-dim hover:bg-raised hover:text-confirmed',
                 running === item.key && 'text-brand',
               )}
             >
@@ -342,10 +346,7 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
                 event.stopPropagation();
                 void removeEdge(String(data.deviceId), item.key);
               }}
-              className={cn(
-                'rounded-sm border border-line px-0.5 text-faint hover:bg-raised hover:text-failed',
-                size.pin,
-              )}
+              className="grid size-5 shrink-0 place-items-center rounded-sm border border-line text-faint hover:bg-raised hover:text-failed"
             >
               ✕
             </button>
@@ -399,33 +400,47 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
         className="!size-2.5 !border-2 !border-canvas !bg-idle group-hover:!bg-brand"
       />
 
-      {/* ＋操作菜单：动作类型 + 直接绑定识别器（"点击某个模板"） */}
+      {/* 菜单：节点级操作（⋯）/ 添加操作（一级选类型，二级选参数） */}
       {menu && (
         <div onMouseDown={(event) => event.stopPropagation()}>
           <GraphContextMenu
             anchor={{
               kind: 'node',
               flow: { x: 0, y: 0 },
-              screen: menu,
-              title: '加一步操作',
-              items: [
-                ...ACTION_KINDS.map((kind) => ({
-                  label: `＋ ${kind.label}`,
-                  hint: kind.hint,
-                  onSelect: () => createStep({ action: { type: kind.type } }),
-                })),
-                ...(data.allTemplates ?? []).slice(0, 6).map((label) => ({
-                  label: `点击「${label}」`,
-                  hint: '绑定模板',
-                  divider: label === (data.allTemplates ?? [])[0],
-                  onSelect: () =>
-                    createStep({
-                      action: { type: 'click', target: label },
-                      when: label,
-                      condition: { all_of: [label] },
-                    }),
-                })),
-              ],
+              screen: { x: menu.x, y: menu.y },
+              title: menu.kind === 'actions' ? '加一步操作' : `界面 ${data.label}`,
+              items:
+                menu.kind === 'actions'
+                  ? buildActionMenu({
+                      templates: data.allTemplates ?? [],
+                      variables: graphVariables.map((item) => item.name),
+                      scripts: scriptNames,
+                      create: createStep,
+                    })
+                  : [
+                      {
+                        label: '重命名',
+                        hint: '或双击节点',
+                        onSelect: () => {
+                          setDraft(data.label);
+                          setEditing(true);
+                        },
+                      },
+                      {
+                        label: '加分支（出现 → A，不出现 → B）',
+                        hint: '详情里配',
+                        onSelect: () => selectNode(data.sub),
+                      },
+                      {
+                        label: '删除这个界面',
+                        danger: true,
+                        divider: true,
+                        onSelect: () => {
+                          void removeNode(String(data.deviceId), data.sub);
+                          selectNode(null);
+                        },
+                      },
+                    ],
             }}
             onClose={() => setMenu(null)}
           />
