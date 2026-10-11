@@ -9,6 +9,7 @@
  */
 import { type ReactNode, useState } from 'react';
 
+import { collectVariableUsage, usageSummary } from '@/lib/variable-usage';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
 import type { GraphData } from '@/types';
@@ -25,6 +26,8 @@ export function VariablesPanel({
   const [error, setError] = useState<string | null>(null);
 
   const variables = graph?.variables ?? [];
+  // 数据流：这个变量被哪些步骤用着（改之前就知道会影响谁）
+  const usage = collectVariableUsage(graph);
 
   const save = async (
     next: Record<string, { type?: string; value?: string | number | boolean }>,
@@ -75,6 +78,9 @@ export function VariablesPanel({
             }}
             className="h-5 min-w-0 flex-1 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
           />
+          <span className="w-40 shrink-0 truncate text-faint" title="哪些步骤在用它">
+            {usageSummary(usage.byVariable[item.name] ?? [])}
+          </span>
           <span className="w-20 shrink-0 text-right text-faint" title="运行时当前值">
             {item.runtimeValue !== undefined ? `当前 ${String(item.runtimeValue)}` : ''}
           </span>
