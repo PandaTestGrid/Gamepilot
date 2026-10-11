@@ -32,6 +32,7 @@ from ..protocol import (
     METHOD_PROJECT_SET,
     METHOD_WORKSPACE_CREATE,
     METHOD_WORKSPACE_LIST,
+    METHOD_WORKSPACE_MIGRATE,
     METHOD_WORKSPACE_MKDIR,
     METHOD_WORKSPACE_TREE,
 )
@@ -88,6 +89,17 @@ def register(server: RpcServer, manager: SessionManager) -> None:
     def _project_list(params: dict[str, Any]) -> dict[str, Any]:
         base = params.get("base")
         return {"items": manager.list_projects(str(base) if base else None)}
+
+    @server.method(METHOD_WORKSPACE_MIGRATE)
+    def _workspace_migrate(params: dict[str, Any]) -> dict[str, Any]:
+        """把项目下"直接就是状态图"的老布局迁成 工作区 > 任务（先备份到 .trash/）。"""
+        project = params.get("project")
+        target = str(project) if isinstance(project, str) and project else manager.project.root
+        task_name = params.get("taskName")
+        moved = workspaces.migrate_legacy(
+            target, str(task_name) if isinstance(task_name, str) and task_name else "默认任务"
+        )
+        return {"moved": moved, "projects": workspaces.tree()}
 
     @server.method(METHOD_WORKSPACE_MKDIR)
     def _workspace_mkdir(params: dict[str, Any]) -> dict[str, Any]:

@@ -78,3 +78,32 @@ def test_make_workspace_dir(tmp_path: Path) -> None:
         workspaces.make_workspace_dir(str(project), "阴阳师")
     with pytest.raises(ValueError, match="项目目录不存在"):
         workspaces.make_workspace_dir(str(tmp_path / "不存在"), "x")
+
+
+def test_migrate_legacy_moves_graph_into_task_dir(tmp_path: Path) -> None:
+    """老布局迁移：`<ws>/{graph.json,templates}` → `<ws>/<任务>/{graph.json,templates}`，并先备份。"""
+    import shutil
+
+    from gamepilot.library import create_script
+
+    base = tmp_path / workspaces.DEFAULT_ROOT
+    base.mkdir(parents=True, exist_ok=True)
+    script = create_script(str(base), "阴阳师")
+    (tmp_path / "shot.png").write_bytes(b"x")
+    shutil.copy(tmp_path / "shot.png", os.path.join(script, "templates", "t.png"))
+
+    moved = workspaces.migrate_legacy(str(base))
+    assert len(moved) == 1
+    task_root = moved[0]["root"]
+    assert task_root.endswith("阴阳师/默认任务")
+    assert os.path.isfile(os.path.join(task_root, "graph.json"))
+    assert os.path.isfile(os.path.join(task_root, "templates", "t.png")), "模板要跟着走"
+    assert os.path.isdir(moved[0]["backup"]), "迁移前必须先备份，可回退"
+
+    # 迁移后树里：工作区=阴阳师，任务=默认任务
+    buckets = workspaces.tree(str(tmp_path))[0]["workspaces"]
+    assert [item["name"] for item in buckets] == ["阴阳师"]
+    assert [task["name"] for task in buckets[0]["tasks"]] == ["默认任务"]
+    # 再迁一次要报错（幂等保护）
+    with pytest.raises(ValueError, match="没有需要迁移"):
+        workspaces.migrate_legacy(str(base))

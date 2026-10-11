@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -183,3 +185,43 @@ def make_workspace_dir(project: str, name: str) -> str:
         raise ValueError(f"这个项目里已经有叫「{clean}」的工作区了")
     os.makedirs(target, exist_ok=True)
     return target
+
+
+def migrate_legacy(project: str, task_name: str = "默认任务", backup_root: str | None = None) -> list[dict[str, str]]:
+    """把"库根下直接是状态图"的老布局，迁成 **工作区目录 > 任务目录**。
+
+    用户要的层级是：项目 › **工作区**（管理它下面所有状态图）› 状态图 = 任务。
+    老布局里 `projects/阴阳师/` 自己就是一张状态图 —— 于是"工作区"和"状态图"看着绑在一起。
+    这里把 `projects/阴阳师/{graph.json,templates/}` 挪到 `projects/阴阳师/<任务名>/` 下面，
+    阴阳师 就成了一个**真正的工作区**（里面可以再放别的状态图）。
+
+    安全第一：先把整个目录**复制**到备份处（默认 `<项目>/.trash/`），确认复制成功后才删除原文件。
+    """
+    root = os.path.abspath(os.path.expanduser(project))
+    if not os.path.isdir(root):
+        raise ValueError(f"项目目录不存在: {root}")
+    backup = os.path.abspath(backup_root) if backup_root else os.path.join(root, ".trash")
+
+    moved: list[dict[str, str]] = []
+    for entry in _subdirs(root):
+        if _task_summary(entry) is None:  # 不是老布局的状态图
+            continue
+        workspace_name = os.path.basename(entry)
+        target = os.path.join(entry, task_name)
+        if os.path.exists(target):
+            raise ValueError(f"已经迁移过了: {target}")
+        # ① 先备份（整目录复制）
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        saved = os.path.join(backup, f"{workspace_name}-{stamp}")
+        os.makedirs(backup, exist_ok=True)
+        shutil.copytree(entry, saved)
+        # ② 再就地把 graph.json + templates/ 挪进任务子目录
+        os.makedirs(target, exist_ok=True)
+        for item in (SCRIPT_FILE, "templates"):
+            source = os.path.join(entry, item)
+            if os.path.exists(source):
+                shutil.move(source, os.path.join(target, item))
+        moved.append({"workspace": workspace_name, "task": task_name, "root": target, "backup": saved})
+    if not moved:
+        raise ValueError("没有需要迁移的老布局脚本（或都已经是三层结构了）")
+    return moved
