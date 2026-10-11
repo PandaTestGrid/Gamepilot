@@ -267,6 +267,7 @@ function SingleScreen({
   // 控制模式下的鼠标操作：按下→抬起是轻触，拖拽是滑动
   const controlStart = useRef<{ x: number; y: number; at: number; moved: boolean } | null>(null);
   const lastMoveAt = useRef(0);
+  // 反馈点存的是**画面归一化坐标**，渲染时要换算成容器像素（否则有黑边时看起来是偏的）
   const [ripple, setRipple] = useState<{ x: number; y: number; id: number } | null>(null);
 
   // 画面的实际显示矩形（容器相对坐标）：object-contain 会有黑边，控制坐标只按画面算
@@ -283,8 +284,11 @@ function SingleScreen({
       if (!image || image.naturalWidth === 0) {
         return;
       }
+      // 用 border-box（和指针事件的 getBoundingClientRect 同一参照系），
+      // 否则容器那 1px 边框会让坐标差一点点
+      const rect = container.getBoundingClientRect();
       const box = containBox(
-        { width: container.clientWidth, height: container.clientHeight },
+        { width: rect.width, height: rect.height },
         { width: image.naturalWidth, height: image.naturalHeight },
       );
       setImageBox(box);
@@ -293,7 +297,7 @@ function SingleScreen({
         const key = `画面区域 ${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}x${Math.round(box.height)}`;
         if (key !== lastImageBoxKey) {
           lastImageBoxKey = key;
-          devLog(`${key}（容器 ${container.clientWidth}x${container.clientHeight}，黑边不参与控制）`);
+          devLog(`${key}（容器 ${Math.round(rect.width)}x${Math.round(rect.height)}，黑边不参与控制）`);
         }
       }
     };
@@ -412,6 +416,16 @@ function SingleScreen({
           return; // 落在黑边上：背景区域不算
         }
         event.currentTarget.setPointerCapture(event.pointerId);
+        // 诊断：把"点了哪里 → 换算成画面哪里"打出来，偏差能一眼看出在哪一步
+        if (imageBox) {
+          const rect = event.currentTarget.getBoundingClientRect();
+          devLog(
+            `控制: 鼠标(${Math.round(event.clientX - rect.left)},${Math.round(event.clientY - rect.top)})` +
+              ` 容器 ${Math.round(rect.width)}x${Math.round(rect.height)}` +
+              ` 画面 ${Math.round(imageBox.left)},${Math.round(imageBox.top)} ${Math.round(imageBox.width)}x${Math.round(imageBox.height)}` +
+              ` → 归一化(${point[0].toFixed(3)},${point[1].toFixed(3)})`,
+          );
+        }
         controlStart.current = { x: point[0], y: point[1], at: performance.now(), moved: false };
         recordStart.current = { x: point[0], y: point[1], at: performance.now() };
         lastMoveAt.current = 0;
@@ -521,7 +535,15 @@ function SingleScreen({
         <span
           key={ripple.id}
           className="pointer-events-none absolute size-8 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full border-2 border-brand/80 bg-brand/15"
-          style={{ left: `${ripple.x * 100}%`, top: `${ripple.y * 100}%` }}
+          style={
+            imageBox
+              ? {
+                  // 归一化 → 容器像素：画在"手机真正收到触摸的位置"上
+                  left: imageBox.left + ripple.x * imageBox.width,
+                  top: imageBox.top + ripple.y * imageBox.height,
+                }
+              : { left: `${ripple.x * 100}%`, top: `${ripple.y * 100}%` }
+          }
         />
       )}
 
