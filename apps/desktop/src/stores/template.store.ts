@@ -87,8 +87,10 @@ export const useTemplateStore = create<TemplateState>()((set, get) => {
         if (generation.get(key) !== ticket) {
           return; // 已经有更新的一次请求了，旧结果丢掉
         }
-        // 引擎返回 { label, mode, width, height, png }：图片在 png 字段（data URL）
-        const url = typeof data === 'string' ? data : String((data as { png?: string })?.png ?? '');
+        // 引擎返回 { label, mode, width, height, png }：png 是**裸 base64**（不是 data URL！），
+        // 直接塞进 <img src> 浏览器识别不了 → 必须补前缀。踩过两次，别再删这段。
+        const raw = typeof data === 'string' ? data : String((data as { png?: string })?.png ?? '');
+        const url = !raw ? '' : raw.startsWith('data:') ? raw : `data:image/png;base64,${raw}`;
         if (!url) {
           throw new Error('引擎没返回图片数据');
         }

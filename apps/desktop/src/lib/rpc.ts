@@ -23,9 +23,59 @@ export interface EngineNotification {
   readonly params: Record<string, unknown>;
 }
 
-/** 发一个 JSON-RPC 请求并等待响应；错误由 Rust 侧转成 rejected promise。 */
+/**
+ * 把"引擎/Rust 桥抛上来的错误"整成一句能直接显示给人看的话。
+ *
+ * 踩过的坑：JSON-RPC 的错误信封是 `{code, message}`，Rust 桥整块 format 进字符串，
+ * 于是错误条上显示的是
+ * `引擎返回错误: {"code":-32603,"message":"RuntimeError: 『相机』还在被使用，先改掉再删：…"}`
+ * —— 用户看不到重点（被谁引用了），只看到一坨 JSON。
+ *
+ * 处理三件事：
+ * 1. **拆信封**：只留 `message`（"引擎返回错误: "这类前缀保留，它说明哪一层报的）；
+ * 2. 去掉 Python 异常类名前缀（`RuntimeError: ` / `ValueError: ` …）：对用户没有意义；
+ * 3. `KeyError` 的 `str()` 会带一层单引号（`'识别器不存在: x'`），也去掉。
+ *
+ * 不是 JSON 信封的（Rust 自己的"引擎响应超时"之类）原样返回。
+ */
+export function cleanErrorText(raw: string): string {
+  const text = (raw ?? '').trim();
+  const brace = text.indexOf('{');
+  if (brace >= 0) {
+    try {
+      const parsed: unknown = JSON.parse(text.slice(brace));
+      const message = (parsed as { message?: unknown } | null)?.message;
+      if (typeof message === 'string' && message.trim()) {
+        return `${text.slice(0, brace)}${stripPythonPrefix(message)}`.trim();
+      }
+    } catch {
+      // 不是 JSON（消息里本来就带 `{`，比如"params 必须是对象"）：按原文处理
+    }
+  }
+  return stripPythonPrefix(text);
+}
+
+function stripPythonPrefix(message: string): string {
+  let text = message.replace(/^[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning):\s*/, '').trim();
+  if (text.length >= 2 && text.startsWith("'") && text.endsWith("'")) {
+    text = text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+/**
+ * 发一个 JSON-RPC 请求并等待响应。
+ *
+ * **错误在这里统一出口**：调用方 catch 到的永远是 message 已经清理过的 `Error`。
+ * 以前 20 多处各写各的 `error instanceof Error ? error.message : String(error)`，
+ * 谁也没拆信封 —— 所以修在这一处，而不是每个 catch 里各补一遍。
+ */
 export async function rpc<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  return invoke<T>('engine_rpc', { method, params });
+  try {
+    return await invoke<T>('engine_rpc', { method, params });
+  } catch (error) {
+    throw new Error(cleanErrorText(error instanceof Error ? error.message : String(error)));
+  }
 }
 
 /** 拉起引擎 sidecar（幂等：已在运行则直接返回）。 */
