@@ -8,6 +8,8 @@
  */
 import { type ReactNode, useEffect, useState } from 'react';
 
+import { Copy, Folder, FolderOpen, Pencil, Plus, Trash2 } from 'lucide-react';
+
 import {
   devLog,
   projectCreate,
@@ -21,7 +23,7 @@ import { ScriptNameForm } from '@/features/library/ScriptNameForm';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
 
-const ROW = 'flex h-[26px] w-full min-w-0 items-center gap-1 px-1 hover:bg-raised';
+const ROW = 'flex h-[26px] w-full min-w-0 items-center gap-1 py-0 pr-2 pl-1 hover:bg-raised';
 
 export function WorkspaceTree(): ReactNode {
   const currentRoot = useSessionStore((state) => state.project?.root ?? '');
@@ -138,7 +140,13 @@ export function WorkspaceTree(): ReactNode {
                     title={folded ? '展开' : '收起'}
                     className="flex min-w-0 flex-1 items-center gap-1 pl-2 text-left"
                   >
-                    <span className="w-3 shrink-0 text-faint">{folded ? '▸' : '▾'}</span>
+                    <span className="w-3 shrink-0 text-faint">
+                      {folded ? (
+                        <Folder className="size-3 shrink-0 text-faint" />
+                      ) : (
+                        <FolderOpen className="size-3 shrink-0 text-faint" />
+                      )}
+                    </span>
                     <span className="min-w-0 flex-1 truncate text-fg">{project.name}</span>
                     <span className="shrink-0 text-faint">{(project.tasks ?? []).length} 图</span>
                   </button>
@@ -150,7 +158,7 @@ export function WorkspaceTree(): ReactNode {
                     }}
                     className="shrink-0 rounded-sm border border-line px-1 text-dim opacity-0 group-hover:opacity-100 hover:bg-raised hover:text-fg"
                   >
-                    ＋状态图
+                    <Plus className="size-3" /> 状态图
                   </button>
                 </div>
 
@@ -178,7 +186,7 @@ export function WorkspaceTree(): ReactNode {
                               {task.nodes}/{task.edges}
                             </span>
                           </button>
-                          <span className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover/row:opacity-100">
+                          <span className="flex shrink-0 items-center gap-1 pr-1 opacity-0 group-hover/row:opacity-100">
                             <button
                               type="button"
                               title="重命名"
@@ -187,7 +195,7 @@ export function WorkspaceTree(): ReactNode {
                               }}
                               className="rounded-sm border border-line px-1 text-faint hover:text-fg"
                             >
-                              改
+                              <Pencil className="size-3" />
                             </button>
                             <button
                               type="button"
@@ -201,7 +209,7 @@ export function WorkspaceTree(): ReactNode {
                               }}
                               className="rounded-sm border border-line px-1 text-faint hover:text-fg"
                             >
-                              副
+                              <Copy className="size-3" />
                             </button>
                             <button
                               type="button"
@@ -209,7 +217,7 @@ export function WorkspaceTree(): ReactNode {
                               onClick={() => void remove(task.root).then(load)}
                               className="rounded-sm border border-line px-1 text-faint hover:text-failed"
                             >
-                              删
+                              <Trash2 className="size-3" />
                             </button>
                           </span>
                         </div>
