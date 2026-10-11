@@ -39,7 +39,8 @@ import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { toGraphData } from '@/lib/graph-adapter';
 import { type EdgeStatus, evaluateEdge, markShadowed } from '@/lib/edge-status';
-import { edgeLabel } from '@/lib/graph-logic';
+import { actionPins, summarizePins, type ActionPin } from '@/lib/action-pins';
+import { describeAction, edgeLabel } from '@/lib/graph-logic';
 import { devLog, graphGet, graphSave } from '@/lib/rpc';
 import { useGraphStore } from '@/stores/graph.store';
 
@@ -47,6 +48,9 @@ interface StateNodeData extends Record<string, unknown> {
   label: string;
   sub: string;
   deviceId: string;
+  /** 这个界面的出口操作（选中时摊开成"引脚"） */
+  pins: ReadonlyArray<{ key: string; title: string; pins: readonly ActionPin[] }>;
+  expanded?: boolean;
   visits: number;
   active: boolean;
   pending: boolean;
@@ -55,6 +59,9 @@ interface StateNodeData extends Record<string, unknown> {
 type StateNodeType = Node<StateNodeData, 'state'>;
 
 function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
+  // 选中（或状态机停在这）时摊开这个界面的操作参数 —— 蓝图里的"引脚"，
+  // 变量引用会高亮：一眼看出哪一步的参数是"活的"
+  const showPins = (data.active || data.expanded) && data.pins.length > 0;
   // 双击就地改名：这是最常用的一次编辑，不该每次都跑到下面的面板
   const updateNode = useGraphStore((state) => state.updateNode);
   const [editing, setEditing] = useState(false);
@@ -113,6 +120,24 @@ function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
       <div className="text-badge text-faint">
         {data.sub} · {data.visits} 次
       </div>
+      {showPins &&
+        data.pins.map((item) => (
+          <div key={item.key} className="mt-0.5 flex flex-wrap items-center gap-0.5">
+            <span className="text-badge text-dim">{item.title}</span>
+            {item.pins.map((pin) => (
+              <span
+                key={`${item.key}-${pin.label}`}
+                className={cn(
+                  'rounded-sm border px-0.5 text-badge',
+                  pin.isVar ? 'border-brand text-brand' : 'border-line text-faint',
+                )}
+                title={`${pin.label} = ${pin.value}${pin.isVar ? '（变量）' : ''}`}
+              >
+                {pin.label}:{pin.value}
+              </span>
+            ))}
+          </div>
+        ))}
       <Handle
         type="source"
         position={Position.Right}
@@ -145,6 +170,10 @@ export function GraphPane(): ReactNode {
   // 关键：节点数组只在"位置/名字/识别器/激活态"变化时重建。
   // 直接用 [graph] 当依赖的话，每帧的实时分数更新都会造出一批新节点对象，
   // React Flow 是被控模式，拖动过程中会被新 props 按回旧坐标 —— 表现就是"拖不动/不跟手"。
+  // 引脚内容也要进签名：改了动作参数或选中项，节点要重建
+  const pinSignature = `${selectedNodeId ?? ''}|${(graph?.edges ?? [])
+    .map((edge) => `${edge.id}:${JSON.stringify(edge.actionSpec)}`)
+    .join(';')}`;
   const nodeSignature = (graph?.nodes ?? [])
     .map((node) => `${node.id}:${node.x},${node.y},${node.name},${node.enter.join('|')}`)
     .join(';')
@@ -190,13 +219,21 @@ export function GraphPane(): ReactNode {
           label: node.name,
           sub: node.id,
           deviceId: activeId,
+          expanded: node.id === selectedNodeId,
+          pins: (graph?.edges ?? [])
+            .filter((edge) => edge.from === node.id)
+            .map((edge) => ({
+              key: edge.id,
+              title: describeAction(edge.actionSpec, true),
+              pins: summarizePins(actionPins(edge.actionSpec)),
+            })),
           visits: node.visits,
           active: graph?.activeNodeId === node.id,
           pending: graph?.pendingNodeId === node.id,
         },
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 用签名代替 graph 整体：实时分数不该触发重建
-    [nodeSignature, dragging],
+    [nodeSignature, pinSignature, dragging],
   );
 
   // 每条边"现在走不走得通"：调试脚本时一眼看出卡在哪（纯逻辑在 lib/edge-status.ts）
