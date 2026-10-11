@@ -1,8 +1,8 @@
 /**
- * 欢迎卡片：**没有项目时**给新用户明确的出路（照 IDE 欢迎页的意思）。
+ * 欢迎卡片：**没有工作区时**给新用户明确的出路（照 IDE 欢迎页的意思）。
  *
- * 层级关系（重要）：项目 › **工作区** › 状态图；**状态图 = 任务**，
- * 工作区是状态图的上一级、管理它下面的所有状态图（任务）。
+ * 层级关系（重要）：工作区 › **项目** › 状态图；**状态图 = 任务**，
+ * 项目是状态图的上一级、管理它下面的所有状态图（任务）。
  */
 import { type ReactNode, useEffect, useState } from 'react';
 
@@ -15,7 +15,7 @@ export function WelcomeCard(): ReactNode {
 
   const load = async (): Promise<void> => {
     try {
-      // 引擎/测试环境可能给不出结构（例如被 mock 成 undefined）→ 一律降级成"没有项目"
+      // 引擎/测试环境可能给不出结构（例如被 mock 成 undefined）→ 一律降级成"没有工作区"
       const result = await workspaceTree();
       setProjects(result?.projects ?? []);
     } catch (error: unknown) {
@@ -33,14 +33,14 @@ export function WelcomeCard(): ReactNode {
   };
 
   const createProject = (): void => {
-    const name = ask('新项目名字（最外层，例如「游戏自动化」）');
+    const name = ask('新工作区名字（最外层，例如「游戏自动化」）');
     if (name) {
       void (async () => {
         try {
           await workspaceCreate(name);
           await load();
         } catch (reason) {
-          devLog(`新建项目失败: ${String(reason)}`);
+          devLog(`新建工作区失败: ${String(reason)}`);
         }
       })();
     }
@@ -48,14 +48,14 @@ export function WelcomeCard(): ReactNode {
 
   const createWorkspace = (): void => {
     const target = projects[0];
-    const name = ask('新工作区名字（一个游戏/一个空间，例如「阴阳师」）');
+    const name = ask('新项目名字（一个游戏/一个空间，例如「阴阳师」）');
     if (name && target) {
       void (async () => {
         try {
           await workspaceMkdir(target.root, name);
           await load();
         } catch (reason) {
-          devLog(`新建工作区失败: ${String(reason)}`);
+          devLog(`新建项目失败: ${String(reason)}`);
         }
       })();
     }
@@ -88,16 +88,18 @@ export function WelcomeCard(): ReactNode {
   );
 
   const actions: ReadonlyArray<{ title: string; hint: string; onClick: () => void }> = [
-    { title: '＋ 新建项目', hint: '最外层，例如「游戏自动化」', onClick: createProject },
-    { title: '＋ 新建工作区', hint: '项目 › 工作区，例如「阴阳师」', onClick: createWorkspace },
-    { title: '＋ 新建任务', hint: '工作区 › 任务（= 一张状态图）', onClick: createTask },
+    { title: '＋ 新建工作区', hint: '最外层，例如「游戏自动化」', onClick: createProject },
+    { title: '＋ 新建项目', hint: '工作区 › 项目，例如「阴阳师」', onClick: createWorkspace },
+    { title: '＋ 新建任务', hint: '项目 › 任务（= 一张状态图）', onClick: createTask },
   ];
 
   return (
     <div className="flex h-full flex-col gap-1.5 overflow-auto p-3">
-      <div className="text-body text-fg">{projects.length === 0 ? '还没有项目' : '项目 › 工作区 › 任务'}</div>
+      <div className="text-body text-fg">
+        {projects.length === 0 ? '还没有工作区' : '工作区 › 项目 › 任务'}
+      </div>
       <div className="text-badge text-faint">
-        层级：<span className="text-fg">项目</span> › <span className="text-fg">工作区</span>
+        层级：<span className="text-fg">工作区</span> › <span className="text-fg">项目</span>
         （管理它下面所有状态图）› <span className="text-fg">任务 = 状态图</span>
       </div>
 

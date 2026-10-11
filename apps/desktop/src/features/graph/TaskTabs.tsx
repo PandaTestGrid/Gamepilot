@@ -1,8 +1,8 @@
 /**
- * 三级切换：**项目 › 工作区 › 任务**（任务 = 一张状态图）。
+ * 三级切换：**工作区 › 项目 › 任务**（任务 = 一张状态图）。
  *
- * 例子：项目「游戏自动化」> 工作区「阴阳师」> 任务「斗技 / 百鬼」。
- * 切换项目 → 换工作区列表；切换工作区 → 换任务标签；点任务标签 → 换状态图。
+ * 例子：工作区「游戏自动化」> 项目「阴阳师」> 任务「斗技 / 百鬼」。
+ * 切换工作区 → 换项目列表；切换项目 → 换任务标签；点任务标签 → 换状态图。
  *
  * 目录树由引擎的 workspace.tree 给出（它会兼容"库根下直接是脚本"的老布局）。
  */
@@ -73,7 +73,7 @@ function TaskTabsInner(): ReactNode {
     // 依赖 root：引擎握手完成或切换任务后再拉一次
   }, [root]);
 
-  /** 当前所在的 项目 / 工作区（由当前任务目录反推，避免另存一份状态）。 */
+  /** 当前所在的 工作区 / 项目（由当前任务目录反推，避免另存一份状态）。 */
   const currentProject =
     projects.find((item) =>
       item.workspaces.some((ws) => root === ws.root || root.startsWith(`${ws.root}/`)),
@@ -83,7 +83,7 @@ function TaskTabsInner(): ReactNode {
     currentProject?.workspaces[0];
 
   const createProject = (): void => {
-    const name = window.prompt('新项目名字（最外层，例如「游戏自动化」）');
+    const name = window.prompt('新工作区名字（最外层，例如「游戏自动化」）');
     if (!name) {
       return;
     }
@@ -92,21 +92,21 @@ function TaskTabsInner(): ReactNode {
         await workspaceCreate(name);
         await load();
       } catch (reason) {
-        devLog(`新建项目失败: ${String(reason)}`);
+        devLog(`新建工作区失败: ${String(reason)}`);
       }
     })();
   };
 
-  // 新用户/没有项目：给一条明确的出路，而不是什么都不显示
+  // 新用户/没有工作区：给一条明确的出路，而不是什么都不显示
   if (!root || projects.length === 0) {
     return (
       <button
         type="button"
         onClick={createProject}
-        title="还没有项目：点这里建第一个"
+        title="还没有工作区：点这里建第一个"
         className="rounded-sm border border-brand px-1.5 py-0.5 text-badge text-brand hover:bg-raised"
       >
-        ＋ 新建项目
+        ＋ 新建工作区
       </button>
     );
   }
@@ -115,10 +115,10 @@ function TaskTabsInner(): ReactNode {
       <button
         type="button"
         onClick={createProject}
-        title="项目里还没有工作区，先建一个项目"
+        title="工作区里还没有项目，先建一个工作区"
         className="rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised"
       >
-        ＋ 新建项目
+        ＋ 新建工作区
       </button>
     );
   }
@@ -131,7 +131,7 @@ function TaskTabsInner(): ReactNode {
   };
 
   const addTask = (): void => {
-    const name = window.prompt('新任务名字（一个任务 = 一张状态图）');
+    const name = window.prompt('新状态图名字（一个状态图 = 一个脚本目录）');
     if (!name || !currentWorkspace) {
       return;
     }
@@ -151,10 +151,10 @@ function TaskTabsInner(): ReactNode {
 
   return (
     <div className="flex items-center gap-0.5">
-      {/* 一级：项目 */}
+      {/* 一级：工作区 */}
       <select
         value={currentProject.name}
-        title="项目：最外层（比如「游戏自动化」）"
+        title="工作区：最外层（比如「游戏自动化」）"
         onChange={(event) => {
           const next = projects.find((item) => item.name === event.target.value);
           go(next?.workspaces[0]?.tasks[0]?.root);
@@ -163,15 +163,15 @@ function TaskTabsInner(): ReactNode {
       >
         {projects.map((item) => (
           <option key={item.name} value={item.name}>
-            项目：{item.name}
+            工作区：{item.name}
           </option>
         ))}
       </select>
 
-      {/* 二级：工作区 */}
+      {/* 二级：项目 */}
       <select
         value={currentWorkspace?.name ?? ''}
-        title="工作区：一个游戏/一个空间（比如「阴阳师」「王者荣耀」）"
+        title="项目：一个游戏/一个空间（比如「阴阳师」「王者荣耀」）"
         onChange={(event) => {
           const next: TreeWorkspace | undefined = currentProject.workspaces.find(
             (item) => item.name === event.target.value,
@@ -182,16 +182,16 @@ function TaskTabsInner(): ReactNode {
       >
         {(currentProject.workspaces ?? []).map((item) => (
           <option key={item.name} value={item.name}>
-            工作区：{item.name}
+            项目：{item.name}
           </option>
         ))}
       </select>
 
       <button
         type="button"
-        title="在项目下新建工作区（一个游戏/一个空间）"
+        title="在工作区下新建项目（一个游戏/一个空间）"
         onClick={() => {
-          const name = window.prompt('新工作区名字（一个游戏/一个空间，例如「阴阳师」）');
+          const name = window.prompt('新项目名字（一个游戏/一个空间，例如「阴阳师」）');
           if (!name || !currentProject) {
             return;
           }
@@ -200,13 +200,13 @@ function TaskTabsInner(): ReactNode {
               await workspaceMkdir(currentProject.root, name);
               await load();
             } catch (reason) {
-              devLog(`新建工作区失败: ${String(reason)}`);
+              devLog(`新建项目失败: ${String(reason)}`);
             }
           })();
         }}
         className="rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised hover:text-fg"
       >
-        ＋ 工作区
+        ＋ 项目
       </button>
 
       <span className="mx-1 h-3 w-px bg-line" />
@@ -238,10 +238,10 @@ function TaskTabsInner(): ReactNode {
         type="button"
         disabled={busy}
         onClick={addTask}
-        title="在当前工作区里新建任务（一张新的空状态图）"
+        title="在当前项目里新建任务（一张新的空状态图）"
         className="ml-0.5 rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
       >
-        ＋ 任务
+        ＋ 状态图
       </button>
     </div>
   );
