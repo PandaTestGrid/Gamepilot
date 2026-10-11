@@ -120,4 +120,66 @@ describe('状态图拖动', () => {
 
     expect(probe.props?.nodes[0]?.position).toEqual({ x: 40, y: 60 });
   });
+
+  it('选中态只作用在选中的那一个上：节点摊开、只有那条边加粗', () => {
+    const action = { type: 'click' as const, x: 0.5, y: 0.5 };
+    const condition = { allOf: [], anyOf: [], noneOf: [], minScore: 0, withinMs: 0, always: true };
+    useGraphStore.getState().setGraph('dev', {
+      deviceId: 'dev',
+      nodes: [
+        { id: 'n1', name: '主界面', enter: [], x: 100, y: 100, visits: 0 },
+        { id: 'n2', name: '商店', enter: [], x: 400, y: 200, visits: 0 },
+      ],
+      edges: [
+        {
+          id: 'e1',
+          from: 'n1',
+          to: 'n2',
+          when: 'always',
+          kind: 'normal',
+          priority: 0,
+          minScore: 0,
+          cooldownMs: 0,
+          retries: 1,
+          action: 'click',
+          condition,
+          actionSpec: action,
+        },
+        {
+          id: 'e2',
+          from: 'n2',
+          to: 'n1',
+          when: 'always',
+          kind: 'normal',
+          priority: 0,
+          minScore: 0,
+          cooldownMs: 0,
+          retries: 1,
+          action: 'click',
+          condition,
+          actionSpec: action,
+        },
+      ],
+      variables: [],
+      recognizers: [],
+      activeNodeId: null,
+      pendingNodeId: null,
+    });
+
+    act(() => {
+      useGraphStore.getState().selectNode('n2');
+      useGraphStore.getState().selectEdge('e2');
+    });
+    render(<GraphPane />);
+
+    const nodes = probe.props?.nodes ?? [];
+    expect(nodes.find((node) => node.id === 'n2')?.data.expanded).toBe(true);
+    expect(nodes.find((node) => node.id === 'n1')?.data.expanded).toBe(false);
+
+    const edges = probe.props?.edges ?? [];
+    expect(edges.find((edge) => edge.id === 'e2')).toMatchObject({ selected: true });
+    expect(edges.find((edge) => edge.id === 'e2')?.style?.strokeWidth).toBe(2.5);
+    // 另一条边**不能**跟着变粗（逐条判断；曾经误用外层 selected，结果"选一条全部变粗"）
+    expect(edges.find((edge) => edge.id === 'e1')?.style?.strokeWidth).toBe(1);
+  });
 });

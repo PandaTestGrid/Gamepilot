@@ -11,24 +11,21 @@ import {
   Background,
   BackgroundVariant,
   ConnectionMode,
-  Handle,
   MarkerType,
-  Position,
   ReactFlow,
   type Edge,
-  type Node,
   type NodeChange,
-  type NodeProps,
   type NodeTypes,
   type XYPosition,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import '@/features/graph/graph.css';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
-import { PIN_KEYS, togglePin } from '@/lib/param-vars';
 import { NodeEditor } from '@/features/graph/NodeEditor';
+import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
 
@@ -36,155 +33,13 @@ import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell } from '@/layout/PanelShell';
 import { RunButton } from '@/layout/RunButton';
-import type { EdgeAction } from '@/types';
-import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
-import { toActionPayload, toGraphData } from '@/lib/graph-adapter';
+import { toGraphData } from '@/lib/graph-adapter';
+import { actionPins, summarizePins } from '@/lib/action-pins';
 import { type EdgeStatus, evaluateEdge, markShadowed } from '@/lib/edge-status';
-import { actionPins, summarizePins, type ActionPin } from '@/lib/action-pins';
 import { describeAction, edgeLabel } from '@/lib/graph-logic';
 import { devLog, graphGet, graphSave } from '@/lib/rpc';
 import { useGraphStore } from '@/stores/graph.store';
-
-interface StateNodeData extends Record<string, unknown> {
-  label: string;
-  sub: string;
-  deviceId: string;
-  /** 这个界面的出口操作（选中时摊开成"引脚"） */
-  pins: ReadonlyArray<{
-    key: string;
-    title: string;
-    action: EdgeAction;
-    pins: readonly ActionPin[];
-  }>;
-  expanded?: boolean;
-  visits: number;
-  active: boolean;
-  pending: boolean;
-}
-
-type StateNodeType = Node<StateNodeData, 'state'>;
-
-function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
-  // 选中（或状态机停在这）时摊开这个界面的操作参数 —— 蓝图里的"引脚"，
-  // 变量引用会高亮：一眼看出哪一步的参数是"活的"
-  const showPins = (data.active || data.expanded) && data.pins.length > 0;
-  const setVariables = useGraphStore((state) => state.setVariables);
-  const saveEdge = useGraphStore((state) => state.saveEdge);
-  const graphVariables = useGraphStore((state) => state.graphs[String(data.deviceId)]?.variables ?? []);
-  // 双击就地改名：这是最常用的一次编辑，不该每次都跑到下面的面板
-  const updateNode = useGraphStore((state) => state.updateNode);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(data.label);
-
-  const commit = (): void => {
-    setEditing(false);
-    const name = draft.trim();
-    if (name && name !== data.label) {
-      void updateNode(String(data.deviceId), String(data.id), { name });
-    } else {
-      setDraft(data.label);
-    }
-  };
-
-  return (
-    <div
-      className={cn(
-        'w-[132px] rounded-sm bg-panel px-2 py-1',
-        data.active ? 'border border-brand' : 'border border-line',
-        data.pending && 'border-dashed',
-      )}
-      onDoubleClick={() => {
-        setDraft(data.label);
-        setEditing(true);
-      }}
-      title="双击改名"
-    >
-      {/* 圆点做大一点（原来 6px，很难抓住），并加一圈描边方便对准 */}
-      <Handle
-        type="target"
-        position={Position.Left}
-        className="!size-2.5 !border-2 !border-canvas !bg-idle hover:!bg-brand"
-      />
-      {editing ? (
-        <input
-          autoFocus
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={commit}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              commit();
-            }
-            if (event.key === 'Escape') {
-              setDraft(data.label);
-              setEditing(false);
-            }
-            event.stopPropagation();
-          }}
-          className="w-full rounded-sm border border-brand bg-canvas px-1 text-body text-fg"
-        />
-      ) : (
-        <div className="truncate text-body">{data.label}</div>
-      )}
-      <div className="text-badge text-faint">
-        {data.sub} · {data.visits} 次
-      </div>
-      {showPins &&
-        data.pins.map((item) => (
-          <div key={item.key} className="mt-0.5 flex flex-wrap items-center gap-0.5">
-            <span className="text-badge text-dim">{item.title}</span>
-            {item.pins.map((pin) => (
-              <button
-                key={`${item.key}-${pin.label}`}
-                type="button"
-                onClick={(event) => {
-                  // 点引脚：字面量 ↔ 变量（"这一步的参数是活的"）
-                  event.stopPropagation();
-                  const key = PIN_KEYS[pin.label as keyof typeof PIN_KEYS];
-                  if (!key) {
-                    return;
-                  }
-                  void (async () => {
-                    const result = togglePin(item.action, key, {
-                      variables: graphVariables,
-                      name: String(data.sub ?? '步骤'),
-                    });
-                    if (Object.keys(result.variables).length > 0) {
-                      const merged: Record<string, { type: string; value: string | number | boolean }> = {};
-                      for (const item of graphVariables) {
-                        merged[item.name] = { type: item.type, value: item.value };
-                      }
-                      for (const [name, spec] of Object.entries(result.variables)) {
-                        merged[name] = { type: spec.type, value: spec.value };
-                      }
-                      await setVariables(String(data.deviceId), merged);
-                    }
-                    await saveEdge(String(data.deviceId), item.key, {
-                      action: toActionPayload(result.action),
-                    });
-                  })();
-                }}
-                className={cn(
-                  'rounded-sm border px-0.5 text-badge',
-                  pin.isVar ? 'border-brand text-brand' : 'border-line text-faint',
-                  'hover:bg-raised',
-                )}
-                title={`${pin.label} = ${pin.value}${pin.isVar ? '（变量）' : ''}｜点一下切换：写死 ↔ 变量`}
-              >
-                {pin.label}:{pin.value}
-              </button>
-            ))}
-          </div>
-        ))}
-      <Handle
-        type="source"
-        position={Position.Right}
-        className="!size-2.5 !border-2 !border-canvas !bg-idle hover:!bg-brand"
-      />
-    </div>
-  );
-}
 
 const nodeTypes: NodeTypes = { state: StateNode };
 
@@ -213,10 +68,11 @@ export function GraphPane(): ReactNode {
   const pinSignature = `${selectedNodeId ?? ''}|${(graph?.edges ?? [])
     .map((edge) => `${edge.id}:${JSON.stringify(edge.actionSpec)}`)
     .join(';')}`;
+  // 选中态也算进签名：点节点要给"正在编辑的是哪个"画出边框（点击不会发生在拖拽中，安全）
   const nodeSignature = (graph?.nodes ?? [])
     .map((node) => `${node.id}:${node.x},${node.y},${node.name},${node.enter.join('|')}`)
     .join(';')
-    .concat(`|${graph?.activeNodeId ?? ''}|${graph?.pendingNodeId ?? ''}`);
+    .concat(`|${graph?.activeNodeId ?? ''}|${graph?.pendingNodeId ?? ''}|${selectedNodeId ?? ''}`);
 
   /*
    * 拖动过程中的实时坐标。
@@ -300,6 +156,9 @@ export function GraphPane(): ReactNode {
       .filter((edge) => !(edge.from === null || edge.to === null))
       .map((edge) => {
         const recovery = edge.kind === 'recovery';
+        // 逐条判断"是不是正在编辑的那条"：以前这里误用了外层那个 selected 对象，
+        // 结果是"只要选中了任意一条边，所有边都变粗"
+        const selectedEdge = edge.id === selectedEdgeId;
         // 调试用：运行中按"这条边现在走不走得通"上色（逻辑见 lib/edge-status.ts）
         const status = statuses.get(edge.id);
         const color =
@@ -312,6 +171,7 @@ export function GraphPane(): ReactNode {
                 : 'var(--state-idle, #4b5563)';
         return {
           id: edge.id,
+          selected: selectedEdge,
           source: edge.from ?? '',
           target: edge.to ?? '',
           type: 'smoothstep',
@@ -320,7 +180,8 @@ export function GraphPane(): ReactNode {
           animated: false,
           style: {
             stroke: color,
-            strokeWidth: 1,
+            // 选中的边加粗：它对应下方编辑器里正在改的那条
+            strokeWidth: selectedEdge ? 2.5 : 1,
             strokeDasharray: recovery ? '4 3' : undefined,
           },
           labelStyle: { fill: color, fontSize: 11 },
@@ -328,8 +189,8 @@ export function GraphPane(): ReactNode {
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
         } satisfies Edge;
       });
-    // 上色跟着实时状态走，否则运行时边的颜色不会变
-  }, [graph, statuses]);
+    // 上色跟着实时状态走，否则运行时边的颜色不会变；选中态也要跟着（编辑器换了一条边）
+  }, [graph, statuses, selectedEdgeId]);
 
   /** 让底部边编辑器把"动作"区滚进视野（双击边时用）。 */
   const focusEdgeAction = useCallback(() => {

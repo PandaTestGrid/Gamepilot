@@ -1,0 +1,43 @@
+/*
+ * 状态图的交互反馈（补 xyflow 默认缺的那部分）。
+ *
+ * 背景：xyflow 只给可拖拽节点一个 `cursor: grab`，鼠标放上去**没有任何视觉变化** ——
+ * 用户反馈"放上去就是一个小手，看着像 bug"。节点的悬停/选中样式写在 StateNode.tsx 里
+ * （Tailwind 挨着标记更好读），这个文件只放 Tailwind 够不着的部分：
+ *   1. 拖拽中的父级状态（`.dragging` 加在 xyflow 的节点包裹层上）；
+ *   2. 边是 xyflow 渲染的，我们只给了 stroke 内联样式 → 悬停/选中的反馈只能用 CSS。
+ */
+
+/* 拖拽中：光标换成"抓住"，卡片描边点亮（和鼠标按下这件事对上） */
+.react-flow__node.draggable {
+  cursor: grab;
+}
+.react-flow__node.draggable.dragging {
+  cursor: grabbing;
+}
+.react-flow__node.dragging .state-node,
+.react-flow__node.dragging > div {
+  border-color: var(--brand);
+  background-color: var(--bg-raised);
+}
+
+/* 边是可点的（点它看/改属性），但默认和背景一样细：悬停必须能看出"这条能点" */
+.react-flow__edge {
+  cursor: pointer;
+}
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke-width: 2.5;
+}
+.react-flow__edge:hover .react-flow__edge-text {
+  font-weight: 600;
+}
+/* 选中的边：加粗（颜色由 JS 内联给出，避免被主题变量改掉） */
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke-width: 2.5;
+}
+
+/* 连线中的预览线（从圆点拖出来时）跟着主题色，别用默认的灰 */
+.react-flow__connectionline .react-flow__connection-path {
+  stroke: var(--brand);
+  stroke-width: 2;
+}

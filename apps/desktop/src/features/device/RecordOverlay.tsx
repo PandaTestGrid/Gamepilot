@@ -5,14 +5,20 @@
  * 以及这次录制要注册成什么（状态判定 / 动作目标 / 归属哪个节点）。
  * 确定后由 ui.store 原子地写入「识别器 + 节点 + 边 + 事件」。
  */
-import { type ReactNode, useEffect, useMemo } from 'react';
+import { type CSSProperties, type ReactNode, useEffect, useMemo } from 'react';
 
-import { type Box, canvasRectToPixels } from '@/lib/canvas';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
 import { useUiStore } from '@/stores/ui.store';
 
-export function RecordOverlay({ deviceId, imageBox }: { deviceId: string; imageBox: Box }): ReactNode {
+export function RecordOverlay({
+  deviceId,
+  anchor,
+}: {
+  deviceId: string;
+  /** 选区的视口坐标矩形（弹框据此翻转，跟手） */
+  anchor?: { left: number; top: number; width: number; height: number } | null;
+}): ReactNode {
   const draft = useUiStore((state) => state.draft);
   const updateDraft = useUiStore((state) => state.updateDraft);
   const commitDraft = useUiStore((state) => state.commitDraft);
@@ -37,33 +43,46 @@ export function RecordOverlay({ deviceId, imageBox }: { deviceId: string; imageB
     return null;
   }
 
-  const [x, , w] = draft.rect;
-  const flip = x + w > 0.55;
   // 选区在容器里的位置（取左上角），再夹进视口，保证弹框永远看得见
-  const anchor = canvasRectToPixels(imageBox, draft.rect) ?? { left: 0, top: 0, width: 0, height: 0 };
   const PANEL_W = 280;
   const PANEL_H = 300;
-  const clamp = (value: number): number =>
-    Math.min(Math.max(value, 8), Math.max(8, window.innerWidth - PANEL_W - 8));
-  const clampY = (value: number): number =>
-    Math.min(Math.max(value, 8), Math.max(8, window.innerHeight - PANEL_H - 8));
+  const GAP = 8;
+  const MARGIN = 8;
+
+  /**
+   * 弹框定位：**跟着选区**，只在放不下时才翻转/夹取（就像大多数工具的悬浮菜单）。
+   *
+   * 顺序：选区右侧 → 放不下翻到左侧 → 还不行就贴着选区水平夹取；
+   * 垂直方向与选区顶对齐 → 下方放不下就改成底对齐（往上翻）。
+   */
+  const popoverStyle: CSSProperties = (() => {
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+    if (!anchor) {
+      // 拿不到选区位置（极端情况）：停在右上角，至少不挡手
+      return { position: 'fixed', right: MARGIN, top: MARGIN };
+    }
+    let left = anchor.left + anchor.width + GAP;
+    if (left + PANEL_W > viewportW - MARGIN) {
+      left = anchor.left - PANEL_W - GAP; // 右侧放不下 → 翻到左侧
+    }
+    left = Math.min(Math.max(left, MARGIN), Math.max(MARGIN, viewportW - PANEL_W - MARGIN));
+
+    let top = anchor.top;
+    if (top + PANEL_H > viewportH - MARGIN) {
+      top = anchor.top + anchor.height - PANEL_H; // 下方放不下 → 往上翻（底对齐）
+    }
+    top = Math.min(Math.max(top, MARGIN), Math.max(MARGIN, viewportH - PANEL_H - MARGIN));
+    return { position: 'fixed', left, top, maxHeight: viewportH - 2 * MARGIN, overflowY: 'auto' };
+  })();
 
   return (
     <div
       className={cn(
-        'absolute z-20 w-[268px] rounded-sm border border-line bg-panel p-2 text-body',
+        'fixed z-50 w-[268px] rounded-sm border border-line bg-panel p-2 text-body shadow-lg',
         'border-l-2 border-l-brand',
       )}
-      style={{
-        // 用 fixed + 视口内贴边：面板很窄时（画面栏 ~270px），跟着选区定位会被裁掉
-        // （用户截图反馈"选中后弹框被遮挡"）。这里只取选区的落点，然后夹进视口。
-        position: 'fixed',
-        left: clamp(anchor.left + (flip ? -288 : imageBox.width * 0.1 + 8)),
-        top: clampY(anchor.top),
-        transform: undefined,
-        width: undefined,
-        height: undefined,
-      }}
+      style={popoverStyle}
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
           cancelDraft();

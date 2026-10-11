@@ -230,6 +230,8 @@ function SingleScreen({
 
   // 画面的实际显示矩形（容器相对坐标）：object-contain 会有黑边，控制坐标只按画面算
   const [imageBox, setImageBox] = useState<Box | null>(null);
+  // 容器在视口里的位置（量测时存下来，渲染期只用 state，不碰 ref）
+  const [viewportRect, setViewportRect] = useState<{ left: number; top: number } | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
@@ -250,6 +252,7 @@ function SingleScreen({
         { width: image.naturalWidth, height: image.naturalHeight },
       );
       setImageBox(box);
+      setViewportRect({ left: rect.left, top: rect.top });
       // 记录一次：确认控制坐标用的确实是"画出来的那块区域"，而不是整个容器
       if (box) {
         const key = `画面区域 ${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}x${Math.round(box.height)}`;
@@ -273,6 +276,21 @@ function SingleScreen({
     }
     const rect = container.getBoundingClientRect();
     return pointToCanvas(imageBox, { x: clientX - rect.left, y: clientY - rect.top }, clamp);
+  };
+
+  /** 选区的"视口坐标"矩形：弹框要据此做碰撞翻转（跟手，不跳到固定位置）。 */
+  const selectionViewportRect = (rect: readonly [number, number, number, number]) => {
+    const box = viewportRect;
+    if (!box || !imageBox) {
+      return null;
+    }
+    const local = canvasRectToPixels(imageBox, rect) ?? { left: 0, top: 0, width: 0, height: 0 };
+    return {
+      left: box.left + local.left,
+      top: box.top + local.top,
+      width: local.width,
+      height: local.height,
+    };
   };
 
   const flashRipple = (x: number, y: number): void => {
@@ -600,7 +618,7 @@ function SingleScreen({
         </div>
       )}
 
-      {draft && imageBox && <RecordOverlay deviceId={deviceId} imageBox={imageBox} />}
+      {draft && imageBox && <RecordOverlay deviceId={deviceId} anchor={selectionViewportRect(draft.rect)} />}
     </div>
   );
 }
