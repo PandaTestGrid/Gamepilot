@@ -74,13 +74,15 @@ describe('模板截图缓存', () => {
     await vi.waitFor(() => expect(cachedTemplate('shop_home')).toBe(PNG));
   });
 
-  it('引擎返回空图（png 为空）算失败，不会写进缓存', async () => {
+  it('引擎返回空图（png 为空）= 颜色识别器没有截图：静默、不报错、不写缓存', async () => {
     templateImage.mockResolvedValueOnce({ label: 'color_only', png: '' });
     useTemplateStore.getState().load('color_only');
 
     await vi.waitFor(() => {
-      expect(useTemplateStore.getState().entries['color_only:color']?.error).toBeTruthy();
+      expect(useTemplateStore.getState().entries['color_only:color']?.loading).toBe(false);
     });
+    const entry = useTemplateStore.getState().entries['color_only:color'];
+    expect(entry?.error).toBeUndefined();
     expect(cachedTemplate('color_only')).toBeUndefined();
   });
 
