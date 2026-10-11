@@ -16,8 +16,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ScreenPane } from '@/features/device/ScreenPane';
 import { useDeviceStore } from '@/stores/device.store';
+import { useGraphStore } from '@/stores/graph.store';
 import { useSessionStore, type FrameState } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
+import type { RecognizerView } from '@/types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve({})) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => undefined)) }));
@@ -47,23 +49,64 @@ function frameAt(index: number): FrameState {
   };
 }
 
-/** 按真实签名打桩（`session.store.touch` / `recordStep`）：断言里才不用碰 any。 */
+/** 按真实签名打桩（`session.store.touch` / `recordStep` / `renameRecognizer`）：断言里才不用碰 any。 */
 type TouchMock = (deviceId: string, phase: string, x: number, y: number) => void;
 type RecordStepMock = (deviceId: string, action: Record<string, unknown>) => Promise<string | null>;
+type RenameMock = (
+  deviceId: string,
+  label: string,
+  to: string,
+) => Promise<{ refs: { nodes: number; edges: number; scores: number } } | null>;
+
+/** 识别读数列表的样例：一个未命中、一个稳定、一个待确认（"命中"= 后两个）。 */
+function recognizer(label: string, state: RecognizerView['state'], score: number): RecognizerView {
+  return {
+    label,
+    type: 'template',
+    template: `templates/${label}.png`,
+    score,
+    threshold: 0.82,
+    roi: [0.1, 0.1, 0.2, 0.1],
+    samples: state === 'confirmed' ? 3 : 0,
+    state,
+  };
+}
+
+const READOUT_ROWS: readonly RecognizerView[] = [
+  recognizer('main_region_1', 'idle', 0),
+  recognizer('main_region_2', 'confirmed', 1),
+  recognizer('start_btn', 'pending', 0.9),
+];
 
 /** 每测试一条独立用例：都从"控制开着、没在录制"开始。 */
-function renderScreen(options: { recordAction?: boolean } = {}): {
+function renderScreen(options: { recordAction?: boolean; recognizers?: readonly RecognizerView[] } = {}): {
   viewport: HTMLElement;
   touch: ReturnType<typeof vi.fn<TouchMock>>;
   recordStep: ReturnType<typeof vi.fn<RecordStepMock>>;
+  rename: ReturnType<typeof vi.fn<RenameMock>>;
 } {
   const touch = vi.fn<TouchMock>(() => undefined);
   const recordStep = vi.fn<RecordStepMock>(() => Promise.resolve('e_1'));
+  const rename = vi.fn<RenameMock>(() => Promise.resolve({ refs: { nodes: 0, edges: 0, scores: 0 } }));
   useSessionStore.setState({
     ready: { [DEVICE]: true },
     frames: { [DEVICE]: frameAt(1) },
     touch,
     recordStep,
+    renameRecognizer: rename,
+  });
+  useGraphStore.setState({
+    graphs: {
+      [DEVICE]: {
+        deviceId: DEVICE,
+        nodes: [],
+        edges: [],
+        recognizers: options.recognizers ?? [],
+        variables: [],
+        activeNodeId: null,
+        pendingNodeId: null,
+      },
+    },
   });
   useDeviceStore.setState({
     activeId: DEVICE,
@@ -109,7 +152,7 @@ function renderScreen(options: { recordAction?: boolean } = {}): {
     useSessionStore.setState({ frames: { [DEVICE]: frameAt(2) } });
   });
 
-  return { viewport, touch, recordStep };
+  return { viewport, touch, recordStep, rename };
 }
 
 /** 一次滑动：按下 → 拖两步（隔开 20ms 绕开 16ms 限频）→ 抬手。 */
@@ -140,6 +183,7 @@ function pixel(x: number, y: number): Point {
 describe('画面栏控制手势的反馈', () => {
   beforeEach(() => {
     useSessionStore.setState({ ready: {}, frames: {}, touch: vi.fn(), recordStep: vi.fn() });
+    useUiStore.setState({ readoutFilter: 'all' });
   });
 
   it('录操作·轻触：按下就有点击标记（落在画面坐标上，不是容器百分比）', () => {
@@ -256,5 +300,29 @@ describe('画面栏控制手势的反馈', () => {
     fireEvent.pointerUp(viewport, { clientX: 110, clientY: 320, pointerId: 1 });
 
     expect(recordStep).toHaveBeenLastCalledWith(DEVICE, { type: 'click', x: 0.25, y: 0.5 });
+  });
+});
+
+describe('识别读数接到画面上（筛选取数/改名/删除的详细行为在被测组件自己的测试里）', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ ready: {}, frames: {}, touch: vi.fn(), recordStep: vi.fn() });
+    useUiStore.setState({ readoutFilter: 'all', readoutOpen: true });
+  });
+
+  it('读数区显示的是**当前设备**的图，且标题就是收起/展开的开关', () => {
+    renderScreen({ recognizers: READOUT_ROWS });
+
+    expect(screen.getAllByTestId('recognizer-name').map((node) => node.textContent)).toEqual([
+      'main_region_1',
+      'main_region_2',
+      'start_btn',
+    ]);
+    expect(screen.getByTestId('readout-toggle')).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('没有识别器时给引导（不是一片空白）', () => {
+    renderScreen();
+
+    expect(screen.getByText(/还没有识别器/)).toBeInTheDocument();
   });
 });

@@ -14,6 +14,12 @@ import type { ComponentProps } from 'react';
 
 import { StateNode, type StateNodeData } from '@/features/graph/StateNode';
 import { useGraphStore } from '@/stores/graph.store';
+import { clearTemplateCache, preloadTemplates } from '@/stores/template.store';
+
+vi.mock('@/lib/rpc', () => ({
+  templateImage: (label: string) => Promise.resolve({ label, png: 'data:image/png;base64,AAAA' }),
+  devLog: vi.fn(),
+}));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve({})) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => undefined)) }));
@@ -29,6 +35,8 @@ function data(patch: Partial<StateNodeData> = {}): StateNodeData {
     sub: 'main',
     deviceId: 'dev',
     pins: [],
+    enterTemplates: [],
+    allTemplates: [],
     visits: 3,
     active: false,
     pending: false,
@@ -54,6 +62,7 @@ function nodeProps(patch: Partial<StateNodeData> = {}): ComponentProps<typeof St
 describe('节点卡片', () => {
   beforeEach(() => {
     useGraphStore.setState({ graphs: {}, raws: {}, selectedNodeId: null, selectedEdgeId: null });
+    clearTemplateCache();
   });
 
   it('默认：细描边 + 悬停高亮 + 拖拽高亮（三类 CSS 类都在，样式不会静默失效）', () => {
@@ -107,5 +116,85 @@ describe('节点卡片', () => {
     await user.type(input, '新界面{Enter}');
 
     expect(updateNode).toHaveBeenCalledWith('dev', 'main', { name: '新界面' });
+  });
+
+  it('画布上带模板截图：进入识别器的缩略图 + 操作引脚上的截图', async () => {
+    clearTemplateCache();
+    preloadTemplates(['main_start', 'shop_home']);
+    useGraphStore.setState({
+      graphs: {
+        dev: {
+          deviceId: 'dev',
+          nodes: [{ id: 'main', name: '主界面', enter: ['main_start'], x: 0, y: 0, visits: 1 }],
+          edges: [],
+          variables: [],
+          recognizers: [],
+          activeNodeId: null,
+          pendingNodeId: null,
+        },
+      },
+      raws: {},
+      selectedNodeId: null,
+      selectedEdgeId: null,
+    });
+
+    render(
+      <StateNode
+        {...nodeProps({
+          expanded: true,
+          enterTemplates: ['main_start'],
+          allTemplates: ['main_start', 'shop_home'],
+          pins: [
+            {
+              key: 'e1',
+              title: '点击 shop_home',
+              action: { type: 'click', target: 'shop_home' },
+              template: 'shop_home',
+              pins: [],
+            },
+          ],
+        })}
+      />,
+    );
+
+    // 进入识别器的小图 + 引脚上的小图（画布上"这一步点的是哪个图标"）
+    await vi.waitFor(() => {
+      expect(screen.getAllByAltText(/main_start|shop_home/).length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('选中的节点可以就地挂/摘「进入识别器」，也能加一步操作', async () => {
+    const user = userEvent.setup();
+    const updateNode = vi.fn(() => Promise.resolve());
+    const connectNodes = vi.fn(() => Promise.resolve());
+    useGraphStore.setState({
+      updateNode,
+      connectNodes,
+      graphs: {
+        dev: {
+          deviceId: 'dev',
+          nodes: [{ id: 'main', name: '主界面', enter: ['main_start'], x: 0, y: 0, visits: 1 }],
+          edges: [],
+          variables: [],
+          recognizers: [],
+          activeNodeId: null,
+          pendingNodeId: null,
+        },
+      },
+      raws: {},
+    });
+
+    render(<StateNode {...nodeProps({ expanded: true, allTemplates: ['main_start', 'shop_home'] })} />);
+
+    // 挂上 shop_home
+    await user.click(screen.getByText('shop_home'));
+    expect(updateNode).toHaveBeenCalledWith('dev', 'main', { enter: ['main_start', 'shop_home'] });
+
+    // 摘掉 main_start
+    await user.click(screen.getByText('main_start'));
+    expect(updateNode).toHaveBeenLastCalledWith('dev', 'main', { enter: [] });
+
+    await user.click(screen.getByText('+ 操作'));
+    expect(connectNodes).toHaveBeenCalledWith('dev', 'main', 'main');
   });
 });

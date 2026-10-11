@@ -31,6 +31,7 @@ import {
   type GraphPayload,
   onEngineMessage,
   recordTemplate as recordTemplateRpc,
+  removeRecognizer as removeRecognizerRpc,
   renameRecognizer as renameRecognizerRpc,
   runStart,
   runStop,
@@ -42,6 +43,7 @@ import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
 import { useLogStore } from '@/stores/log.store';
+import { clearTemplateCache } from '@/stores/template.store';
 import type { RecordDraft } from '@/types';
 
 export interface FrameState {
@@ -81,6 +83,8 @@ interface SessionState {
     label: string,
     to: string,
   ) => Promise<{ refs: { nodes: number; edges: number; scores: number } } | null>;
+  /** 删除识别器/模板；被节点或边引用时引擎拒绝，原因进错误条 + 事件栏 */
+  readonly removeRecognizer: (deviceId: string, label: string) => Promise<boolean>;
   readonly isReady: (deviceId: string) => boolean;
   readonly clearError: () => void;
   /** blob 渲染失败时改用 data URL（保证画面一定显示得出来） */
@@ -413,9 +417,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         asEnter: draft.asEnter,
         asActionTarget: draft.asActionTarget,
       });
+      // 重新录同一张模板时是同名同路径、内容变了：必须清缓存，否则界面还在显示旧截图
+      clearTemplateCache([result.label]);
       applyGraph(deviceId, result.graph, get().frames[deviceId]);
       useEventStore.getState().append(deviceId, 'recognizer_added', {
-        message: `+${result.label} (${result.mode}) → ${result.template}`,
+        message: `+${result.label} (${result.mode})` + (result.template ? ` → ${result.template}` : ''),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -452,6 +458,25 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       set({ error: message });
       useEventStore.getState().append(deviceId, 'error', { message: `改名失败: ${message}` });
       return null;
+    }
+  },
+
+  removeRecognizer: async (deviceId, label) => {
+    try {
+      const result = await removeRecognizerRpc(deviceId, label);
+      applyGraph(deviceId, result.graph, get().frames[deviceId]);
+      useEventStore.getState().append(deviceId, 'recognizer_removed', {
+        node: label,
+        message: `-${label}（模板文件一起删了）`,
+      });
+      return true;
+    } catch (error) {
+      // 被节点/边引用时引擎会拒绝并说清被谁用了 —— 那句话必须让用户看见（错误条 + 事件栏），
+      // 只写日志的话表现就是"点了删除没反应"
+      const message = error instanceof Error ? error.message : String(error);
+      set({ error: message });
+      useEventStore.getState().append(deviceId, 'error', { message: `删除失败: ${message}` });
+      return false;
     }
   },
 

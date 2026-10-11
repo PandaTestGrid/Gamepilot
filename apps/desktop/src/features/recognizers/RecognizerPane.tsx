@@ -8,7 +8,6 @@ import { type ReactNode, useRef } from 'react';
 
 import { TemplateThumb } from '@/features/recognizers/TemplateThumb';
 import { StatusDot } from '@/layout/PanelShell';
-import { devLog, removeRecognizer } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { useGraphStore } from '@/stores/graph.store';
@@ -20,6 +19,7 @@ export function RecognizerPane(): ReactNode {
   const graph = useGraphStore((state) => state.graphs[activeId]);
   const updateThreshold = useGraphStore((state) => state.updateRecognizerThreshold);
   const pushThreshold = useSessionStore((state) => state.setThreshold);
+  const removeRecognizer = useSessionStore((state) => state.removeRecognizer);
   const sessionReady = useSessionStore((state) => Boolean(state.ready[activeId]));
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const recognizers = graph?.recognizers ?? [];
@@ -46,16 +46,9 @@ export function RecognizerPane(): ReactNode {
                       type="button"
                       title="删除这个模板（被界面/边引用时会告诉你被谁用了）"
                       onClick={() => {
-                        void (async () => {
-                          try {
-                            await removeRecognizer(activeId, item.label);
-                            devLog(`已删除模板 ${item.label}`);
-                          } catch (reason) {
-                            const message = reason instanceof Error ? reason.message : String(reason);
-                            devLog(`删不掉：${message}`);
-                            window.setTimeout(() => undefined, 0);
-                          }
-                        })();
+                        // 走 store 的那一个删除动作：拒绝的原因会进错误条 + 事件栏。
+                        // 直接调 RPC 再自己 catch 的话，用户只看到"点了没反应"（真踩过）
+                        void removeRecognizer(activeId, item.label);
                       }}
                       className="ml-1 h-5 shrink-0 rounded-sm border border-line px-1 text-badge text-failed hover:bg-raised"
                     >

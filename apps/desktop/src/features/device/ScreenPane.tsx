@@ -5,13 +5,14 @@
  * 识别框、node/tick/fps 浮层全部是引擎的真实数据，前端只做展示与坐标换算
  * （而且坐标本来就是归一化的，连换算都不需要）。
  */
-import { Grid2x2, MousePointerSquareDashed, ScanLine } from 'lucide-react';
+import { ChevronDown, ChevronUp, Grid2x2, MousePointerSquareDashed, ScanLine, X } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
-import { Group, Panel, Separator } from 'react-resizable-panels';
+import { Group, Panel, type PanelImperativeHandle, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { DeviceControls } from '@/features/device/DeviceControls';
 import { RecordOverlay } from '@/features/device/RecordOverlay';
 import { type GesturePoint, isSwipeGesture } from '@/features/device/touch-gesture';
+import { checkRecognizerName, trimRecognizerName } from '@/features/recognizers/recognizer-name';
 import { SCREEN_LAYOUT } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell, StatusDot } from '@/layout/PanelShell';
@@ -31,6 +32,14 @@ let lastGridSummary = '';
 let lastImageBoxKey = '';
 let imgLoadLogs = 0;
 
+/**
+ * 识别读数区收起时的高度：正好放下那一行标题（h-6 = 24px + 上下各 1px 边框）。
+ * **不能收到 0** —— 0 的话分隔线会贴在面板底边，鼠标抓不住（CONVENTIONS §12.6-6）。
+ */
+const READOUT_COLLAPSED_PX = 26;
+/** 展开态最小高度：再矮就只剩标题，读数看不见了 */
+const READOUT_MIN_PX = 96;
+
 export function ScreenPane(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
@@ -43,6 +52,10 @@ export function ScreenPane(): ReactNode {
 
   const device = activeDevice(devices, activeId);
   const connected = useMemo(() => connectedDevices(devices), [devices]);
+  // 读数区的展开/收起：store 是唯一状态源，面板尺寸跟着它走（和底部抽屉一个规矩）
+  const readoutOpen = useUiStore((state) => state.readoutOpen);
+  const setReadoutOpen = useUiStore((state) => state.setReadoutOpen);
+  const readoutRef = usePanelRef();
 
   // 画面栏到底渲染了哪一支？"连上了却没画面"第一时间要看的就是这个。
   // 只在分支真正变化时打一条，避免 14fps 下刷屏。
@@ -137,10 +150,34 @@ export function ScreenPane(): ReactNode {
         </Panel>
         <Separator
           className="h-px bg-line transition-colors hover:bg-brand"
-          title="拖动改高度 · 双击恢复默认"
+          title="拖动改高度（拖到底会收起诉数区）· 双击恢复默认"
         />
-        <Panel id="readout" defaultSize="30%" minSize="12%" style={{ overflow: 'hidden' }}>
-          <RecognizerReadout recognizers={recognizers} onConnect={() => toggleDevicePopover(true)} />
+        {/* 读数区可以收起来：收起时只留 26px 的标题行（展开按钮还在），画面拿走全部高度。
+            和底部调试抽屉同一套做法：`collapsible` + panelRef，状态在 ui.store，
+            尺寸听 store 的（拖动改尺寸是用户交互，会被布局记忆存下来） */}
+        <Panel
+          id="readout"
+          defaultSize="30%"
+          minSize={`${READOUT_MIN_PX}px`}
+          collapsible
+          collapsedSize={`${READOUT_COLLAPSED_PX}px`}
+          panelRef={readoutRef}
+          onResize={() => {
+            // 拖到底（或拖出来）时面板自己会折叠：把状态同步回 store，
+            // 否则标题上的"收起/展开"会和真实状态相反，一点就卡住
+            const collapsed = readoutRef.current?.isCollapsed() ?? false;
+            if (readoutOpen !== !collapsed) {
+              setReadoutOpen(!collapsed);
+            }
+          }}
+          style={{ overflow: 'hidden' }}
+        >
+          <RecognizerReadout
+            deviceId={activeId}
+            recognizers={recognizers}
+            panelRef={readoutRef}
+            onConnect={() => toggleDevicePopover(true)}
+          />
         </Panel>
       </Group>
     </PanelShell>
@@ -933,39 +970,231 @@ function ScreenGrid(): ReactNode {
 
 /* ---------------------------------------------------------- 底部识别读数 */
 
-function RecognizerReadout({
+/** 这一帧"命中"了吗：待确认/稳定都算命中，只有 idle 是没命中。 */
+function isHit(item: RecognizerView): boolean {
+  return item.state !== 'idle';
+}
+
+/** 导出只为单测直接渲染这一格（不用把 <img> 量测、指针坐标那一整套搭起来）。 */
+export function RecognizerReadout({
+  deviceId,
   recognizers,
+  panelRef,
   onConnect,
 }: {
+  deviceId: string;
   recognizers: readonly RecognizerView[];
+  /** 自己那一格的面板句柄：收起/展开是命令式的（Panel 的 collapse/expand） */
+  panelRef: React.RefObject<PanelImperativeHandle | null>;
   onConnect: () => void;
 }): ReactNode {
+  // 筛选放 store：换设备/面板重挂之后选择还在（和 controlMode 那些一个规矩）
+  const filter = useUiStore((state) => state.readoutFilter);
+  const setFilter = useUiStore((state) => state.setReadoutFilter);
+  const open = useUiStore((state) => state.readoutOpen);
+  const setOpen = useUiStore((state) => state.setReadoutOpen);
+  const rename = useSessionStore((state) => state.renameRecognizer);
+  const remove = useSessionStore((state) => state.removeRecognizer);
+  // 正在改名的行：值 + 校验错误（null = 可以提交）
+  const [editing, setEditing] = useState<{ label: string; value: string; error: string | null } | null>(null);
+  // 这次编辑是否已经了结（提交成功 / Esc 取消）：输入框卸载时浏览器还会补一个 blur，
+  // 不挡住的话同一个改名会发两遍（第二遍必然报"识别器不存在"）
+  const finished = useRef(false);
+
+  const hits = recognizers.filter(isHit);
+  const rows = filter === 'hit' ? hits : recognizers;
+
+  // ui.store 是唯一状态源；面板尺寸跟着它走（和底部调试抽屉同一套做法）。
+  // 注意依赖是 `open`：拖动折叠回写 store 之后，这里也会跟着走一次（幂等）
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) {
+      return;
+    }
+    if (open) {
+      panel.expand();
+    } else {
+      panel.collapse();
+    }
+  }, [open, panelRef]);
+
+  const beginRename = (label: string): void => {
+    finished.current = false;
+    setEditing({ label, value: label, error: null });
+  };
+
+  /**
+   * 提交（回车 / 点别处都走这里）。
+   *
+   * 校验不过**不关输入框**：把原因留在原地接着改。"悄无声息地什么都不做"
+   * 是最难用的一种交互 —— 用户只会觉得改名没生效。
+   */
+  const submitRename = (label: string, value: string): void => {
+    const error = checkRecognizerName(value, {
+      current: label,
+      existing: recognizers.map((item) => item.label),
+    });
+    if (error) {
+      setEditing({ label, value, error });
+      return;
+    }
+    finished.current = true;
+    setEditing(null);
+    const name = trimRecognizerName(value);
+    if (name !== label) {
+      // 真正的改名交给引擎：它会连引用一起改（前端只做即时校验）
+      void rename(deviceId, label, name);
+    }
+  };
+
   return (
     // 高度由上方分隔线决定；列表自己滚动（识别器可能有几十个，撑开会把画面挤没）
     <div className="flex h-full min-h-0 flex-col bg-panel">
-      <div className="flex h-6 shrink-0 items-center px-2 text-badge text-faint">
-        识别读数
+      <div className="flex h-6 shrink-0 items-center gap-2 px-2 text-badge text-faint">
+        {/* 标题本身就是收起/展开的开关：收起后画面拿走全部高度，这一行还留着（点得到） */}
+        <button
+          type="button"
+          data-testid="readout-toggle"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+          title={
+            open
+              ? '收起诉数区（画面更高；也可以把上面的横线拖到底）'
+              : '展开识别读数（筛选 · 双击名字改名 · 行尾删除）'
+          }
+          className="flex h-[18px] items-center gap-1 rounded-sm px-1 text-dim hover:bg-raised hover:text-fg"
+        >
+          {open ? <ChevronDown className="size-3" /> : <ChevronUp className="size-3" />}
+          识别读数
+        </button>
         <span className="flex-1" />
+        {open ? (
+          /* 全部 / 命中：识别器一多，"这一帧谁在命中"才是要看的信息 */
+          <span className="flex items-center overflow-hidden rounded-sm border border-line">
+            {(
+              [
+                ['all', `全部 ${recognizers.length}`],
+                ['hit', `命中 ${hits.length}`],
+              ] as const
+            ).map(([id, text]) => (
+              <button
+                key={id}
+                type="button"
+                data-testid={`readout-filter-${id}`}
+                aria-pressed={filter === id}
+                title={id === 'hit' ? '只看这一帧命中的（待确认 + 稳定）' : '显示全部识别器'}
+                onClick={() => setFilter(id)}
+                className={cn('h-[18px] px-1.5', filter === id ? 'bg-active text-fg' : 'hover:text-fg')}
+              >
+                {text}
+              </button>
+            ))}
+          </span>
+        ) : (
+          // 收起时筛选按钮没意义（列表都没了），但"命中几个"还是值得一眼看到
+          <span data-testid="readout-hit-summary" className={hits.length > 0 ? 'text-confirmed' : undefined}>
+            命中 {hits.length}
+          </span>
+        )}
         <button type="button" onClick={onConnect} className="hover:text-fg">
           查看设备
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {recognizers.map((item) => (
-          <div key={item.label} className="flex h-[26px] items-center gap-2 px-2 hover:bg-raised">
-            <StatusDot
-              tone={item.state === 'confirmed' ? 'confirmed' : item.state === 'pending' ? 'pending' : 'idle'}
-            />
-            <span className="w-32 truncate text-body">{item.label}</span>
-            <span className="text-body text-dim">{item.score.toFixed(2)}</span>
-            <span className="flex-1" />
-            <span className="text-badge text-faint">
-              {item.state === 'confirmed' ? '稳定' : item.state === 'pending' ? '待确认' : '未命中'}
-            </span>
-          </div>
-        ))}
+        {rows.map((item) => {
+          const editingThis = editing?.label === item.label;
+          return (
+            <div key={item.label} className="group/row flex h-[26px] items-center gap-2 px-2 hover:bg-raised">
+              <StatusDot
+                tone={
+                  item.state === 'confirmed' ? 'confirmed' : item.state === 'pending' ? 'pending' : 'idle'
+                }
+              />
+              {editingThis ? (
+                <input
+                  autoFocus
+                  data-testid="recognizer-name-input"
+                  value={editing.value}
+                  aria-label={`${item.label} 改名`}
+                  aria-invalid={Boolean(editing.error)}
+                  title={editing.error ?? '回车保存 · Esc 取消'}
+                  onFocus={(event) => event.currentTarget.select()}
+                  onChange={(event) =>
+                    setEditing({ label: item.label, value: event.target.value, error: null })
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      submitRename(item.label, editing.value);
+                    } else if (event.key === 'Escape') {
+                      finished.current = true;
+                      setEditing(null);
+                    }
+                  }}
+                  onBlur={() => {
+                    // 已经提交/取消过了（卸载时会补一个 blur）：别再提交一次
+                    if (finished.current) {
+                      finished.current = false;
+                      return;
+                    }
+                    submitRename(item.label, editing.value);
+                  }}
+                  className={cn(
+                    'h-[20px] w-32 shrink-0 rounded-sm border bg-canvas px-1 text-body text-fg outline-none',
+                    editing.error ? 'border-failed' : 'border-brand',
+                  )}
+                />
+              ) : (
+                <button
+                  type="button"
+                  data-testid="recognizer-name"
+                  title="双击改名（引用它的节点/边会一起改）"
+                  onDoubleClick={() => beginRename(item.label)}
+                  className="w-32 shrink-0 truncate text-left text-body hover:text-brand"
+                >
+                  {item.label}
+                </button>
+              )}
+              <span className="shrink-0 text-body text-dim">{item.score.toFixed(2)}</span>
+              {/* 校验失败的原因就写在行里（截断显示，完整内容看 title）：别让它"什么都没发生" */}
+              {editingThis && editing.error ? (
+                <span
+                  className="min-w-0 flex-1 truncate text-right text-badge text-failed"
+                  title={editing.error}
+                >
+                  {editing.error}
+                </span>
+              ) : (
+                <span className="flex-1" />
+              )}
+              <span className="shrink-0 text-badge text-faint">
+                {item.state === 'confirmed' ? '稳定' : item.state === 'pending' ? '待确认' : '未命中'}
+              </span>
+              {/* 删除：行尾一个 ✕，平时半透明（不抢分数/状态的视线），悬停整行才实心。
+                  被节点/边引用时引擎会拒绝并说清被谁用了 —— 那句话进错误条 + 事件栏，
+                  所以这里不需要自己再确认一次 */}
+              <button
+                type="button"
+                data-testid="recognizer-remove"
+                aria-label={`删除 ${item.label}`}
+                title={`删除 ${item.label}（模板文件一起删；被节点/边引用时会告诉你被谁用了）`}
+                onClick={() => {
+                  setEditing(null);
+                  void remove(deviceId, item.label);
+                }}
+                className="flex size-4 shrink-0 items-center justify-center rounded-sm text-dim opacity-0 group-hover/row:opacity-100 hover:bg-raised hover:text-failed focus-visible:opacity-100"
+              >
+                <X className="size-3" />
+              </button>
+            </div>
+          );
+        })}
         {recognizers.length === 0 && (
           <div className="px-2 py-3 text-badge text-faint">还没有识别器 · 打开「框选」在画面上拖一个矩形</div>
+        )}
+        {recognizers.length > 0 && rows.length === 0 && (
+          <div className="px-2 py-3 text-badge text-faint">
+            这一帧没有命中的识别器 · 切到「全部」看全部 {recognizers.length} 个
+          </div>
         )}
       </div>
     </div>

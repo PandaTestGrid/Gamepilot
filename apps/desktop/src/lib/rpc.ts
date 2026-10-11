@@ -316,8 +316,11 @@ export function actionRun(
 }
 
 /** 删除一个模板/识别器（被界面或边引用时引擎会拒绝并说明被谁用了） */
-export function removeRecognizer(deviceId: string, label: string): Promise<{ removed: string }> {
-  return rpc<{ removed: string }>('recognizer.remove', { deviceId, label });
+export function removeRecognizer(
+  deviceId: string,
+  label: string,
+): Promise<{ removed: string; graph: GraphPayload }> {
+  return rpc<{ removed: string; graph: GraphPayload }>('recognizer.remove', { deviceId, label });
 }
 
 /** 识别器改名（引用由引擎级联改掉：节点进入条件 / 边条件 / 动作目标 / $score） */

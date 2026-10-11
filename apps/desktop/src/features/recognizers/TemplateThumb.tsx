@@ -76,6 +76,15 @@ export function TemplateThumb({ label, size = 26 }: { label: string; size?: numb
       </button>
 
       {/* 大预览：固定定位，不会被滚动容器裁切 */}
+      {hover && !src && failure && (
+        <span
+          className="pointer-events-none fixed z-50 max-w-[280px] rounded-sm border border-failed bg-panel p-2 text-badge text-failed shadow-lg"
+          style={{ left: hover.x, top: hover.y }}
+        >
+          {label}：{failure}
+        </span>
+      )}
+
       {hover && src && (
         <span
           className="pointer-events-none fixed z-50 flex flex-col gap-1 rounded-sm border border-line bg-panel p-2 shadow-lg"

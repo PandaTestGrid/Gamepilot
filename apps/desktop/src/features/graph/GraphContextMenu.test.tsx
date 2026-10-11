@@ -1,0 +1,82 @@
+/**
+ * 右键菜单：加东西的入口应该出现在鼠标所在的位置。
+ *
+ * 三套菜单（空白 / 节点 / 边）由 GraphPane 组装，这里守菜单本身的行为：
+ * 渲染交给它的项、点一项就执行并关闭、Esc / 点别处关闭、危险项有独立的颜色。
+ */
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
+
+import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContextMenu';
+
+function anchor(items: MenuAnchor['items']): MenuAnchor {
+  return {
+    kind: 'node',
+    id: 'main',
+    flow: { x: 0, y: 0 },
+    screen: { x: 100, y: 100 },
+    title: '节点 主界面',
+    items,
+  };
+}
+
+describe('画布右键菜单', () => {
+  it('渲染标题与所有项，点一项执行并关闭', async () => {
+    const user = userEvent.setup();
+    const addStep = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <GraphContextMenu
+        anchor={anchor([
+          { label: '加一步操作', hint: '原地动作', onSelect: addStep },
+          { label: '删除这个界面', danger: true, onSelect: vi.fn() },
+        ])}
+        onClose={onClose}
+      />,
+    );
+
+    expect(screen.getByText('节点 主界面')).toBeInTheDocument();
+    await user.click(screen.getByText('加一步操作'));
+
+    expect(addStep).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('危险项（删除）用失败色标出来，避免误点', () => {
+    render(
+      <GraphContextMenu
+        anchor={anchor([{ label: '删除这个界面', danger: true, onSelect: vi.fn() }])}
+        onClose={vi.fn()}
+      />,
+    );
+
+    // 颜色在按钮上（文字本身只是个 span）
+    expect(screen.getByText('删除这个界面').closest('button')?.className).toContain('text-failed');
+  });
+
+  it('Esc 关闭', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <GraphContextMenu anchor={anchor([{ label: '加一步操作', onSelect: vi.fn() }])} onClose={onClose} />,
+    );
+
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('点菜单外面关闭（不黏在屏幕上）', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <div>
+        <GraphContextMenu anchor={anchor([{ label: '加一步操作', onSelect: vi.fn() }])} onClose={onClose} />
+        <button type="button">别处</button>
+      </div>,
+    );
+
+    await user.click(screen.getByText('别处'));
+    expect(onClose).toHaveBeenCalled();
+  });
+});

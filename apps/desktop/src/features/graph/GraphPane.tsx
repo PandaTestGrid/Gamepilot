@@ -11,6 +11,7 @@ import {
   Background,
   BackgroundVariant,
   ConnectionMode,
+  type ReactFlowInstance,
   MarkerType,
   ReactFlow,
   type Edge,
@@ -35,6 +36,7 @@ import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell } from '@/layout/PanelShell';
 import { RunButton } from '@/layout/RunButton';
 import { useDeviceStore } from '@/stores/device.store';
+import { useSessionStore } from '@/stores/session.store';
 import type { EdgeAction } from '@/types';
 import { toGraphData } from '@/lib/graph-adapter';
 import { actionPins, summarizePins } from '@/lib/action-pins';
@@ -54,14 +56,23 @@ export function GraphPane(): ReactNode {
   // 状态图 / 脚本：同一份数据的两种看法（一个看结构、一个看执行顺序）
   const [view, setView] = useState<'graph' | 'script' | 'variables'>('graph');
   const activeId = useDeviceStore((state) => state.activeId);
+  /*
+   * ReactFlow 实例：右键空白处要"在鼠标位置"建节点，需要 screen → flow 坐标换算。
+   * 这里不能用 `useReactFlow()`：GraphPane 本身就是渲染 `<ReactFlow>` 的那个组件，
+   * 外层没有 Provider，只能从 onInit 里把实例接过来。
+   */
+  const flowRef = useRef<ReactFlowInstance<StateNodeType, Edge> | null>(null);
   const graph = useGraphStore((state) => state.graphs[activeId]);
   const moveNode = useGraphStore((state) => state.moveNode);
   const selectEdge = useGraphStore((state) => state.selectEdge);
   const connectNodes = useGraphStore((state) => state.connectNodes);
+  const removeEdge = useGraphStore((state) => state.removeEdge);
   const selectedEdgeId = useGraphStore((state) => state.selectedEdgeId);
   const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
   const selectNode = useGraphStore((state) => state.selectNode);
   const createNode = useGraphStore((state) => state.createNode);
+  const removeNode = useGraphStore((state) => state.removeNode);
+  const addBranch = useGraphStore((state) => state.addBranch);
 
   // 关键：节点数组只在"位置/名字/识别器/激活态"变化时重建。
   // 直接用 [graph] 当依赖的话，每帧的实时分数更新都会造出一批新节点对象，
@@ -231,6 +242,13 @@ export function GraphPane(): ReactNode {
     // 上色跟着实时状态走，否则运行时边的颜色不会变；选中态也要跟着（编辑器换了一条边）
   }, [graph, statuses, selectedEdgeId, hoveredEdge]);
 
+  /** 让底部边编辑器把"动作"区滚进视野（双击边时用）。 */
+  const focusEdgeAction = useCallback(() => {
+    window.setTimeout(() => {
+      document.querySelector('[data-edge-action]')?.scrollIntoView({ block: 'nearest' });
+    }, 60);
+  }, []);
+
   /** 空白画布右键：在鼠标处新建界面节点。 */
   const openPaneMenu = useCallback(
     (event: React.MouseEvent | MouseEvent, flow: { x: number; y: number }) => {
@@ -252,11 +270,32 @@ export function GraphPane(): ReactNode {
               });
             },
           },
-          { label: '新建界面节点并挂上第一个模板', onSelect: () => void createNode(activeId, '新界面') },
+          {
+            label: '新建界面节点并挂上第一个模板',
+            hint: '省一步',
+            onSelect: () => {
+              const first = (graph?.recognizers ?? []).find(
+                (item) => item.type === 'template' && item.template,
+              );
+              if (!first) {
+                useSessionStore.setState({ error: '还没有模板：先在画面栏「框选」录一个界面元素' });
+                return;
+              }
+              void createNode(activeId, `界面${(graph?.nodes.length ?? 0) + 1}`, [first.label]).then(
+                (nodeId) => {
+                  if (nodeId) {
+                    moveNode(activeId, nodeId, Math.round(flow.x), Math.round(flow.y));
+                    selectNode(nodeId);
+                  }
+                },
+              );
+            },
+          },
         ],
       });
     },
-    [activeId, createNode, graph?.nodes.length, moveNode, selectNode],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只用到节点数量与识别器列表，用长度/签名当依赖避免每帧重建
+    [activeId, createNode, graph?.nodes.length, recognizerSignature, moveNode, selectNode],
   );
 
   /** 节点右键：加操作 / 加分支 / 重命名 / 删除（参数编辑仍在下方详情里）。 */
@@ -347,13 +386,6 @@ export function GraphPane(): ReactNode {
     },
     [activeId, focusEdgeAction, removeEdge, selectEdge],
   );
-
-  /** 让底部边编辑器把"动作"区滚进视野（双击边时用）。 */
-  const focusEdgeAction = useCallback(() => {
-    window.setTimeout(() => {
-      document.querySelector('[data-edge-action]')?.scrollIntoView({ block: 'nearest' });
-    }, 60);
-  }, []);
 
   const onNodeDragStop = useCallback(
     (_event: unknown, node: StateNodeType) => {
@@ -525,21 +557,27 @@ export function GraphPane(): ReactNode {
                   }
                 }}
                 onPaneContextMenu={(event) => {
-                  const mouse = event as unknown as MouseEvent;
-                  const flow = screenToFlowPosition({ x: mouse.clientX, y: mouse.clientY });
+                  const mouse = event;
+                  const flow = flowRef.current?.screenToFlowPosition({
+                    x: mouse.clientX,
+                    y: mouse.clientY,
+                  }) ?? { x: 0, y: 0 };
                   openPaneMenu(mouse, flow);
                 }}
                 onNodeContextMenu={(event, node) => {
                   selectNode(node.id);
-                  openNodeMenu(event as unknown as MouseEvent, node.id, String(node.data.label ?? node.id));
+                  openNodeMenu(event, node.id, node.data.label || node.id);
                 }}
                 onEdgeContextMenu={(event, edge) => {
                   selectEdge(edge.id);
-                  openEdgeMenu(event as unknown as MouseEvent, edge.id, String(edge.label ?? edge.id));
+                  openEdgeMenu(event, edge.id, typeof edge.label === 'string' ? edge.label : edge.id);
                 }}
                 onPaneClick={() => {
                   selectEdge(null);
                   selectNode(null);
+                }}
+                onInit={(instance) => {
+                  flowRef.current = instance;
                 }}
                 fitView
                 fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
@@ -557,7 +595,7 @@ export function GraphPane(): ReactNode {
             )}
 
             {/* 图例 + 孤立步骤清理：第一次打开的人要能知道节点/边是干什么的 */}
-            <div className="absolute top-1 left-2 flex max-w-[70%] flex-col items-start gap-0.5 text-badge text-faint">
+            <div className="pointer-events-none absolute bottom-2 left-2 flex max-w-[70%] flex-col items-start gap-0.5 rounded-sm bg-panel/85 px-1 text-badge text-faint">
               <span className="pointer-events-none">
                 节点 = 一个界面（由识别器判定）· 边 = 一个动作（条件成立才走）
               </span>

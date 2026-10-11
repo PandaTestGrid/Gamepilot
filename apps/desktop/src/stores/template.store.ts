@@ -31,7 +31,29 @@ interface TemplateState {
 
 /** 进程级缓存：组件卸载/重挂不影响它（zustand 只负责通知"哪张取到了"） */
 const cache = new Map<string, string>();
-const inflight = new Set<string>();
+/** 每个 key 的请求代次：只有最新一次的结果能写缓存（重试时旧请求回来也不会覆盖新的） */
+const generation = new Map<string, number>();
+
+/** 清掉缓存（重新录制同一张模板后必须调用，否则界面还在显示旧图） */
+export function clearTemplateCache(labels?: readonly string[]): void {
+  if (!labels) {
+    cache.clear();
+    useTemplateStore.setState({ entries: {} });
+    return;
+  }
+  for (const label of labels) {
+    for (const suffix of ['color', 'gray'] as const) {
+      const key = `${label}:${suffix}`;
+      cache.delete(key);
+      generation.delete(key);
+      useTemplateStore.setState((state) => {
+        const entries = { ...state.entries };
+        delete entries[key];
+        return { entries };
+      });
+    }
+  }
+}
 
 function cacheKey(label: string, grayscale: boolean): string {
   return `${label}:${grayscale ? 'gray' : 'color'}`;
@@ -42,21 +64,29 @@ export const useTemplateStore = create<TemplateState>()((set, get) => {
     set((state) => ({ entries: { ...state.entries, [key]: entry } }));
   };
 
-  const fetchOne = (label: string, grayscale: boolean): void => {
+  /**
+   * 取一张图。
+   * `force` = 用户点了重试：**保留旧图**去重新拉，拉到再换（拉失败也还留着旧的）。
+   */
+  const fetchOne = (label: string, grayscale: boolean, force = false): void => {
     const key = cacheKey(label, grayscale);
     const known = cache.get(key);
-    if (known) {
+    if (known && !force) {
       patch(key, { url: known, loading: false });
       return;
     }
-    if (inflight.has(key)) {
-      return;
+    const ticket = (generation.get(key) ?? 0) + 1;
+    if (!force && generation.get(key) === ticket - 1 && useTemplateStore.getState().entries[key]?.loading) {
+      return; // 已经在取了（force = 用户点了重试，允许插队）
     }
-    inflight.add(key);
-    patch(key, { loading: true });
+    generation.set(key, ticket);
+    patch(key, known ? { url: known, loading: true } : { loading: true });
 
     void templateImage(label, grayscale)
       .then((data) => {
+        if (generation.get(key) !== ticket) {
+          return; // 已经有更新的一次请求了，旧结果丢掉
+        }
         // 引擎返回 { label, mode, width, height, png }：图片在 png 字段（data URL）
         const url = typeof data === 'string' ? data : String((data as { png?: string })?.png ?? '');
         if (!url) {
@@ -66,14 +96,14 @@ export const useTemplateStore = create<TemplateState>()((set, get) => {
         patch(key, { url, loading: false });
       })
       .catch((error: unknown) => {
+        if (generation.get(key) !== ticket) {
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         devLog(`取模板截图失败 ${label}: ${message}`);
         // 关键：**只在从没成功过时**才显示失败；已经拿到过的图继续用（宁可显示旧图，也别变"×"）
         const fallback = cache.get(key);
         patch(key, fallback ? { url: fallback, loading: false } : { loading: false, error: message });
-      })
-      .finally(() => {
-        inflight.delete(key);
       });
   };
 
@@ -93,8 +123,8 @@ export const useTemplateStore = create<TemplateState>()((set, get) => {
     },
 
     retry: (label, grayscale = false) => {
-      cache.delete(cacheKey(label, grayscale));
-      fetchOne(label, grayscale);
+      // 注意：**不清缓存**。清了的话"重试"会先把已经显示出来的图弄没（用户看到的就是模板又消失一次）
+      fetchOne(label, grayscale, true);
     },
   };
 });

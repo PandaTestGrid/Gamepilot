@@ -302,6 +302,101 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     expect(useSessionStore.getState().running[DEVICE_ID]).toBe(false);
   });
 
+  it('识别器改名：引用被级联改掉（磁盘 + 界面图 + 引擎热重载后继续出分）', { timeout: 20000 }, async () => {
+    const graphPath = path.join(projectDir, 'graph.json');
+    const before = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
+    expect(Object.keys(before.recognizers)).toContain('logo');
+    // 上一条用例加的边引用了 logo（when + action.target），改名必须把它一起改掉
+    expect(before.edges.some((edge) => edge.when === 'logo')).toBe(true);
+
+    const result = await useSessionStore.getState().renameRecognizer(DEVICE_ID, 'logo', '游戏标题');
+
+    expect(result).not.toBeNull();
+    expect(result?.refs.nodes).toBeGreaterThanOrEqual(1); // 界面 main 的进入条件
+    expect(result?.refs.edges).toBeGreaterThanOrEqual(1); // e_tap 的 when / 动作目标
+
+    // 界面里的图：新名字在、旧名字没了（改名不能留下两个）
+    const labels = useGraphStore.getState().graphs[DEVICE_ID]?.recognizers.map((item) => item.label) ?? [];
+    expect(labels).toContain('游戏标题');
+    expect(labels).not.toContain('logo');
+
+    // 磁盘上的 graph.json：识别器键 / 节点 enter / 边 when / 动作目标 全部换新
+    const saved = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
+    expect(Object.keys(saved.recognizers)).toContain('游戏标题');
+    expect(Object.keys(saved.recognizers)).not.toContain('logo');
+    expect(saved.nodes.find((node) => node.id === 'main')?.enter).toContain('游戏标题');
+    const tapEdge = saved.edges.find((edge) => edge.id === 'e_tap');
+    expect(tapEdge?.when).toBe('游戏标题');
+    expect((tapEdge?.action as { target?: string } | undefined)?.target).toBe('游戏标题');
+
+    // 模板文件不跟着改名（spec 里存的是相对路径，文件叫什么对匹配没影响）
+    expect(existsSync(path.join(projectDir, 'templates', 'logo.png'))).toBe(true);
+
+    // 引擎热重载：新标签继续按真实帧出分（不然画面上会一直显示旧名字 0.00）
+    await waitFor(() => {
+      const item = useGraphStore
+        .getState()
+        .graphs[DEVICE_ID]?.recognizers.find((recognizer) => recognizer.label === '游戏标题');
+      return Boolean(item && item.score > 0.8);
+    });
+
+    // 事件栏留一条痕（用户能回看"什么时候改的名"）
+    const types = (useEventStore.getState().events[DEVICE_ID] ?? []).map((item) => item.type);
+    expect(types).toContain('recognizer_renamed');
+  });
+
+  it('删除识别器：被引用时拒绝并说清被谁用了；没人用才真删（连模板文件）', { timeout: 20000 }, async () => {
+    const graphPath = path.join(projectDir, 'graph.json');
+    // 上一条用例改成"游戏标题"了，且 main 的进入条件 + e_tap 的 when/动作都引用它
+    const before = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
+    expect(Object.keys(before.recognizers)).toContain('游戏标题');
+
+    // 被引用 → 拒绝：原因里要能看出"被谁用了"（界面把它显示在错误条 + 事件栏）
+    const refused = await useSessionStore.getState().removeRecognizer(DEVICE_ID, '游戏标题');
+    expect(refused).toBe(false);
+    expect(useSessionStore.getState().error).toMatch(/还在被使用/);
+    const stillThere = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
+    expect(Object.keys(stillThere.recognizers)).toContain('游戏标题');
+
+    // 再录两个**没人引用**的识别器（不建节点/边），它们就该删得掉
+    const draft = (label: string, rect: readonly [number, number, number, number]) => ({
+      rect,
+      label,
+      threshold: 0.8,
+      score: 0,
+      asEnter: false,
+      asActionTarget: false,
+      targetMode: 'new' as const,
+      targetNodeId: null,
+      newNodeName: '临时',
+      newNodeId: 'tmp',
+    });
+    // 纯色区域 → 引擎自动降级成颜色识别器，但录制照样留下素材（templates/ 是"录过什么"的台账）；
+    // 删除时必须连它一起清掉（否则用户会看到 templates/ 里还留着，像没删干净）
+    await useSessionStore.getState().record(DEVICE_ID, draft('lonely_color', [0.1, 0.1, 0.12, 0.1]));
+    expect(existsSync(path.join(projectDir, 'templates', 'lonely_color.png'))).toBe(true);
+    // 有纹理的区域 → 模板识别器：文件真的落盘，删除时必须跟着走
+    await useSessionStore.getState().record(DEVICE_ID, draft('lonely_tpl', [0.6, 0.3, 0.16, 0.12]));
+    expect(existsSync(path.join(projectDir, 'templates', 'lonely_tpl.png'))).toBe(true);
+
+    expect(await useSessionStore.getState().removeRecognizer(DEVICE_ID, 'lonely_color')).toBe(true);
+    expect(await useSessionStore.getState().removeRecognizer(DEVICE_ID, 'lonely_tpl')).toBe(true);
+
+    // 图 + 磁盘 + 模板文件三处都干净了
+    const labels = useGraphStore.getState().graphs[DEVICE_ID]?.recognizers.map((item) => item.label) ?? [];
+    expect(labels).not.toContain('lonely_color');
+    expect(labels).not.toContain('lonely_tpl');
+    const saved = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
+    expect(Object.keys(saved.recognizers)).not.toContain('lonely_color');
+    expect(Object.keys(saved.recognizers)).not.toContain('lonely_tpl');
+    // 两个识别器的素材文件都被清掉了（颜色识别器那个尤其容易漏 —— 它的 spec 里没有 template）
+    expect(existsSync(path.join(projectDir, 'templates', 'lonely_color.png'))).toBe(false);
+    expect(existsSync(path.join(projectDir, 'templates', 'lonely_tpl.png'))).toBe(false);
+
+    const types = (useEventStore.getState().events[DEVICE_ID] ?? []).map((item) => item.type);
+    expect(types).toContain('recognizer_removed');
+  });
+
   it('断开设备后：连接态归零', async () => {
     await useSessionStore.getState().disconnect(DEVICE_ID);
 

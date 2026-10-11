@@ -28,3 +28,18 @@
   悬停必须走 React 状态（`GraphPane` 的 `hoveredEdge`），顺序是"选中 > 悬停 > 默认"。
 - 节点里的 store 选择器**不要写 `?? []`**：selector 每次返回新数组会让 `useSyncExternalStore`
   认为状态一直在变 → 无限重渲染（图还没加载完时必炸）。
+
+## 画布上的模板截图与右键菜单
+
+| 文件 | 职责 |
+|---|---|
+| `GraphContextMenu.tsx` | 右键菜单（空白 / 节点 / 边 三套；贴边翻转、Esc/点别处关闭） |
+| `stores/template.store.ts` | 模板截图**进程级缓存**：一张模板只取一次，取到过就不再消失，失败可重试 |
+
+规则：
+
+- 画布上的缩略图是"这一步点的是哪个图标 / 这个界面长什么样"，一律读同一份缓存
+  （`TemplateMini`）；**不要在画布里自己发 `template.image`**。
+- 重新录制同一张模板（同名同路径、内容变了）必须 `clearTemplateCache([label])`，
+  否则界面还在显示旧截图（`session.store.record` 里已经接了）。
+- 右键菜单只放"入口 + 删除"这类不会误操作的项：参数编辑留在下方详情面板。

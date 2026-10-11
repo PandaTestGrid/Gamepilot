@@ -24,6 +24,7 @@ const TONE: Partial<Record<TraceEventType, DotTone>> = {
   device_reconnected: 'confirmed',
   recognizer_added: 'confirmed',
   recognizer_renamed: 'confirmed',
+  recognizer_removed: 'idle',
   node_added: 'confirmed',
   edge_added: 'confirmed',
 };

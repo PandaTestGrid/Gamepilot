@@ -15,6 +15,13 @@ import type { DockTab, RecordDraft, RecordMode, RightTab } from '@/types';
 
 const DEFAULT_THRESHOLD = 0.82;
 
+/**
+ * 识别读数列表的筛选：
+ * - `all`：全部识别器（默认，和以前一样）
+ * - `hit`：只看这一帧命中的（`state !== 'idle'`）—— 识别器一多，"谁在命中"才是有用的信息
+ */
+export type ReadoutFilter = 'all' | 'hit';
+
 interface UiState {
   readonly recordMode: RecordMode;
   readonly draft: RecordDraft | null;
@@ -37,6 +44,10 @@ interface UiState {
   /** 画面栏「识别读数」列表的筛选：全部（默认）/ 只看命中的 */
   readonly readoutFilter: ReadoutFilter;
   readonly setReadoutFilter: (filter: ReadoutFilter) => void;
+  /** 画面栏下半格（识别读数）是否展开：收起时只留一行标题，画面拿走全部高度 */
+  readonly readoutOpen: boolean;
+  /** 面板尺寸跟着它走（`Panel` 的 collapse/expand，见 ScreenPane） */
+  readonly setReadoutOpen: (open: boolean) => void;
   readonly toggleDevicePopover: (open?: boolean) => void;
   readonly setDeviceTab: (tab: DeviceTabId) => void;
   readonly setRightTab: (tab: RightTab) => void;
@@ -53,6 +64,8 @@ export const useUiStore = create<UiState>()((set, get) => ({
   recordMode: 'off',
   controlMode: true,
   recordActionMode: false,
+  readoutFilter: 'all',
+  readoutOpen: true,
   draft: null,
   devicePopoverOpen: false,
   deviceTab: 'all',
@@ -66,6 +79,8 @@ export const useUiStore = create<UiState>()((set, get) => ({
     set((state) => ({ recordMode: state.recordMode === 'off' ? 'marquee' : 'off', draft: null })),
   toggleControl: () => set((state) => ({ controlMode: !state.controlMode })),
   toggleRecordAction: () => set((state) => ({ recordActionMode: !state.recordActionMode })),
+  setReadoutFilter: (readoutFilter) => set({ readoutFilter }),
+  setReadoutOpen: (readoutOpen) => set({ readoutOpen }),
   toggleDevicePopover: (open) => set((state) => ({ devicePopoverOpen: open ?? !state.devicePopoverOpen })),
   setDeviceTab: (deviceTab) => set({ deviceTab }),
   setRightTab: (rightTab) => set({ rightTab }),
