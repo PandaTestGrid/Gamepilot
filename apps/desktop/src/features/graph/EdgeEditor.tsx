@@ -310,6 +310,17 @@ export function EdgeEditor({
           />
         )}
 
+        {action.type === 'call' && (
+          <label className="flex items-center gap-1 text-dim">
+            脚本名
+            <input
+              value={action.script ?? ''}
+              onChange={(event) => setAction({ ...action, script: event.target.value })}
+              placeholder="同级脚本目录名"
+              className="h-5 w-40 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+            />
+          </label>
+        )}
         {action.type === 'wait' && (
           <NumberField
             label="秒"

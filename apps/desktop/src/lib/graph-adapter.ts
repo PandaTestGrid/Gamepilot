@@ -215,7 +215,7 @@ export function toConditionPayload(
 export function toActionPayload(action: EdgeAction): Record<string, unknown> {
   const out: Record<string, unknown> = { type: action.type };
   if (action.type === 'call') {
-    out.script = action.assign ?? '';
+    out.script = action.script ?? '';
     return out;
   }
   if (action.type === 'set') {
