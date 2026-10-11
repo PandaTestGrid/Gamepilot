@@ -127,6 +127,7 @@ export function WorkspaceTree(): ReactNode {
                       nodes: task.nodes,
                       edges: task.edges,
                       recognizers: task.recognizers,
+                      templates: 0,
                     };
                     return (
                       <ScriptRow
@@ -135,8 +136,18 @@ export function WorkspaceTree(): ReactNode {
                         current={task.root === currentRoot}
                         busy={busy}
                         onSwitch={() => void switchProject(task.root)}
-                        onDuplicate={(name) => void duplicate(task.root, name).then(load)}
-                        onRename={(name) => void rename(task.root, name).then(load)}
+                        onDuplicate={() => {
+                          const name = window.prompt('复制成什么名字');
+                          if (name) {
+                            void duplicate(task.root, name).then(load);
+                          }
+                        }}
+                        onRename={() => {
+                          const name = window.prompt('改成什么名字', task.name);
+                          if (name) {
+                            void rename(task.root, name).then(load);
+                          }
+                        }}
                         onRemove={() => void remove(task.root).then(load)}
                       />
                     );
