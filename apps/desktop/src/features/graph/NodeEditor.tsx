@@ -7,9 +7,12 @@
 import { type ReactNode, useState } from 'react';
 
 import { TemplateThumb } from '@/features/recognizers/TemplateThumb';
+import { toActionPayload } from '@/lib/graph-adapter';
 import { describeAction, describeCondition, describeNodeLogic } from '@/lib/graph-logic';
+import { actionRun as runAction } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
+import { useSessionStore } from '@/stores/session.store';
 import type { GraphData, GraphNodeView } from '@/types';
 
 export function NodeEditor({
@@ -24,6 +27,7 @@ export function NodeEditor({
   const updateNode = useGraphStore((state) => state.updateNode);
   const selectEdge = useGraphStore((state) => state.selectEdge);
   const addBranch = useGraphStore((state) => state.addBranch);
+  const deviceReady = useSessionStore((state) => state.ready[deviceId] === true);
   const [branchLabel, setBranchLabel] = useState('');
   const [branchYes, setBranchYes] = useState('');
   const [branchNo, setBranchNo] = useState('');
@@ -191,17 +195,36 @@ export function NodeEditor({
           <span className="text-badge text-dim">出去的操作（点一条可在下方编辑）</span>
           {(graph?.edges ?? [])
             .filter((edge) => edge.from === node.id)
-            .map((edge) => (
-              <button
-                key={edge.id}
-                type="button"
-                onClick={() => selectEdge(edge.id)}
-                className="flex items-center gap-1 rounded-sm px-1 text-left text-badge text-dim hover:bg-raised hover:text-fg"
-              >
-                <span className="shrink-0 text-faint">{edge.kind === 'recovery' ? '⚡' : '→'}</span>
-                <span className="text-fg">{describeAction(edge.actionSpec, true)}</span>
-                <span className="text-faint">当 {describeCondition(edge)}</span>
-              </button>
+            .map((edge, index) => (
+              <div key={edge.id} className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => selectEdge(edge.id)}
+                  className="flex min-w-0 flex-1 items-center gap-1 rounded-sm px-1 text-left text-badge text-dim hover:bg-raised hover:text-fg"
+                  title={`${edge.id}（点一下编辑这条边）`}
+                >
+                  {/* 顺序号：引擎就是按这个顺序（优先级从高到低）试的 */}
+                  <span className="shrink-0 text-faint">
+                    {edge.kind === 'recovery' ? '⚡' : `${index + 1}.`}
+                  </span>
+                  <span className="shrink-0 text-fg">{describeAction(edge.actionSpec, true)}</span>
+                  <span className="truncate text-faint">当 {describeCondition(edge)}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!deviceReady}
+                  title="立即执行这一步（调试用）"
+                  onClick={() => {
+                    // 只执行这一步（调试用）：包成不返回值的任务交给 run
+                    void run(async (): Promise<void> => {
+                      await runAction(deviceId, toActionPayload(edge.actionSpec));
+                    });
+                  }}
+                  className="h-5 shrink-0 rounded-sm border border-line px-1 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
+                >
+                  ▶ 执行
+                </button>
+              </div>
             ))}
         </div>
       )}

@@ -49,7 +49,7 @@ export function EdgeEditor({
   const [cooldownMs, setCooldownMs] = useState(edge.cooldownMs);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 注意：草稿用 useState 初始化。换边时由外面给 <EdgeEditor key={edge.id}> 重新挂载，
+  // 注意：草稿用 useState 初始化。换边时由外面给 <EdgeEditor key={`步骤 ${edge.id.replace(/\D/g, '') || ''}`}> 重新挂载，
   // 不用 effect 去同步 props → state（那样会多一次渲染，也被 lint 规则禁止）。
 
   const labels = (graph?.recognizers ?? []).map((item) => item.label);
