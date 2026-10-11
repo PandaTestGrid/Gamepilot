@@ -4,9 +4,9 @@
  * 面板只做两件事：把 store 里的列表画出来、把用户动作转成 store 调用。
  * 所以测试里直接给 store 塞数据、spy 掉动作，不去碰磁盘（磁盘那侧由引擎测试覆盖）。
  */
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { ScriptLibraryPane } from '@/features/library/ScriptLibraryPane';
 import { scriptNameError } from '@/features/library/script-name';
