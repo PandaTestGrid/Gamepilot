@@ -54,7 +54,7 @@ export function WorkspaceTree(): ReactNode {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-auto text-badge">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-auto text-badge">
       <div className="flex items-center gap-1 border-b border-line px-2 py-1">
         <span className="text-body text-fg">工作区</span>
         <button
@@ -80,7 +80,7 @@ export function WorkspaceTree(): ReactNode {
       </div>
 
       {groups.map((workspace) => (
-        <div key={workspace.name}>
+        <div key={workspace.name} className="w-full min-w-0">
           <div className="mt-1 flex h-6 items-center gap-1 px-2 text-faint">
             <span>▾</span>
             <span className="truncate">{workspace.name}</span>
@@ -88,8 +88,8 @@ export function WorkspaceTree(): ReactNode {
           {(workspace.workspaces ?? []).map((project) => {
             const folded = collapsed[project.root] === true;
             return (
-              <div key={project.root}>
-                <div className="group flex h-6 items-center gap-1 px-1 hover:bg-raised">
+              <div key={project.root} className="w-full min-w-0">
+                <div className="group flex h-6 w-full min-w-0 items-center gap-1 px-1 hover:bg-raised">
                   {/* 整行都能点：点名字就展开/收起（不用非得点那个小三角） */}
                   <button
                     type="button"
@@ -124,7 +124,7 @@ export function WorkspaceTree(): ReactNode {
                 </div>
 
                 {!folded && (project.tasks ?? []).length > 0 && (
-                  <div className="ml-3 border-l border-line pl-1 [&_button]:h-6 [&_button]:py-0 [&_button]:leading-6">
+                  <div className="ml-3 w-full min-w-0 border-l border-line pl-1 [&_button]:h-6 [&_button]:py-0 [&_button]:leading-6">
                     {(project.tasks ?? []).map((task) => {
                       const asScript: ProjectSummary = {
                         name: task.name,
