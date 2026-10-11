@@ -306,11 +306,15 @@ def test_record_action_chains_into_next_node(engine: EngineProcess, tmp_path: Pa
     """录操作：点一下 → 变成脚本里的一步；录下一个界面时自动接上（A --点--> B）。"""
     engine.call("device.connect", {"uri": DEVICE_URI})
 
-    # 还没有任何界面时录操作：明确报错，而不是造一条看不见也用不上的孤立步骤
-    request_id = engine.send("record.action", {"deviceId": DEVICE_ID, "action": {"type": "wait", "seconds": 0.2}})
-    refused = engine.wait_for(lambda item: item.get("id") == request_id)
-    assert "error" in refused, refused
-    assert "框选" in str(refused["error"]), refused
+    # 脚本里一个界面都没有时录操作：自动用当前画面建一个界面（不能卡住用户）
+    auto = engine.call("record.action", {"deviceId": DEVICE_ID, "action": {"type": "click", "x": 0.3, "y": 0.3}})
+    auto_edge = next(edge for edge in auto["graph"]["edges"] if edge["id"] == auto["edgeId"])
+    assert auto_edge.get("from"), "自动建的界面要挂上去，而不是造孤立步骤"
+    auto_nodes = [node for node in auto["graph"]["nodes"] if node["id"] == auto_edge["from"]]
+    assert auto_nodes and auto_nodes[0]["enter"], "自动界面要带一个识别器（画面中部模板）"
+    assert any(
+        item.get("method") == "engine.event" and item["params"]["type"] == "node_auto_created" for item in engine.seen
+    ), "自动建界面要在事件栏留痕"
 
     # 录第一个界面（模板 + 节点 main）
     engine.call(

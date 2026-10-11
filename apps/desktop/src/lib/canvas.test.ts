@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { containBox, pointToCanvas } from '@/lib/canvas';
+import { containBox, pointToCanvas, canvasRectToPixels } from '@/lib/canvas';
 
 describe('画面坐标换算', () => {
   it('竖屏画面放进横容器：两侧留黑边，画面矩形居中', () => {
@@ -57,5 +57,47 @@ describe('画面坐标换算', () => {
     expect(containBox({ width: 0, height: 0 }, { width: 720, height: 1280 })).toBeNull();
     expect(containBox({ width: 600, height: 500 }, { width: 0, height: 0 })).toBeNull();
     expect(pointToCanvas({ left: 0, top: 0, width: 0, height: 0 }, { x: 1, y: 1 }, true)).toBeNull();
+  });
+});
+
+describe('canvasRectToPixels（画面矩形 → 容器像素）', () => {
+  const box = { left: 148, top: 0, width: 353, height: 766 };
+
+  it('把画面归一化矩形换算成容器像素（黑边不参与）', () => {
+    expect(canvasRectToPixels(box, [0.25, 0.5, 0.1, 0.2])).toEqual({
+      left: 148 + 0.25 * 353,
+      top: 0.5 * 766,
+      width: 0.1 * 353,
+      height: 0.2 * 766,
+    });
+  });
+
+  it('整幅画面 → 正好是画面区域', () => {
+    expect(canvasRectToPixels(box, [0, 0, 1, 1])).toEqual(box);
+  });
+
+  it('和 pointToCanvas 互为逆运算', () => {
+    const [x, y, w, h] = [0.2, 0.3, 0.4, 0.25];
+    const pixels = canvasRectToPixels(box, [x, y, w, h]);
+    expect(pixels).not.toBeNull();
+    if (!pixels) return;
+    const topLeft = pointToCanvas(box, { x: pixels.left, y: pixels.top }, false);
+    const bottomRight = pointToCanvas(
+      box,
+      { x: pixels.left + pixels.width, y: pixels.top + pixels.height },
+      false,
+    );
+    expect(topLeft).not.toBeNull();
+    expect(bottomRight).not.toBeNull();
+    // 浮点误差：用近似比较
+    expect(topLeft?.[0]).toBeCloseTo(x, 10);
+    expect(topLeft?.[1]).toBeCloseTo(y, 10);
+    expect(bottomRight?.[0]).toBeCloseTo(x + w, 10);
+    expect(bottomRight?.[1]).toBeCloseTo(y + h, 10);
+  });
+
+  it('没有画面区域时返回 null（还没量出画面就别画）', () => {
+    expect(canvasRectToPixels(null, [0, 0, 1, 1])).toBeNull();
+    expect(canvasRectToPixels({ left: 0, top: 0, width: 0, height: 0 }, [0, 0, 1, 1])).toBeNull();
   });
 });

@@ -15,7 +15,7 @@ import { SCREEN_LAYOUT } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell, StatusDot } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
-import { type Box, containBox, pointToCanvas } from '@/lib/canvas';
+import { type Box, canvasRectToPixels, containBox, pointToCanvas } from '@/lib/canvas';
 import { devLog } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { activeDevice, connectedDevices, useDeviceStore } from '@/stores/device.store';
@@ -535,7 +535,10 @@ function SingleScreen({
           <div
             key={item.label}
             className={cn('pointer-events-none absolute border', tone)}
-            style={{ left: `${x * 100}%`, top: `${y * 100}%`, width: `${w * 100}%`, height: `${h * 100}%` }}
+            style={
+              // 引擎给的是"相对画面"的归一化框：黑边不参与
+              canvasRectToPixels(imageBox, [x, y, w, h]) ?? { left: 0, top: 0, width: 0, height: 0 }
+            }
           >
             <span className="absolute -top-4 left-0 text-badge whitespace-nowrap">
               {item.label} {item.score.toFixed(2)}
@@ -581,16 +584,7 @@ function SingleScreen({
       {selection && (
         <div
           className="pointer-events-none absolute border border-dashed border-brand bg-brand/10"
-          style={
-            imageBox
-              ? {
-                  left: imageBox.left + selection[0] * imageBox.width,
-                  top: imageBox.top + selection[1] * imageBox.height,
-                  width: selection[2] * imageBox.width,
-                  height: selection[3] * imageBox.height,
-                }
-              : { left: 0, top: 0, width: 0, height: 0 }
-          }
+          style={canvasRectToPixels(imageBox, selection) ?? { left: 0, top: 0, width: 0, height: 0 }}
         >
           <span className="absolute -bottom-4 left-0 text-badge text-brand">
             {selection[2].toFixed(3)} × {selection[3].toFixed(3)}
@@ -606,7 +600,7 @@ function SingleScreen({
         </div>
       )}
 
-      {draft && <RecordOverlay deviceId={deviceId} />}
+      {draft && imageBox && <RecordOverlay deviceId={deviceId} imageBox={imageBox} />}
     </div>
   );
 }

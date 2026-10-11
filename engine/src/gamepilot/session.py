@@ -82,6 +82,7 @@ class DeviceSession:
         self._pending_edge_id: str | None = None
         # 最近一次录制涉及的节点：刚录完模板马上点一下时，靠它定位这一步属于哪个界面
         self._last_node_id: str | None = None
+        self._last_node_at = 0.0
         # 推给界面的帧率（0 = 暂停推帧）。识别/状态机不受影响，仍按 fps_limit 跑，
         # 这样"界面不看这台设备"时不会白烧 CPU 与带宽（多设备时尤其明显）
         # 默认 0：界面明确要了才推。连接瞬间就按 15fps 推帧会把控制通道（同一根
@@ -354,13 +355,29 @@ class DeviceSession:
         """
         with self.lock:
             parsed = Action.parse(action)
-            # 录制时状态机不一定在跑：先靠当前帧判断，判断不出来就用最近录过的节点
-            source = self.engine.locate() or self._last_node_id
+            # 这一步挂在哪个界面上？按"能录就录"的顺序找：
+            #   ① 当前帧能确认在哪个界面（最准）
+            #   ② 本会话内最近录过的界面（刚录完模板就点一下的常见场景）
+            #   ③ 脚本里最后一个界面（应用重启后 _last_node_id 会丢，但 graph.json 还在）
+            #   ④ 一个都没有 → 自动用当前画面建一个界面，别让用户卡在"录不了"
+            # 刚录过模板（2 分钟内）时，用户下一步的意图就是"在这个界面上做"，
+            # 优先用它：否则自动建的界面（模板就取自当前画面，必然匹配）会把归属抢走
+            recent_node = self._last_node_id if self._last_node_id and time.time() - self._last_node_at < 120 else None
+            source = recent_node or self.engine.locate() or self._latest_node_id()
+            created_for_recording = None
             if source is None:
-                # 别造"看不见也用不上"的孤立步骤：它没有 from，画布上不显示、运行时也不会触发
-                raise RuntimeError(
-                    "录操作前先在画面栏「框选」录一个界面（这一步要挂在某个界面上，"
-                    "否则它不在任何界面的出口上，跑起来不会被触发）"
+                source, created_for_recording = self._auto_create_node_for_recording()
+            if created_for_recording:
+                self.emit(
+                    "engine.event",
+                    {
+                        "deviceId": self.device_id,
+                        "seq": self._input_seq,
+                        "ts": time.time(),
+                        "type": "node_auto_created",
+                        "node": created_for_recording,
+                        "message": f"脚本里还没有界面，已用当前画面自动建了「{created_for_recording}」",
+                    },
                 )
             when = ""
             if source and source in self.graph.nodes:
@@ -401,6 +418,41 @@ class DeviceSession:
                 },
             )
             return {"edgeId": edge_id, "graph": self.graph.to_dict()}
+
+    def _latest_node_id(self) -> str | None:
+        """脚本里最后一个界面（dict 保序，所以就是最后加进去的那个）。"""
+        return next(reversed(self.graph.nodes), None) if self.graph.nodes else None
+
+    def _auto_create_node_for_recording(self) -> tuple[str, str | None]:
+        """当前画面还没对应界面时，自动建一个（顺手用画面中部做模板，好让状态机能认出它）。"""
+        if self.last_frame is None:
+            raise RuntimeError("还没有可用画面：先连接设备、等到画面出来，再开「录操作」")
+        index = len(self.graph.nodes) + 1
+        node_id = f"n_{index}"
+        while node_id in self.graph.nodes:
+            index += 1
+            node_id = f"n_{index}"
+        name = f"界面{index}"
+
+        # 用画面中部 60% 当模板：避开状态栏时钟/通知这类一直在变的地方
+        height, width = self.last_frame.shape[:2]
+        crop = self.last_frame[int(height * 0.2) : int(height * 0.8), int(width * 0.2) : int(width * 0.8)]
+        label = f"{node_id}_screen"
+        filename = f"{label}.png"
+        cv2.imwrite(f"{self.project.templates_dir}/{filename}", crop)
+        self.graph.add_recognizer(
+            label,
+            {
+                "type": "template",
+                "template": f"templates/{filename}",
+                "threshold": 0.8,
+                "roi": [0.2, 0.2, 0.6, 0.6],
+            },
+        )
+        self.graph.upsert_node(Node(id=node_id, name=name, enter=[label]))
+        self._last_node_id = node_id
+        self._last_node_at = time.time()
+        return node_id, name
 
     def graph_node_add(self, node_id: str | None, name: str | None, enter: list[str] | None) -> dict[str, Any]:
         with self.lock:
@@ -534,6 +586,7 @@ class DeviceSession:
                 self.graph.upsert_node(node)
                 created_node = node.id
                 self._last_node_id = node.id
+                self._last_node_at = time.time()
             # 录制流程自动接链：上一步录的动作边 → 指向这个新界面
             if created_node and self._pending_edge_id:
                 for item in self.graph.edges:

@@ -7,11 +7,12 @@
  */
 import { type ReactNode, useEffect, useMemo } from 'react';
 
+import { type Box, canvasRectToPixels } from '@/lib/canvas';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
 import { useUiStore } from '@/stores/ui.store';
 
-export function RecordOverlay({ deviceId }: { deviceId: string }): ReactNode {
+export function RecordOverlay({ deviceId, imageBox }: { deviceId: string; imageBox: Box }): ReactNode {
   const draft = useUiStore((state) => state.draft);
   const updateDraft = useUiStore((state) => state.updateDraft);
   const commitDraft = useUiStore((state) => state.commitDraft);
@@ -36,7 +37,7 @@ export function RecordOverlay({ deviceId }: { deviceId: string }): ReactNode {
     return null;
   }
 
-  const [x, y, w] = draft.rect;
+  const [x, , w] = draft.rect;
   const flip = x + w > 0.55;
 
   return (
@@ -45,7 +46,13 @@ export function RecordOverlay({ deviceId }: { deviceId: string }): ReactNode {
         'absolute z-20 w-[268px] rounded-sm border border-line bg-panel p-2 text-body',
         'border-l-2 border-l-brand',
       )}
-      style={{ left: `${x * 100}%`, top: `${y * 100}%`, transform: flip ? 'translateX(8px)' : undefined }}
+      style={{
+        ...(canvasRectToPixels(imageBox, draft.rect) ?? { left: 0, top: 0, width: 0, height: 0 }),
+        // 浮层只需要落点，宽高由内容决定
+        width: undefined,
+        height: undefined,
+        transform: flip ? 'translateX(8px)' : undefined,
+      }}
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
           cancelDraft();

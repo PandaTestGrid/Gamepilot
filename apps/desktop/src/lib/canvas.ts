@@ -61,3 +61,34 @@ export function pointToCanvas(
   y = Math.min(1, Math.max(0, y));
   return [x, y];
 }
+
+/** 容器像素矩形（绝对定位直接用这四个值）。 */
+export interface PixelRect {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * **画面归一化矩形 → 容器像素矩形**（`pointToCanvas` 的逆运算）。
+ *
+ * 界面上所有"按画面坐标画东西"的地方都必须走这里：
+ * 框选框、识别框、录制确认浮层……各画各的就会飘（踩过：确认浮层还在用容器百分比，
+ * 有黑边时和实际画面差一大截）。
+ */
+export function canvasRectToPixels(
+  box: Box | null,
+  rect: readonly [number, number, number, number],
+): PixelRect | null {
+  if (!box || box.width <= 0 || box.height <= 0) {
+    return null;
+  }
+  const [x, y, width, height] = rect;
+  return {
+    left: box.left + x * box.width,
+    top: box.top + y * box.height,
+    width: width * box.width,
+    height: height * box.height,
+  };
+}
