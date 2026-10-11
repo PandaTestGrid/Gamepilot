@@ -32,7 +32,6 @@ import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContext
 import { RunStatusStrip } from '@/features/graph/RunStatusStrip';
 import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
-import { TaskTabs } from '@/features/graph/TaskTabs';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
 
 import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
@@ -631,7 +630,12 @@ export function GraphPane(): ReactNode {
           */}
           <RunButton size="compact" />
           <span className="mx-0.5 h-3 w-px bg-line" />
-          <TaskTabs />
+          {/*
+            这里不再放「工作区 › 项目 › 状态图」三级切换条（原 TaskTabs）：
+            同一份层级在右栏「脚本库」的目录树里已经有了，图栏头再摆一份是纯重复 ——
+            而且那条里的「＋项目 / ＋状态图」走的是 window.prompt，在 Tauri 的 webview 里
+            根本弹不出来（点了一点反应都没有）。管理入口归右栏，这里只留运行时与画布操作。
+          */}
           <GhostButton
             active={view === 'graph'}
             onClick={() => setView('graph')}

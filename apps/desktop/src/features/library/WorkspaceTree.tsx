@@ -104,11 +104,11 @@ export function WorkspaceTree(): ReactNode {
           <ScriptNameForm
             title={
               pending.kind === 'workspace'
-                ? '新建工作区（最外层，例如「游戏自动化」）'
+                ? '新建工作区'
                 : pending.kind === 'project'
-                  ? '新建项目（一个游戏/一个空间，例如「阴阳师」）'
+                  ? '新建项目'
                   : pending.kind === 'task'
-                    ? '新建状态图（一个状态图 = 一个脚本目录）'
+                    ? '新建状态图'
                     : pending.kind === 'rename'
                       ? '重命名'
                       : '复制一份'
