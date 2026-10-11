@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from .library import SCRIPT_FILE
+
 REGISTRY_NAME = "workspaces.json"
 DEFAULT_WORKSPACE = "默认"
 DEFAULT_ROOT = "projects"
@@ -105,3 +107,61 @@ def resolve_workspace(name: str | None, base: str | None = None) -> Workspace:
         if item.name == name:
             return item
     raise ValueError(f"没有这个工作区: {name}")
+
+
+def _task_summary(task_dir: str) -> dict[str, Any] | None:
+    """一个任务目录（含 graph.json）的摘要；不是任务就返回 None。"""
+    graph_path = os.path.join(task_dir, SCRIPT_FILE)
+    if not os.path.isfile(graph_path):
+        return None
+    try:
+        with open(graph_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        data = {}
+    nodes = data.get("nodes") or []
+    edges = data.get("edges") or []
+    return {
+        "name": os.path.basename(task_dir),
+        "root": os.path.abspath(task_dir),
+        "nodes": len(nodes),
+        "edges": len(edges),
+        "recognizers": len(data.get("recognizers") or {}),
+    }
+
+
+def _subdirs(path: str) -> list[str]:
+    if not os.path.isdir(path):
+        return []
+    return sorted(
+        os.path.join(path, name)
+        for name in os.listdir(path)
+        if os.path.isdir(os.path.join(path, name)) and not name.startswith(".")
+    )
+
+
+def tree(base: str | None = None) -> list[dict[str, Any]]:
+    """三层目录树：**项目 > 工作区 > 任务**（任务 = 一张状态图）。
+
+    兼容老布局：如果某个目录**自己**就是一个任务（直接含 graph.json），
+    就把它当成「默认」工作区下的任务，而不是要求你现在就搬文件。
+    """
+    root = base or repo_root()
+    projects: list[dict[str, Any]] = []
+    for entry in list_workspaces(root):
+        buckets: list[dict[str, Any]] = []
+        project: dict[str, Any] = {"name": entry.name, "root": entry.root, "workspaces": buckets}
+        # ① 先看直接是任务的情况（老布局：库根下面就是脚本目录）
+        flat: list[dict[str, Any]] = []
+        # ② 正常三层：库根/工作区/任务
+        for ws_dir in _subdirs(entry.root):
+            tasks = [item for item in (_task_summary(sub) for sub in _subdirs(ws_dir)) if item]
+            own = _task_summary(ws_dir)
+            if own:  # 这个目录自己就是任务 → 老布局里的一个脚本
+                flat.append(own)
+            elif tasks:
+                buckets.append({"name": os.path.basename(ws_dir), "root": ws_dir, "tasks": tasks})
+        if flat:
+            project["workspaces"].insert(0, {"name": DEFAULT_WORKSPACE, "root": entry.root, "tasks": flat})
+        projects.append(project)
+    return projects

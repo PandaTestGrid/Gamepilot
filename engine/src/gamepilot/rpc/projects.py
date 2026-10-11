@@ -32,6 +32,7 @@ from ..protocol import (
     METHOD_PROJECT_SET,
     METHOD_WORKSPACE_CREATE,
     METHOD_WORKSPACE_LIST,
+    METHOD_WORKSPACE_TREE,
 )
 
 if TYPE_CHECKING:  # 避免循环导入
@@ -86,6 +87,11 @@ def register(server: RpcServer, manager: SessionManager) -> None:
     def _project_list(params: dict[str, Any]) -> dict[str, Any]:
         base = params.get("base")
         return {"items": manager.list_projects(str(base) if base else None)}
+
+    @server.method(METHOD_WORKSPACE_TREE)
+    def _workspace_tree(params: dict[str, Any]) -> dict[str, Any]:
+        """项目 > 工作区 > 任务 三层树（任务 = 一张状态图）。"""
+        return {"projects": workspaces.tree()}
 
     @server.method(METHOD_WORKSPACE_LIST)
     def _workspace_list(params: dict[str, Any]) -> dict[str, Any]:

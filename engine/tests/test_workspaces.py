@@ -35,3 +35,33 @@ def test_create_workspace_rejects_duplicates_and_bad_names(tmp_path: Path) -> No
         workspaces.create_workspace("  ", str(tmp_path))
     with pytest.raises(ValueError, match="没有这个工作区"):
         workspaces.resolve_workspace("不存在", str(tmp_path))
+
+
+def test_tree_legacy_flat_layout(tmp_path: Path) -> None:
+    """老布局（库根下直接是脚本）→ 项目「默认」> 工作区「默认」> 任务，不要求搬文件。"""
+    from gamepilot.library import create_script
+
+    base = tmp_path / workspaces.DEFAULT_ROOT
+    base.mkdir(parents=True, exist_ok=True)
+    create_script(str(base), "阴阳师")
+
+    projects = workspaces.tree(str(tmp_path))
+    assert [item["name"] for item in projects] == [workspaces.DEFAULT_WORKSPACE]
+    buckets = projects[0]["workspaces"]
+    assert [item["name"] for item in buckets] == [workspaces.DEFAULT_WORKSPACE]
+    assert [task["name"] for task in buckets[0]["tasks"]] == ["阴阳师"]
+
+
+def test_tree_three_levels(tmp_path: Path) -> None:
+    """新布局：项目 > 工作区 > 任务（任务 = 一张状态图）。"""
+    from gamepilot.library import create_script
+
+    base = tmp_path / workspaces.DEFAULT_ROOT
+    ws = base / "阴阳师"  # 注册表条目=项目根，它下面第一层就是工作区
+    ws.mkdir(parents=True, exist_ok=True)
+    create_script(str(ws), "斗技")
+    create_script(str(ws), "百鬼")
+
+    buckets = workspaces.tree(str(tmp_path))[0]["workspaces"]
+    assert [item["name"] for item in buckets] == ["阴阳师"], "中间那层目录就是工作区"
+    assert [task["name"] for task in buckets[0]["tasks"]] == ["斗技", "百鬼"]
