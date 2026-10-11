@@ -64,6 +64,9 @@ class Engine:
         # 限时等待（condition.within_ms）的计时状态
         self.condition_timer = ConditionTimer()
         self.transition_timeout_ms = timeout
+        # none_of（"否则"）分支的识别宽限期：刚进节点时还没识别结果，
+        # none_of 恒成立 → 会先走"不在"那条，脚本逻辑就反了（验收时抓到）
+        self.none_of_grace_ms = _as_int(graph.default("none_of_grace_ms", 900), 900)
         self.current: str | None = start_node
         self.pending: Pending | None = None
         self.detections: dict[str, Detection] = {}
@@ -75,6 +78,8 @@ class Engine:
         self.paused_at: str | None = None
         # 本次访问在这个界面上已经停过的断点（避免恢复后又停在同一处）
         self._breakpoint_passed: set[str] = set()
+        # 进入当前界面的时间：none_of（"不在"）分支要等识别稳定后才允许走
+        self._node_entered_at = 0.0
         self.stats = {"ticks": 0, "actions": 0, "transitions": 0, "failed": 0, "recoveries": 0}
         self._timeout_reported: set[str] = set()
         # 本次"进入节点"期间已经触发过的边（dst 为空的边默认只触发一次，
@@ -222,6 +227,11 @@ class Engine:
             # 在限时窗口内：条件成立就立刻走，不成立就继续等
             return False
         if not condition.matches(self.detections):
+            return False
+        # "否则"分支（只有 none_of）要等识别稳定：刚进节点时还没识别结果，
+        # none_of 恒成立 → 会先走"不在"那条，脚本逻辑就反了（验收时抓到）
+        only_none = bool(condition.none_of) and not condition.all_of and not condition.any_of
+        if only_none and time.time() - self._node_entered_at < self.none_of_grace_ms / 1000:
             return False
         if edge.min_score and edge.min_score > condition.min_score:
             # 兼容老字段：边上的 min_score 仍然生效

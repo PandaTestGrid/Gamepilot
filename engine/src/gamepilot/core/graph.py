@@ -118,14 +118,20 @@ class Edge:
         out: dict[str, Any] = {"id": self.id, "action": dict(self.action)}
         if self.when:
             out["when"] = self.when
-        # always 必须写进文件：丢了它再读回来会变成"一个叫 always 的识别器标签"（踩过）
-        if (
-            self.condition.always
-            or self.condition.within_ms
-            or self.condition.min_score
-            or (self.condition.labels and set(self.condition.labels) != {self.when})
-        ):
-            out["condition"] = self.condition.to_dict()
+        # 只有"恰好等于默认形态"（all_of 就是 when 本身）才省略。
+        # 曾经用 labels 的集合比较 → none_of=[when] 也被当成默认形态省略，
+        # 读回来变成 all_of=[when] —— **分支直接反过来**（验收时抓到的）
+        condition = self.condition
+        default_shape = (
+            not condition.always
+            and not condition.any_of
+            and not condition.none_of
+            and condition.min_score == 0
+            and condition.within_ms == 0
+            and (condition.all_of == (self.when,) or (not condition.all_of and not self.when))
+        )
+        if not default_shape:
+            out["condition"] = condition.to_dict()
         if self.src:
             out["from"] = self.src
         if self.dst:

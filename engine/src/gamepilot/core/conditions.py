@@ -63,7 +63,9 @@ class Condition:
         all_of = labels("all_of")
         any_of = labels("any_of")
         none_of = labels("none_of")
-        if not all_of and not any_of and fallback:
+        # 兜底只在**三个组全空**时用：显式写了 none_of/any_of 就不能再塞 all_of，
+        # 否则"否则"那条边会变成"如果……且……"（分支直接反掉，验收时抓到）
+        if not all_of and not any_of and not none_of and fallback:
             all_of = (fallback,)
         if spec.get("when") is not None:
             all_of = (*all_of, str(spec["when"]))

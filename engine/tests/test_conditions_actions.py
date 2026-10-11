@@ -392,3 +392,24 @@ def test_call_action_runs_sub_script() -> None:
     bad.add_edge(Edge.from_dict({"id": "e1", "action": {"type": "call"}}))
     with pytest.raises(ValueError, match="没写脚本名"):
         bad.validate()
+
+
+def test_none_of_survives_round_trip() -> None:
+    """分支的另一条边（none_of=[when]）不能被当成"默认条件"省略掉。
+
+    踩过：省略后读回来变成 all_of=[when]，**分支逻辑直接反过来**。
+    """
+    from gamepilot.core.graph import Edge
+
+    yes = Edge.from_dict(
+        {"id": "e1", "when": "logo", "action": {"type": "wait", "seconds": 0.1}, "condition": {"all_of": ["logo"]}}
+    )
+    no = Edge.from_dict(
+        {"id": "e2", "when": "logo", "action": {"type": "wait", "seconds": 0.1}, "condition": {"none_of": ["logo"]}}
+    )
+    assert "condition" not in yes.to_dict(), "默认形态（all_of 就是 when）可以省略"
+    assert no.to_dict()["condition"] == {"none_of": ["logo"]}, no.to_dict()
+
+    reloaded = Edge.from_dict(no.to_dict())
+    assert reloaded.condition.none_of == ("logo",), "读回来必须还是 none_of"
+    assert reloaded.condition.all_of == (), "不能变成 all_of"
