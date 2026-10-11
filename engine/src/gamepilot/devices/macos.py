@@ -8,7 +8,10 @@
   —— 只抓目标窗口，不受其它窗口遮挡影响
 - 控制：`CGEvent` 鼠标/键盘。坐标用**窗口原点的全局点坐标**（屏幕坐标，非像素），
   所以 Retina 缩放不影响映射。
-  两种投递方式（`Mac:///?window=…&post=pid|global`）：
+  点按优先走**辅助功能 API**（`AXPress`）：完全后台执行，不动鼠标、不抢焦点 ——
+  适合"录好脚本后台回放"；目标没有可操作元素时（游戏、自绘界面）自动退回鼠标事件。
+
+  两种鼠标投递方式（`Mac:///?window=…&post=pid|global`）：
 
   | 模式 | 鼠标/焦点 | 可靠性 |
   |---|---|---|
@@ -63,6 +66,16 @@ def window_point(
     """窗口内归一化坐标 → 全局屏幕点坐标（CGEvent 用的就是屏幕点）。"""
     left, top, width, height = bounds
     return (left + max(0.0, min(1.0, x)) * width, top + max(0.0, min(1.0, y)) * height)
+
+
+def _ax() -> Any:
+    try:
+        import ApplicationServices
+
+        return ApplicationServices
+    except Exception as exc:
+        logger.debug("辅助功能 API 不可用: %s", exc)
+        return None
 
 
 def _quartz() -> Any:
@@ -216,6 +229,7 @@ class MacWindowController(Controller):
         app: str = "",
         activate: bool = False,
         post: str = "pid",
+        strategy: str = "auto",
         restore_cursor: bool = True,
         **options: Any,
     ) -> None:
@@ -227,6 +241,10 @@ class MacWindowController(Controller):
         #   post="pid"（默认）→ CGEventPostToPid 直接投给目标进程：
         #       **不移动你的鼠标、不抢焦点**，你可以一边用它一边干活
         #   post="global"     → 走系统事件流（更像真人操作，但会接管鼠标/焦点）
+        # strategy="auto"：点按优先走辅助功能（AXPress，完全后台、不动鼠标、不抢焦点），
+        # 目标没有可操作元素（游戏/自绘界面）时才退回鼠标事件
+        self.strategy = strategy
+        self.ax_clicks = 0
         self.post_to_pid = post != "global"
         self.activate = activate if post == "global" else False
         # 全局模式会真的把鼠标拽到点击位置 → 点完放回原处（默认开）
@@ -266,7 +284,15 @@ class MacWindowController(Controller):
         self._connected = True
 
     def _resolve_window(self) -> MacWindow | None:
+        # 先不看自己的窗口；按句柄找不到时再带上自己找一遍
+        # （不然"连自己应用的窗口"永远失败 —— 实测踩过）
         windows = list_windows(include_own=False) or list_windows()
+        resolved = self._match_window(windows)
+        if resolved is None and self.window_ref:
+            resolved = self._match_window(list_windows(include_own=True))
+        return resolved
+
+    def _match_window(self, windows: list[MacWindow]) -> MacWindow | None:
         if self.window_ref:
             handle = int(self.window_ref)
             for item in windows:
@@ -344,6 +370,8 @@ class MacWindowController(Controller):
                 "linkNote": self.link_note,
                 "window": self._target.to_dict() if self._target else None,
                 "post": "pid" if self.post_to_pid else "global",
+                "strategy": self.strategy,
+                "axClicks": self.ax_clicks,
                 "activate": self.activate,
                 "restoreCursor": self.restore_cursor,
             }
@@ -432,9 +460,38 @@ class MacWindowController(Controller):
         self._mouse(mapping[phase], x, y, restore=phase == "up")
 
     def click(self, x: float, y: float) -> None:
+        """点一下：优先用辅助功能按元素（后台执行），不行再走鼠标事件。"""
+        if self.strategy in ("auto", "ax") and self._ax_press(x, y):
+            self.ax_clicks += 1
+            return
         self.touch("down", x, y)
         time.sleep(0.03)
         self.touch("up", x, y)
+
+    def _ax_press(self, x: float, y: float) -> bool:
+        """在目标窗口的这个位置找可操作元素并按下 —— 不移动鼠标、不抢焦点。
+
+        很多控件自己没有 AXPress（比如列表行），所以沿父链往上找最近的能按的祖先。
+        """
+        ax = _ax()
+        if ax is None or self._target is None or not ax.AXIsProcessTrusted():
+            return False
+        px, py = window_point(self._target.bounds, x, y)
+        try:
+            err, element = ax.AXUIElementCopyElementAtPosition(ax.AXUIElementCreateSystemWide(), px, py, None)
+            if err != 0 or element is None:
+                return False
+            for _ in range(5):
+                _err, actions = ax.AXUIElementCopyActionNames(element, None)
+                if actions and "AXPress" in actions:
+                    return bool(ax.AXUIElementPerformAction(element, "AXPress") == 0)
+                _err, parent = ax.AXUIElementCopyAttributeValue(element, "AXParent", None)
+                if parent is None:
+                    return False
+                element = parent
+        except Exception as exc:
+            logger.debug("AX 点击失败（回退鼠标事件）: %s", exc)
+        return False
 
     def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
         steps = max(4, int(duration / 0.02))
