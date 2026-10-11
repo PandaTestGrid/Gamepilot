@@ -15,7 +15,9 @@ export function WelcomeCard(): ReactNode {
 
   const load = async (): Promise<void> => {
     try {
-      setProjects((await workspaceTree()).projects);
+      // 引擎/测试环境可能给不出结构（例如被 mock 成 undefined）→ 一律降级成"没有项目"
+      const result = await workspaceTree();
+      setProjects(result?.projects ?? []);
     } catch (error: unknown) {
       devLog(`目录树失败: ${String(error)}`);
     }
@@ -74,9 +76,9 @@ export function WelcomeCard(): ReactNode {
     }
   };
 
-  const recent = projects.flatMap((item) =>
-    item.workspaces.flatMap((ws) =>
-      ws.tasks.map((task) => ({
+  const recent = (projects ?? []).flatMap((item) =>
+    (item.workspaces ?? []).flatMap((ws) =>
+      (ws.tasks ?? []).map((task) => ({
         key: task.root,
         label: `${item.name} › ${ws.name} › ${task.name}`,
         sub: `${task.nodes} 界面 · ${task.edges} 步`,

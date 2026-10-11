@@ -44,11 +44,6 @@ export function ScriptLibraryPane(): ReactNode {
   // 引擎是旧进程：错误里会出现 -32601 / 未知方法，或缺方法表校验没通过
   const staleEngine = missingMethods.length > 0 || isUnknownMethodError(error);
 
-  // 没有当前脚本（新用户/还没切过）→ 显示欢迎卡片：新建项目/工作区/任务 + 最近的
-  if (!currentRoot) {
-    return <WelcomeCard />;
-  }
-
   const [form, setForm] = useState<FormState>({ kind: 'closed' });
   const [busy, setBusy] = useState(false);
 
@@ -73,6 +68,11 @@ export function ScriptLibraryPane(): ReactNode {
       setForm({ kind: 'closed' });
     }
   };
+
+  // 没有当前脚本（新用户/还没切过）→ 显示欢迎卡片：新建项目/工作区/任务 + 最近的
+  if (!currentRoot) {
+    return <WelcomeCard />;
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
