@@ -9,6 +9,8 @@
  * 改契约时的顺序：engine/src/gamepilot/protocol.py → docs/rpc.md → 本文件类型。
  */
 import { invoke } from '@tauri-apps/api/core';
+
+import type { DeviceKind } from '@/types';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { pushUiLog } from '@/lib/log-bus';
@@ -117,10 +119,14 @@ export interface GraphPayload {
 export interface ConnectResult {
   readonly deviceId: string;
   readonly resolution: readonly [number, number];
-  /** scrcpy（H.264，流畅）| screencap（adb 截图，约 1.8fps） */
+  /** scrcpy（H.264，流畅）| screencap（adb 截图，约 1.8fps）| dvt（iOS）| quartz（macOS 窗口） */
   readonly channel: string;
   readonly linkNote: string;
   readonly graph: GraphPayload;
+  /** 人类可读的名字（iOS 型号 / macOS 窗口标题）；界面用它显示设备条目 */
+  readonly name?: string;
+  /** 设备类型（ios / windows / …），界面用来选对图标与文案 */
+  readonly kind?: DeviceKind;
 }
 
 export interface RecordResult {

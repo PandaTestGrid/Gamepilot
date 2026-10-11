@@ -197,6 +197,7 @@ class MacWindowController(Controller):
     """URI: ``Mac:///?window=<句柄>``，也支持 ``?pid=<pid>`` / ``?app=<App 名>``。"""
 
     scheme = "Mac"
+    kind = "windows"
     description = "macOS 本机窗口（按窗口句柄抓图 + CGEvent 控制）"
 
     def __init__(
@@ -265,6 +266,10 @@ class MacWindowController(Controller):
                 if self.app_ref.lower() in item.app.lower():
                     return item
         return windows[0] if windows else None
+
+    @property
+    def display_name(self) -> str:
+        return self._target.label if self._target is not None else ""
 
     # ---------- 采集 ----------
 

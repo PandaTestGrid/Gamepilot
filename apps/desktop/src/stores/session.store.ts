@@ -341,7 +341,10 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     useDeviceStore.getState().setActive(deviceId);
     try {
       const result = await connectDevice(uri);
-      useDeviceStore.getState().markConnectedWith(result.deviceId, result.resolution, uri);
+      // 引擎回传人类可读的名字与类型（iOS 型号 / macOS 窗口标题），界面直接用它显示
+      useDeviceStore
+        .getState()
+        .markConnectedWith(result.deviceId, result.resolution, uri, result.name, result.kind);
       useDeviceStore.getState().setActive(result.deviceId);
       set((current) => ({
         links: { ...current.links, [result.deviceId]: { channel: result.channel, note: result.linkNote } },

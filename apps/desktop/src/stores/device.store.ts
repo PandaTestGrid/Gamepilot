@@ -35,7 +35,13 @@ interface DeviceState {
   readonly setActive: (id: string) => void;
   readonly connect: (id: string) => void;
   readonly markConnected: (id: string) => void;
-  readonly markConnectedWith: (id: string, resolution: readonly [number, number], uri?: string) => void;
+  readonly markConnectedWith: (
+    id: string,
+    resolution: readonly [number, number],
+    uri?: string,
+    name?: string,
+    kind?: DeviceKind,
+  ) => void;
   readonly failConnect: (id: string, error: string) => void;
   readonly disconnect: (id: string) => void;
   readonly toggleGrid: () => void;
@@ -124,7 +130,7 @@ export const useDeviceStore = create<DeviceState>()((set) => ({
       devices: patch(state.devices, id, { status: 'connected', fps: 10, error: undefined }),
     })),
 
-  markConnectedWith: (id, resolution, uri) =>
+  markConnectedWith: (id, resolution, uri, name, kind) =>
     set((state) => {
       // 直接按 URI 连接时，设备可能还不在列表里（没扫描过）→ 补一条，保证 UI 有的显示
       if (!state.devices.some((device) => device.id === id)) {
@@ -133,9 +139,10 @@ export const useDeviceStore = create<DeviceState>()((set) => ({
             ...state.devices,
             {
               id,
-              name: id,
+              // 引擎会给一个人类可读的名字（"wisdom (iOS 26.6.2)" / 窗口标题），没有才退回 id
+              name: name || id,
               uri: uri ?? id,
-              kind: 'remote' as const,
+              kind: kind ?? 'remote',
               status: 'connected' as const,
               resolution,
               fps: 0,

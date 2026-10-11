@@ -87,6 +87,23 @@ def _require_str(params: dict[str, Any], key: str) -> str:
     return value
 
 
+def device_id_for(scheme: str, options: dict[str, Any]) -> str:
+    """会话 id：`<类型>:<唯一键>`。
+
+    坑：原来只认 URI 里的 `serial`，而 iOS 用 `udid`、macOS 窗口用 `window`
+    → 全落到 `ios:default` / `mac:default`，**两台 iPhone（或两个 Mac 窗口）会互相顶掉**。
+    这里按设备类型取各自的唯一键。
+    """
+    kind = scheme.lower()
+    if kind == "mock":
+        return MOCK_DEVICE_ID
+    for key in ("serial", "udid", "window", "hwnd", "pid", "app"):
+        value = options.get(key)
+        if value:
+            return f"{kind}:{value}"
+    return f"{kind}:default"
+
+
 def _create_controller(scheme: str, device_id: str, options: dict[str, Any]) -> Controller:
     cls = controller_for_scheme(scheme)
     if cls is None:
@@ -194,8 +211,7 @@ class SessionManager:
 
     def connect(self, uri: str) -> DeviceSession:
         scheme, options = parse_device_uri(uri)
-        serial = str(options.get("serial", "")) if options.get("serial") else ""
-        device_id = MOCK_DEVICE_ID if scheme.lower() == "mock" else f"{scheme.lower()}:{serial or 'default'}"
+        device_id = device_id_for(scheme, options)
         with self._locks_guard:
             lock = self._connect_locks.setdefault(device_id, threading.Lock())
         with lock:
@@ -227,6 +243,9 @@ class SessionManager:
                 "resolution": resolution,
                 "channel": getattr(controller, "channel", "unknown"),
                 "linkNote": getattr(controller, "link_note", ""),
+                # 人类可读的名字（iOS 的"wisdom (iOS 26.6.2)"、macOS 的窗口标题），
+                # 界面用它显示设备条目，而不是显示 ios:00008120-…
+                "name": controller.display_name,
                 "graph": session.graph.to_dict(),
             },
         )
@@ -287,6 +306,9 @@ def register(server: RpcServer) -> SessionManager:
             "deviceId": session.device_id,
             "resolution": list(session.controller.resolution),
             "channel": getattr(session.controller, "channel", "unknown"),
+            # 界面用它显示设备条目（iOS 显示"wisdom (iOS 26.6.2)"、macOS 显示窗口标题）
+            "name": session.controller.display_name,
+            "kind": getattr(session.controller, "kind", None),
             "linkNote": getattr(session.controller, "link_note", ""),
             "graph": session.graph.to_dict(),
         }

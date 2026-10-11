@@ -105,6 +105,14 @@ class Controller(abc.ABC):
     def is_alive(self) -> bool:
         return self._connected
 
+    @property
+    def display_name(self) -> str:
+        """给界面显示的名字（iOS 的"型号 (iOS 版本)"、macOS 的窗口标题）。
+
+        默认空字符串 = 用设备列表里扫描到的名字。
+        """
+        return ""
+
     # ---------- 能力 ----------
 
     @property

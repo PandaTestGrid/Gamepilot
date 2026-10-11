@@ -416,3 +416,22 @@ def test_graph_editor_node_and_edge_rpcs(engine: EngineProcess, tmp_path: Path) 
     request_id = engine.send("graph.node.remove", {"deviceId": DEVICE_ID, "nodeId": "不存在"})
     error = engine.wait_for(lambda item: item.get("id") == request_id)
     assert "error" in error
+
+
+# ---------------------------------------------------------------- 设备 id
+
+
+def test_device_id_uses_type_specific_keys() -> None:
+    """会话 id 必须按设备类型取唯一键 —— 曾经 iOS/macOS 全都落到 xxx:default，
+    两台 iPhone 或两个 Mac 窗口会互相顶掉。"""
+    from gamepilot.rpc.session import device_id_for
+
+    assert device_id_for("Android", {"serial": "3387980"}) == "android:3387980"
+    assert device_id_for("iOS", {"udid": "00008120-000648403C78C01E"}) == "ios:00008120-000648403C78C01E"
+    assert device_id_for("Mac", {"window": "89"}) == "mac:89"
+    assert device_id_for("Mac", {"app": "访达"}) == "mac:访达"
+    assert device_id_for("Mock", {"width": "640"}) == "mock:mock-1"
+    assert device_id_for("Mac", {}) == "mac:default"  # 兜底仍可用
+    # 两个不同窗口不能撞成同一个 id
+    assert device_id_for("Mac", {"window": "89"}) != device_id_for("Mac", {"window": "90"})
+    assert device_id_for("iOS", {"udid": "A"}) != device_id_for("iOS", {"udid": "B"})

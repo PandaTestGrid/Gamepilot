@@ -390,6 +390,7 @@ class HidBridge:
 
     def __init__(self, udid: str) -> None:
         self.udid = udid
+        self._display_name = ""
         self._session: TunnelSession | None = None
         self._uhs: Any = None
         self._indigo: Any = None
@@ -544,6 +545,7 @@ class IosController(Controller):
     """
 
     scheme = "iOS"
+    kind = "ios"
     description = "iPhone / iPad（DVT 采集 + pymobiledevice3 HID，仅 17.4+）"
 
     def __init__(self, device_id: str = "", udid: str = "", fps: float = 8.0, **options: Any) -> None:
@@ -557,6 +559,10 @@ class IosController(Controller):
         self._last_frame: np.ndarray | None = None
         self._frame_seq = 0
         self._fps = fps
+
+    @property
+    def display_name(self) -> str:
+        return self._display_name
 
     # ---------- 连接 ----------
 
@@ -573,6 +579,7 @@ class IosController(Controller):
                 f"这台设备是 iOS {device.version}，只支持 {IOS_MIN_VERSION[0]}.{IOS_MIN_VERSION[1]}+"
                 "（低版本没有用户态 RSD 隧道）"
             )
+        self._display_name = f"{device.name} (iOS {device.version})" if device.version else device.name
         if not pymobiledevice3_available():
             raise RuntimeError("缺少 pymobiledevice3（uv sync --extra ios 或 brew install pymobiledevice3）")
 
