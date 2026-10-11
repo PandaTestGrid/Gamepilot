@@ -78,8 +78,10 @@ class Engine:
         self.paused_at: str | None = None
         # 本次访问在这个界面上已经停过的断点（避免恢复后又停在同一处）
         self._breakpoint_passed: set[str] = set()
-        # 进入当前界面的时间：none_of（"不在"）分支要等识别稳定后才允许走
-        self._node_entered_at = 0.0
+        # 进入当前界面的时间：none_of（"不在"）分支要等识别稳定后才允许走。
+        # 必须初始化成"现在"：如果留 0，第一拍算出的时间差是无穷大，宽限期直接被绕过
+        # （这就是"明明在却先走否则"的根因）
+        self._node_entered_at = time.time()
         self.stats = {"ticks": 0, "actions": 0, "transitions": 0, "failed": 0, "recoveries": 0}
         self._timeout_reported: set[str] = set()
         # 本次"进入节点"期间已经触发过的边（dst 为空的边默认只触发一次，
