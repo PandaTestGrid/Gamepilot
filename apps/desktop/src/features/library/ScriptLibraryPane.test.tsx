@@ -5,7 +5,6 @@
  * 所以测试里直接给 store 塞数据、spy 掉动作，不去碰磁盘（磁盘那侧由引擎测试覆盖）。
  */
 import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { ScriptLibraryPane } from '@/features/library/ScriptLibraryPane';
