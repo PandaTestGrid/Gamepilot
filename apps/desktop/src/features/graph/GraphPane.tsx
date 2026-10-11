@@ -631,7 +631,7 @@ export function GraphPane(): ReactNode {
           */}
           <RunButton size="compact" />
           <span className="mx-0.5 h-3 w-px bg-line" />
-          <TaskTabs />
+          {/* TODO(下一轮)：TaskTabs 在无引擎环境会抛错，先不挂载，修好再开 */}
           <GhostButton
             active={view === 'graph'}
             onClick={() => setView('graph')}
