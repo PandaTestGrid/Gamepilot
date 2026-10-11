@@ -12,6 +12,7 @@ import {
   devLog,
   projectCreate,
   workspaceCreate,
+  workspaceMkdir,
   workspaceTree,
   type TreeProject,
   type TreeWorkspace,
@@ -185,6 +186,28 @@ function TaskTabsInner(): ReactNode {
           </option>
         ))}
       </select>
+
+      <button
+        type="button"
+        title="在项目下新建工作区（一个游戏/一个空间）"
+        onClick={() => {
+          const name = window.prompt('新工作区名字（一个游戏/一个空间，例如「阴阳师」）');
+          if (!name || !currentProject) {
+            return;
+          }
+          void (async () => {
+            try {
+              await workspaceMkdir(currentProject.root, name);
+              await load();
+            } catch (reason) {
+              devLog(`新建工作区失败: ${String(reason)}`);
+            }
+          })();
+        }}
+        className="rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised hover:text-fg"
+      >
+        ＋ 工作区
+      </button>
 
       <span className="mx-1 h-3 w-px bg-line" />
 
