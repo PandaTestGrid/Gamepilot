@@ -226,6 +226,29 @@ Rust 桥的调度规则：
 `{ deviceId }` → `{ ok: true, running: boolean }`。
 `run.start` 要求状态图里至少有一个节点，否则报「状态图还没有节点：先在画面上框选录制一个界面」。
 
+### `record.action`（把手动操作录成脚本里的一步）
+
+`{ deviceId, action: {type, ...}, to? }` → `{ edgeId, graph }`。
+
+画面栏开着「录操作」时，每次点击/滑动都会调它，一步 = 一条边：
+
+- 这一步属于哪个界面？先按当前帧的识别结果判断（`Engine.locate()`，**不需要跑状态机**），
+  判断不出来就用最近录过的节点
+- 条件默认是"源界面的进入识别器"（在那个界面才做）；没有任何界面时退化成
+  `{"always": true}`（无条件，进节点就做）
+- `cooldown_ms` 默认 600：一次访问只做一次，不会 14fps 连点
+- 录下来的边会记住 id；**下一次录新界面（`record.template` 建节点）时自动把 `to` 接上**，
+  于是"录一个界面 → 点一下 → 再录一个界面"就得到 A --动作--> B 的完整流程
+- 每次录制都会发一条 `engine.event`（type = `action_recorded`）
+
+### `graph.node.add` / `graph.node.update` / `graph.node.remove` / `graph.edge.add`（图编辑器）
+
+- `graph.node.add { name?, nodeId?, enter? }` → `{ nodeId, graph }`（不传 nodeId 自动生成）
+- `graph.node.update { nodeId, patch: { name?, enter?, timeout_ms? } }` → `{ nodeId, graph }`
+- `graph.node.remove { nodeId }` → `{ graph }`；**引用它的边会一起删掉**（否则图不合法）
+- `graph.edge.add { from?, to?, when?, action? }` → `{ edgeId, graph }`；
+  不传 `when` 时默认用源节点的第一个进入识别器（没有就退化成无条件边）
+
 ### `project.get` / `project.set` / `project.list`（脚本目录）
 
 一个目录 = 一个脚本：`graph.json`（状态图真源）+ `templates/`（录制的模板截图）。

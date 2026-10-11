@@ -283,6 +283,41 @@ export function graphGet(deviceId: string): Promise<GraphPayload> {
   return rpc<GraphPayload>('graph.get', { deviceId });
 }
 
+/** 把一步手动操作录成脚本里的一条边（画面栏开着「录操作」时调） */
+export function recordAction(
+  deviceId: string,
+  action: Record<string, unknown>,
+  to?: string,
+): Promise<{ edgeId: string; graph: GraphPayload }> {
+  return rpc<{ edgeId: string; graph: GraphPayload }>('record.action', { deviceId, action, to });
+}
+
+export function graphNodeAdd(
+  deviceId: string,
+  params: { nodeId?: string; name?: string; enter?: string[] } = {},
+): Promise<{ nodeId: string; graph: GraphPayload }> {
+  return rpc<{ nodeId: string; graph: GraphPayload }>('graph.node.add', { deviceId, ...params });
+}
+
+export function graphNodeUpdate(
+  deviceId: string,
+  nodeId: string,
+  patch: { name?: string; enter?: string[]; timeout_ms?: number },
+): Promise<{ nodeId: string; graph: GraphPayload }> {
+  return rpc<{ nodeId: string; graph: GraphPayload }>('graph.node.update', { deviceId, nodeId, patch });
+}
+
+export function graphNodeRemove(deviceId: string, nodeId: string): Promise<{ graph: GraphPayload }> {
+  return rpc<{ graph: GraphPayload }>('graph.node.remove', { deviceId, nodeId });
+}
+
+export function graphEdgeAdd(
+  deviceId: string,
+  params: { from?: string | null; to?: string | null; when?: string; action?: Record<string, unknown> },
+): Promise<{ edgeId: string; graph: GraphPayload }> {
+  return rpc<{ edgeId: string; graph: GraphPayload }>('graph.edge.add', { deviceId, ...params });
+}
+
 /** 模板截图（识别器录的是什么，界面要显示出来） */
 export interface TemplateImage {
   readonly label: string;

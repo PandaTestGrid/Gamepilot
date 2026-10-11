@@ -7,7 +7,15 @@
 import { create } from 'zustand';
 
 import { toGraphData } from '@/lib/graph-adapter';
-import { graphSave, type GraphEdgePayload, type GraphPayload } from '@/lib/rpc';
+import {
+  graphEdgeAdd,
+  graphNodeAdd,
+  graphNodeRemove,
+  graphNodeUpdate,
+  graphSave,
+  type GraphEdgePayload,
+  type GraphPayload,
+} from '@/lib/rpc';
 import type { GraphData, GraphEdgeView, GraphNodeView, RecognizerView } from '@/types';
 
 interface GraphState {
@@ -15,6 +23,7 @@ interface GraphState {
   /** 引擎来的原始 graph.json（改边/改条件后要原样写回，界面模型有损） */
   readonly raws: Readonly<Record<string, GraphPayload>>;
   readonly selectedEdgeId: string | null;
+  readonly selectedNodeId: string | null;
   readonly ensure: (deviceId: string) => void;
   readonly addRecognizer: (deviceId: string, recognizer: RecognizerView) => void;
   readonly addNode: (deviceId: string, node: GraphNodeView) => void;
@@ -23,12 +32,22 @@ interface GraphState {
   readonly updateNodeEnter: (deviceId: string, nodeId: string, label: string) => void;
   readonly moveNode: (deviceId: string, nodeId: string, x: number, y: number) => void;
   readonly selectEdge: (edgeId: string | null) => void;
+  readonly selectNode: (nodeId: string | null) => void;
   /** 引擎给出的状态图（唯一真源） */
   readonly setGraph: (deviceId: string, graph: GraphData, raw?: GraphPayload) => void;
   /** 改一条边（判断条件/动作/优先级等）→ 写回引擎并刷新界面模型 */
   readonly saveEdge: (deviceId: string, edgeId: string, patch: Partial<GraphEdgePayload>) => Promise<void>;
   /** 删除一条边 */
   readonly removeEdge: (deviceId: string, edgeId: string) => Promise<void>;
+  /** 图编辑器：加/改/删节点，拖拽连边（RPC 版，和本地 addNode 区分开） */
+  readonly createNode: (deviceId: string, name: string, enter?: string[]) => Promise<string | null>;
+  readonly updateNode: (
+    deviceId: string,
+    nodeId: string,
+    patch: { name?: string; enter?: string[]; timeout_ms?: number },
+  ) => Promise<void>;
+  readonly removeNode: (deviceId: string, nodeId: string) => Promise<void>;
+  readonly connectNodes: (deviceId: string, from: string, to: string) => Promise<void>;
   /** 每帧同步：识别分数 / 当前节点 / pending 目标 */
   readonly updateLive: (
     deviceId: string,
@@ -48,6 +67,7 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
   graphs: {},
   raws: {},
   selectedEdgeId: null,
+  selectedNodeId: null,
 
   ensure: (deviceId) =>
     set((state) => {
@@ -132,7 +152,9 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
       return { graphs: { ...state.graphs, ...update(deviceId, graph, { nodes }) } };
     }),
 
-  selectEdge: (edgeId) => set({ selectedEdgeId: edgeId }),
+  selectNode: (nodeId) => set({ selectedNodeId: nodeId, selectedEdgeId: null }),
+
+  selectEdge: (edgeId) => set({ selectedEdgeId: edgeId, selectedNodeId: null }),
 
   setGraph: (deviceId, graph, raw) =>
     set((state) => ({
@@ -174,6 +196,47 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
         [deviceId]: toGraphData(deviceId, saved, undefined),
       },
       selectedEdgeId: null,
+    }));
+  },
+
+  createNode: async (deviceId: string, name: string, enter?: string[]) => {
+    try {
+      const result = await graphNodeAdd(deviceId, { name, enter });
+      set((current) => ({
+        raws: { ...current.raws, [deviceId]: result.graph },
+        graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+      }));
+      return result.nodeId;
+    } catch {
+      return null;
+    }
+  },
+
+  updateNode: async (
+    deviceId: string,
+    nodeId: string,
+    patch: { name?: string; enter?: string[]; timeout_ms?: number },
+  ) => {
+    const result = await graphNodeUpdate(deviceId, nodeId, patch);
+    set((current) => ({
+      raws: { ...current.raws, [deviceId]: result.graph },
+      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+    }));
+  },
+
+  removeNode: async (deviceId: string, nodeId: string) => {
+    const result = await graphNodeRemove(deviceId, nodeId);
+    set((current) => ({
+      raws: { ...current.raws, [deviceId]: result.graph },
+      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
+    }));
+  },
+
+  connectNodes: async (deviceId: string, from: string, to: string) => {
+    const result = await graphEdgeAdd(deviceId, { from, to });
+    set((current) => ({
+      raws: { ...current.raws, [deviceId]: result.graph },
+      graphs: { ...current.graphs, [deviceId]: toGraphData(deviceId, result.graph, undefined) },
     }));
   },
 

@@ -18,6 +18,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+# "无条件"边的 when 用这个哨兵值（它不是一个识别器标签，校验时要跳过）
+ALWAYS_LABEL = "always"
+
 
 @dataclass(frozen=True)
 class Condition:
@@ -26,6 +29,8 @@ class Condition:
     none_of: tuple[str, ...] = ()
     min_score: float = 0.0
     within_ms: int = 0
+    # 总是成立（录制出来的一步：不依赖任何识别器，进节点就做）
+    always: bool = False
 
     # ---------------------------------------------------------------- #
     # 解析 / 序列化
@@ -35,7 +40,9 @@ class Condition:
     def parse(cls, spec: object, *, fallback: str | None = None) -> Condition:
         """从 graph.json 的 ``condition`` 字段解析；没有就和 ``when`` 等价。"""
         if spec is None or spec == {}:
-            return cls(all_of=(fallback,)) if fallback else cls()
+            return cls(all_of=(fallback,)) if fallback else cls(always=True)
+        if spec is True or spec == "always":
+            return cls(always=True)
         if isinstance(spec, str):
             return cls(all_of=(spec,))
         if not isinstance(spec, dict):
@@ -48,6 +55,10 @@ class Condition:
             if isinstance(value, (list, tuple)):
                 return tuple(str(item) for item in value if str(item).strip())
             raise ValueError(f"condition.{key} 必须是字符串或字符串数组")
+
+        if spec.get("always") is True:
+            always = True
+            return cls(always=always, within_ms=_as_ms(spec.get("within_ms", 0)))
 
         all_of = labels("all_of")
         any_of = labels("any_of")
@@ -75,6 +86,11 @@ class Condition:
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
+        if self.always:
+            out["always"] = True
+            if self.within_ms:
+                out["within_ms"] = self.within_ms
+            return out
         if self.all_of:
             out["all_of"] = list(self.all_of)
         if self.any_of:
@@ -104,6 +120,9 @@ class Condition:
     def matches(self, detections: Mapping[str, Any], *, require_confirmed: bool = True) -> bool:
         """这一帧条件是否成立。detections 是 label → Detection 的映射。"""
 
+        if self.always:
+            return True
+
         def hit(label: str) -> bool:
             detection = detections.get(label)
             if detection is None:
@@ -120,6 +139,11 @@ class Condition:
         return not any(label for label in self.any_of) or any(hit(label) for label in self.any_of)
 
     def describe(self) -> str:
+        if self.always:
+            text = "无条件（进节点就做）"
+            if self.within_ms:
+                text += f"（限时 {self.within_ms}ms）"
+            return text
         parts: list[str] = []
         if self.all_of:
             parts.append(" 且 ".join(self.all_of))
@@ -163,3 +187,9 @@ class ConditionTimer:
             self.timed_out.add(key)
             return "timeout"
         return "wait"
+
+
+def _as_ms(value: object) -> int:
+    if not isinstance(value, (int, float)):
+        return 0
+    return int(value)

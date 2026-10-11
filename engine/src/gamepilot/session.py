@@ -24,6 +24,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from .core.actions import Action
+from .core.conditions import ALWAYS_LABEL
 from .core.frame import Frame
 from .core.geometry import Rect
 from .core.graph import Edge, Graph, Node
@@ -75,6 +77,10 @@ class DeviceSession:
         self._last_emit_at: float | None = None
         self._input_seq = 0  # 手动控制事件的序号（事件栏按 seq 排序）
         self._touch_from: tuple[float, float] | None = None
+        # 录制的上一条动作边：下次录新界面时自动把 to 接上
+        self._pending_edge_id: str | None = None
+        # 最近一次录制涉及的节点：刚录完模板马上点一下时，靠它定位这一步属于哪个界面
+        self._last_node_id: str | None = None
         # 推给界面的帧率（0 = 暂停推帧）。识别/状态机不受影响，仍按 fps_limit 跑，
         # 这样"界面不看这台设备"时不会白烧 CPU 与带宽（多设备时尤其明显）
         # 默认 0：界面明确要了才推。连接瞬间就按 15fps 推帧会把控制通道（同一根
@@ -337,6 +343,137 @@ class DeviceSession:
     # 录制与调参
     # ------------------------------------------------------------------ #
 
+    def record_action(self, action: dict[str, Any], *, to: str | None = None) -> dict[str, Any]:
+        """把手动操作录成脚本里的一步（一条边）。
+
+        语义：在当前所处界面上做这个动作 —— 所以条件默认是"当前节点的进入识别器"，
+        没有识别器就退化成"无条件（进节点就做）"。
+        录下来的边会记住 id，下一次录新界面（record_template 建节点）时自动接上，
+        形成 A --点一下--> B 的完整流程。
+        """
+        with self.lock:
+            parsed = Action.parse(action)
+            # 录制时状态机不一定在跑：先靠当前帧判断，判断不出来就用最近录过的节点
+            source = self.engine.locate() or self._last_node_id
+            when = ""
+            if source and source in self.graph.nodes:
+                enter = self.graph.nodes[source].enter
+                if enter:
+                    when = enter[0]
+            condition = {"all_of": [when]} if when else {"always": True}
+            edge_id = f"e_rec_{len(self.graph.edges) + 1}"
+            while any(edge.id == edge_id for edge in self.graph.edges):
+                edge_id = f"{edge_id}_x"
+            edge = Edge.from_dict(
+                {
+                    "id": edge_id,
+                    "when": when or ALWAYS_LABEL,
+                    "from": source,
+                    "to": to,
+                    # 一步只做一次：进入节点后 600ms 内不重复（避免 14fps 下连点）
+                    "cooldown_ms": 600,
+                    "condition": condition,
+                    "action": parsed.to_dict(),
+                }
+            )
+            self.graph.add_edge(edge)
+            self.graph.validate()
+            self.graph.save()
+            self.reload_graph()
+            self._pending_edge_id = edge_id
+            self.emit(
+                "engine.event",
+                {
+                    "deviceId": self.device_id,
+                    "seq": self._input_seq,
+                    "ts": time.time(),
+                    "type": "action_recorded",
+                    "node": source,
+                    "edge": edge_id,
+                    "message": f"录制步骤 {edge_id}: {parsed.describe()}",
+                },
+            )
+            return {"edgeId": edge_id, "graph": self.graph.to_dict()}
+
+    def graph_node_add(self, node_id: str | None, name: str | None, enter: list[str] | None) -> dict[str, Any]:
+        with self.lock:
+            identifier = node_id or f"n_{len(self.graph.nodes) + 1}"
+            node = self.graph.nodes.get(identifier) or Node(id=identifier, name=name or identifier, enter=[])
+            if name:
+                node.name = name
+            for label in enter or []:
+                if label not in self.graph.recognizers:
+                    raise ValueError(f"未定义的识别器: {label}")
+                if label not in node.enter:
+                    node.enter.append(label)
+            self.graph.upsert_node(node)
+            self.graph.validate()
+            self.graph.save()
+            self.reload_graph()
+            return {"nodeId": node.id, "graph": self.graph.to_dict()}
+
+    def graph_node_update(self, node_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            node = self.graph.nodes.get(node_id)
+            if node is None:
+                raise ValueError(f"没有这个节点: {node_id}")
+            if isinstance(patch.get("name"), str):
+                node.name = str(patch["name"])
+            if "enter" in patch:
+                enter = [str(item) for item in patch["enter"] or []]
+                for label in enter:
+                    if label not in self.graph.recognizers:
+                        raise ValueError(f"未定义的识别器: {label}")
+                node.enter = enter
+            if patch.get("timeout_ms") is not None:
+                node.timeout_ms = int(patch["timeout_ms"])
+            self.graph.upsert_node(node)
+            self.graph.validate()
+            self.graph.save()
+            self.reload_graph()
+            return {"nodeId": node.id, "graph": self.graph.to_dict()}
+
+    def graph_node_remove(self, node_id: str) -> dict[str, Any]:
+        with self.lock:
+            if node_id not in self.graph.nodes:
+                raise ValueError(f"没有这个节点: {node_id}")
+            del self.graph.nodes[node_id]
+            # 引用了这个节点的边一并删掉（否则图就不合法了）
+            self.graph.edges = [edge for edge in self.graph.edges if edge.src != node_id and edge.dst != node_id]
+            self.graph.save()
+            self.reload_graph()
+            return {"removed": node_id, "graph": self.graph.to_dict()}
+
+    def graph_edge_add(
+        self, *, src: str | None, dst: str | None, when: str | None = None, action: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        with self.lock:
+            label = when or ""
+            if not label and src and src in self.graph.nodes and self.graph.nodes[src].enter:
+                label = self.graph.nodes[src].enter[0]
+            edge_id = f"e_{label or 'new'}_{len(self.graph.edges) + 1}"
+            while any(edge.id == edge_id for edge in self.graph.edges):
+                edge_id = f"{edge_id}_x"
+            default_action = action or (
+                {"type": "click", "target": label} if label else {"type": "wait", "seconds": 0.5}
+            )
+            edge = Edge.from_dict(
+                {
+                    "id": edge_id,
+                    "when": label or ALWAYS_LABEL,
+                    "from": src,
+                    "to": dst,
+                    "cooldown_ms": 600,
+                    "condition": {"all_of": [label]} if label else {"always": True},
+                    "action": default_action,
+                }
+            )
+            self.graph.add_edge(edge)
+            self.graph.validate()
+            self.graph.save()
+            self.reload_graph()
+            return {"edgeId": edge_id, "graph": self.graph.to_dict()}
+
     def record_template(
         self,
         rect: Rect,
@@ -389,6 +526,13 @@ class DeviceSession:
                     node.enter.append(label)
                 self.graph.upsert_node(node)
                 created_node = node.id
+                self._last_node_id = node.id
+            # 录制流程自动接链：上一步录的动作边 → 指向这个新界面
+            if created_node and self._pending_edge_id:
+                for item in self.graph.edges:
+                    if item.id == self._pending_edge_id and not item.dst:
+                        item.dst = created_node
+                self._pending_edge_id = None
             if as_action_target and self.engine.current and created_node and created_node != self.engine.current:
                 self.graph.add_edge(
                     Edge(

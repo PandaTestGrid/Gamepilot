@@ -31,12 +31,17 @@ from ..protocol import (
     METHOD_DEVICE_SWIPE,
     METHOD_DEVICE_TAP,
     METHOD_DEVICE_TOUCH,
+    METHOD_GRAPH_EDGE_ADD,
     METHOD_GRAPH_GET,
+    METHOD_GRAPH_NODE_ADD,
+    METHOD_GRAPH_NODE_REMOVE,
+    METHOD_GRAPH_NODE_UPDATE,
     METHOD_GRAPH_SAVE,
     METHOD_PROJECT_GET,
     METHOD_PROJECT_LIST,
     METHOD_PROJECT_SET,
     METHOD_RECOGNIZER_THRESHOLD,
+    METHOD_RECORD_ACTION,
     METHOD_RECORD_TEMPLATE,
     METHOD_RUN_START,
     METHOD_RUN_STOP,
@@ -362,6 +367,50 @@ def register(server: RpcServer) -> SessionManager:
             raise ValueError("fps 必须是数字（0 表示暂停推帧）")
         session.set_stream_fps(float(fps))
         return {"ok": True, "streamFps": session.stream_fps}
+
+    @server.method(METHOD_RECORD_ACTION)
+    def _record_action(params: dict[str, Any]) -> dict[str, Any]:
+        """把手动操作录成脚本里的一步（画面栏开着「录操作」时调它）。"""
+        session = manager.get(_require_str(params, "deviceId"))
+        action = params.get("action")
+        if not isinstance(action, dict):
+            raise ValueError("缺少 action 参数（对象，含 type 等）")
+        to = params.get("to")
+        return session.record_action(action, to=str(to) if to else None)
+
+    @server.method(METHOD_GRAPH_NODE_ADD)
+    def _node_add(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        enter = params.get("enter")
+        return session.graph_node_add(
+            str(params["nodeId"]) if params.get("nodeId") else None,
+            str(params["name"]) if params.get("name") else None,
+            [str(item) for item in enter] if isinstance(enter, list) else None,
+        )
+
+    @server.method(METHOD_GRAPH_NODE_UPDATE)
+    def _node_update(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        patch = params.get("patch")
+        if not isinstance(patch, dict):
+            raise ValueError("缺少 patch 参数")
+        return session.graph_node_update(_require_str(params, "nodeId"), patch)
+
+    @server.method(METHOD_GRAPH_NODE_REMOVE)
+    def _node_remove(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        return session.graph_node_remove(_require_str(params, "nodeId"))
+
+    @server.method(METHOD_GRAPH_EDGE_ADD)
+    def _edge_add(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        action = params.get("action")
+        return session.graph_edge_add(
+            src=str(params["from"]) if params.get("from") else None,
+            dst=str(params["to"]) if params.get("to") else None,
+            when=str(params["when"]) if params.get("when") else None,
+            action=action if isinstance(action, dict) else None,
+        )
 
     @server.method(METHOD_GRAPH_GET)
     def _graph_get(params: dict[str, Any]) -> dict[str, Any]:

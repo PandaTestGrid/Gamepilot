@@ -85,9 +85,16 @@ class Action:
         if isinstance(rect_value, (list, tuple)) and len(rect_value) == 4:
             rect = tuple(float(item) for item in rect_value)  # type: ignore[assignment]
 
+        # 兜底目标只在"动作完全没给位置"时才用。
+        # 否则录下来的坐标点击会被塞一个 target，执行时去点识别器中心而不是你点的那个点（踩过）
+        positioned = (
+            bool(spec.get("target"))
+            or spec.get("rect") is not None
+            or (spec.get("x") is not None and spec.get("y") is not None)
+        )
         action = cls(
             type=kind,
-            target=(str(spec["target"]) if spec.get("target") else fallback_target),
+            target=(str(spec["target"]) if spec.get("target") else (None if positioned else fallback_target)),
             rect=rect,
             x=number("x"),
             y=number("y"),

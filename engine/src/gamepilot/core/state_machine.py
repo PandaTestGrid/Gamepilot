@@ -144,6 +144,20 @@ class Engine:
     # 内部
     # ------------------------------------------------------------------ #
 
+    def locate(self) -> str | None:
+        """当前在哪个界面。
+
+        正在跑状态机时就是 `current`；没跑（录制脚本时）也能只看当前帧的识别结果判断，
+        这样"录下来的这一步属于哪个界面"才准。
+        """
+        if self.current:
+            return self.current
+        node_id, score = self._resolve()
+        if node_id:
+            self._enter(node_id, score)
+            return node_id
+        return None
+
     def _recoveries(self) -> list[Edge]:
         return sorted(
             (edge for edge in self.graph.edges if edge.kind == "recovery" and edge.src is None),
@@ -239,15 +253,16 @@ class Engine:
         if pending is None:
             return
         if pending.kind == "transition" and pending.dst:
-            node = self.graph.nodes.get(pending.dst)
-            ready = node is not None and all(
+            target = self.graph.nodes.get(pending.dst)
+            if target is not None and all(
                 self.detections.get(label) is not None and self.detections[label].state == "confirmed"
-                for label in node.enter
-            )
-            if ready:
+                for label in target.enter
+            ):
+                # 带上真实分数（事件栏里显示"进入 X (score=…)"才有意义）
+                score = min((float(self.detections[label].score) for label in target.enter), default=0.0)
                 self.stats["transitions"] += 1
                 self.pending = None
-                self._enter(pending.dst, 0.0)
+                self._enter(pending.dst, score)
                 return
         elif pending.kind == "settle":
             if pending.absent not in self.detections:
@@ -279,7 +294,7 @@ class Engine:
         （低帧率 + 高延迟下这样才不会把时序搞乱）。
         """
         try:
-            action = Action.parse(edge.action, fallback_target=edge.when)
+            action = Action.parse(edge.action, fallback_target=edge.action_fallback_target)
         except ValueError as exc:
             self.stats["failed"] += 1
             self._emit("action_failed", node=self.current, edge=edge, message=str(exc))

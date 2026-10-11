@@ -23,10 +23,12 @@ import '@xyflow/react/dist/style.css';
 import { type ReactNode, useCallback, useMemo } from 'react';
 
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
+import { NodeEditor } from '@/features/graph/NodeEditor';
 
 import { GhostButton, PanelShell } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
+import { toGraphData } from '@/lib/graph-adapter';
 import { useGraphStore } from '@/stores/graph.store';
 
 interface StateNodeData extends Record<string, unknown> {
@@ -65,7 +67,11 @@ export function GraphPane(): ReactNode {
   const graph = useGraphStore((state) => state.graphs[activeId]);
   const moveNode = useGraphStore((state) => state.moveNode);
   const selectEdge = useGraphStore((state) => state.selectEdge);
+  const connectNodes = useGraphStore((state) => state.connectNodes);
   const selectedEdgeId = useGraphStore((state) => state.selectedEdgeId);
+  const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
+  const selectNode = useGraphStore((state) => state.selectNode);
+  const createNode = useGraphStore((state) => state.createNode);
 
   const nodes = useMemo<StateNodeType[]>(
     () =>
@@ -118,6 +124,7 @@ export function GraphPane(): ReactNode {
   );
 
   const selected = (graph?.edges ?? []).find((edge) => edge.id === selectedEdgeId) ?? null;
+  const selectedNode = (graph?.nodes ?? []).find((node) => node.id === selectedNodeId) ?? null;
   const recoveries = (graph?.edges ?? []).filter((edge) => edge.kind === 'recovery');
 
   return (
@@ -125,15 +132,37 @@ export function GraphPane(): ReactNode {
       title="状态图"
       actions={
         <>
-          <GhostButton>+ 节点</GhostButton>
-          <GhostButton>自动布局</GhostButton>
-          <GhostButton>验证</GhostButton>
-          <GhostButton>JSON</GhostButton>
+          <GhostButton
+            onClick={() => {
+              void createNode(activeId, `界面${(graph?.nodes.length ?? 0) + 1}`).then((nodeId) => {
+                if (nodeId) {
+                  selectNode(nodeId);
+                }
+              });
+            }}
+            title="新建一个空节点（界面），然后给它挂识别器"
+          >
+            + 节点
+          </GhostButton>
+          <GhostButton
+            onClick={() => {
+              // 重新按网格布局（引擎不存坐标，坐标是界面私有的）
+              const raw = useGraphStore.getState().raws[activeId];
+              if (raw) {
+                useGraphStore.getState().setGraph(activeId, toGraphData(activeId, raw, undefined), raw);
+              }
+            }}
+            title="按网格重新排列节点"
+          >
+            重新布局
+          </GhostButton>
         </>
       }
       footer={
         selected ? (
           <EdgeEditor key={selected.id} deviceId={activeId} edge={selected} graph={graph} />
+        ) : selectedNode ? (
+          <NodeEditor key={selectedNode.id} deviceId={activeId} node={selectedNode} graph={graph} />
         ) : undefined
       }
     >
@@ -150,13 +179,22 @@ export function GraphPane(): ReactNode {
             nodeTypes={nodeTypes}
             onNodeDragStop={onNodeDragStop}
             onEdgeClick={(_event, edge) => selectEdge(edge.id === selectedEdgeId ? null : edge.id)}
-            onPaneClick={() => selectEdge(null)}
+            onNodeClick={(_event, node) => selectNode(node.id === selectedNodeId ? null : node.id)}
+            onConnect={(connection) => {
+              if (connection.source && connection.target) {
+                void connectNodes(activeId, connection.source, connection.target);
+              }
+            }}
+            onPaneClick={() => {
+              selectEdge(null);
+              selectNode(null);
+            }}
             fitView
             fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
             minZoom={0.3}
             maxZoom={1.6}
             nodesDraggable
-            nodesConnectable={false}
+            nodesConnectable
             proOptions={{ hideAttribution: false }}
           >
             <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#262b36" />

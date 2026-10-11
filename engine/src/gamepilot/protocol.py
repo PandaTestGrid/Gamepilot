@@ -56,6 +56,13 @@ METHOD_PROJECT_GET = "project.get"
 METHOD_PROJECT_SET = "project.set"
 METHOD_PROJECT_LIST = "project.list"
 METHOD_TEMPLATE_IMAGE = "template.image"
+# 录制：把手动操作变成脚本里的一步
+METHOD_RECORD_ACTION = "record.action"
+# 图编辑器：加/改/删节点与边
+METHOD_GRAPH_NODE_ADD = "graph.node.add"
+METHOD_GRAPH_NODE_UPDATE = "graph.node.update"
+METHOD_GRAPH_NODE_REMOVE = "graph.node.remove"
+METHOD_GRAPH_EDGE_ADD = "graph.edge.add"
 METHOD_GRAPH_GET = "graph.get"
 METHOD_GRAPH_SAVE = "graph.save"
 

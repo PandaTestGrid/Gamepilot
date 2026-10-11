@@ -117,6 +117,21 @@ def test_click_forms() -> None:
     assert Action.parse({"type": "click"}, fallback_target="home").target == "home"
 
 
+def test_positioned_action_keeps_its_coordinates() -> None:
+    """有坐标的动作不该被塞兜底 target：否则"点这里"会被执行成"点识别器中心"。"""
+    action = Action.parse({"type": "click", "x": 0.5, "y": 0.8}, fallback_target="home")
+    assert action.target is None
+    assert (action.x, action.y) == (0.5, 0.8)
+
+    # 完全没给位置时才兜底到识别器
+    fallback = Action.parse({"type": "click"}, fallback_target="home")
+    assert fallback.target == "home"
+
+    # 给了 rect 也不该兜底
+    rect = Action.parse({"type": "click", "rect": [0.1, 0.2, 0.3, 0.4]}, fallback_target="home")
+    assert rect.target is None and rect.rect is not None
+
+
 def test_click_without_position_is_rejected() -> None:
     with pytest.raises(ValueError, match="点击位置"):
         Action.parse({"type": "click"})
@@ -158,3 +173,63 @@ def test_action_round_trip() -> None:
     original = {"type": "swipe", "target": "from", "to_target": "to", "duration_ms": 250}
     parsed = Action.parse(original)
     assert Action.parse(parsed.to_dict()).to_dict() == parsed.to_dict()
+
+
+# ---------------------------------------------------------------- 边的序列化
+
+
+def test_edge_round_trip_keeps_always_condition() -> None:
+    """always 条件必须写进文件：丢了它再读回来会变成"叫 always 的识别器标签"。"""
+    from gamepilot.core.graph import Edge
+
+    edge = Edge.from_dict(
+        {
+            "id": "e_rec_1",
+            "when": "always",
+            "from": "main",
+            "cooldown_ms": 600,
+            "condition": {"always": True},
+            "action": {"type": "click", "x": 0.5, "y": 0.8, "duration_ms": 300},
+        }
+    )
+    assert edge.condition.always
+
+    payload = edge.to_dict()
+    assert payload["condition"] == {"always": True}, payload
+
+    again = Edge.from_dict(payload)
+    assert again.condition.always, "往返后仍应是无条件"
+    assert again.condition.labels == (), "不该多出一个假的识别器标签"
+    assert again.action_fallback_target is None, "无条件边的动作不能用 when 兜底目标"
+
+
+def test_edge_round_trip_keeps_multi_label_condition() -> None:
+    from gamepilot.core.graph import Edge
+
+    edge = Edge.from_dict(
+        {
+            "id": "e1",
+            "when": "home",
+            "condition": {
+                "all_of": ["home"],
+                "any_of": ["a"],
+                "none_of": ["popup"],
+                "min_score": 0.8,
+                "within_ms": 3000,
+            },
+            "action": {"type": "wait", "seconds": 1},
+        }
+    )
+    again = Edge.from_dict(edge.to_dict())
+    assert again.condition.any_of == ("a",)
+    assert again.condition.none_of == ("popup",)
+    assert again.condition.within_ms == 3000
+    assert again.condition.min_score == pytest.approx(0.8)
+
+
+def test_default_condition_is_omitted_from_file() -> None:
+    from gamepilot.core.graph import Edge
+
+    edge = Edge.from_dict({"id": "e1", "when": "home", "action": {"type": "click", "target": "home"}})
+    payload = edge.to_dict()
+    assert "condition" not in payload, "默认条件（就是 when）不用写进文件，保持 graph.json 干净"

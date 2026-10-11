@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .actions import Action
-from .conditions import Condition
+from .conditions import ALWAYS_LABEL, Condition
 from .geometry import Rect
 from .recognizer import Recognizer, build_recognizer
 
@@ -60,15 +60,20 @@ class Edge:
     # 没写 condition 时，用 when 当 all_of —— 完全兼容老的 graph.json
     condition: Condition = field(default_factory=Condition)
 
+    @property
+    def action_fallback_target(self) -> str | None:
+        """动作没写目标时用 when 兜底；"无条件"边（when 是哨兵）不能兜底。"""
+        return None if self.when in ("", ALWAYS_LABEL) else self.when
+
     def __post_init__(self) -> None:
         # 直接构造 Edge（测试、脚本）时：没给条件就用 when 当 all_of，保持老语义。
         # 否则空条件会被当成"永远成立"，恢复边会在第一帧就误触发。
-        if not self.condition.labels and self.when:
+        if not self.condition.labels and not self.condition.always and self.when:
             self.condition = Condition(all_of=(self.when,))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Edge:
-        when = str(data["when"])
+        when = str(data.get("when") or "")
         return cls(
             id=str(data["id"]),
             when=when,
@@ -80,17 +85,22 @@ class Edge:
             cooldown_ms=int(data.get("cooldown_ms", 0)),
             retries=int(data.get("retries", 1)),
             action=Action.parse(
-                data.get("action") or {"type": "click", "target": when}, fallback_target=when
+                data.get("action") or {"type": "click", "target": when},
+                fallback_target=None if when == ALWAYS_LABEL else when,
             ).to_dict(),
             condition=Condition.parse(data.get("condition"), fallback=when),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"id": self.id, "when": self.when, "action": dict(self.action)}
+        out: dict[str, Any] = {"id": self.id, "action": dict(self.action)}
+        if self.when:
+            out["when"] = self.when
+        # always 必须写进文件：丢了它再读回来会变成"一个叫 always 的识别器标签"（踩过）
         if (
-            (self.condition.labels and set(self.condition.labels) != {self.when})
+            self.condition.always
             or self.condition.within_ms
             or self.condition.min_score
+            or (self.condition.labels and set(self.condition.labels) != {self.when})
         ):
             out["condition"] = self.condition.to_dict()
         if self.src:
@@ -205,10 +215,12 @@ class Graph:
                 raise ValueError(f"边 {edge.id} 的 from 节点不存在: {edge.src}")
             if edge.dst and edge.dst not in self.nodes:
                 raise ValueError(f"边 {edge.id} 的 to 节点不存在: {edge.dst}")
-            for condition_label in edge.condition.labels or (edge.when,):
-                if condition_label not in self.recognizers:
-                    raise ValueError(f"边 {edge.id} 的条件引用了未定义的识别器: {condition_label}")
-            action = Action.parse(edge.action, fallback_target=edge.when)
+            if not edge.condition.always:
+                fallback_labels = () if edge.when in ("", ALWAYS_LABEL) else (edge.when,)
+                for condition_label in edge.condition.labels or fallback_labels:
+                    if condition_label not in self.recognizers:
+                        raise ValueError(f"边 {edge.id} 的条件引用了未定义的识别器: {condition_label}")
+            action = Action.parse(edge.action, fallback_target=edge.action_fallback_target)
             for action_label in (action.target, action.to_target):
                 if action_label and action_label not in self.recognizers:
                     raise ValueError(f"边 {edge.id} 的动作引用了未定义的识别器: {action_label}")

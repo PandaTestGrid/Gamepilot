@@ -300,3 +300,120 @@ def test_project_directory_switch_and_template_image(engine: EngineProcess, tmp_
     request_id = engine.send("template.image", {"label": "不存在"})
     error = engine.wait_for(lambda item: item.get("id") == request_id)
     assert "error" in error
+
+
+def test_record_action_chains_into_next_node(engine: EngineProcess, tmp_path: Path) -> None:
+    """录操作：点一下 → 变成脚本里的一步；录下一个界面时自动接上（A --点--> B）。"""
+    engine.call("device.connect", {"uri": DEVICE_URI})
+
+    # 还没有任何界面时录的一步：无条件（进节点就做）
+    orphan = engine.call("record.action", {"deviceId": DEVICE_ID, "action": {"type": "wait", "seconds": 0.2}})
+    orphan_edge = next(edge for edge in orphan["graph"]["edges"] if edge["id"] == orphan["edgeId"])
+    assert orphan_edge["when"] == "always"
+    assert orphan_edge["condition"] == {"always": True}, orphan_edge
+    assert "from" not in orphan_edge, "还没有界面时录的步骤不属于任何界面"
+
+    # 录第一个界面（模板 + 节点 main）
+    engine.call(
+        "record.template",
+        {
+            "deviceId": DEVICE_ID,
+            "rect": [0.60, 0.30, 0.16, 0.12],
+            "label": "home",
+            "nodeId": "main",
+            "nodeName": "首页",
+        },
+    )
+    time.sleep(0.6)  # 等识别器确认（投票窗口）
+
+    # 录一步"点击"：条件默认是当前界面的识别器，坐标原样保留
+    step = engine.call("record.action", {"deviceId": DEVICE_ID, "action": {"type": "click", "x": 0.5, "y": 0.8}})
+    edge_id = step["edgeId"]
+    recorded = next(edge for edge in step["graph"]["edges"] if edge["id"] == edge_id)
+    assert recorded["from"] == "main"
+    assert recorded["when"] == "home"
+    assert recorded.get("condition") is None, "默认条件（就是 when）不写进文件"
+    assert recorded["action"] == {"type": "click", "x": 0.5, "y": 0.8, "duration_ms": 300}, recorded["action"]
+    assert recorded.get("to") is None, "还没录下一个界面时不该有终点"
+
+    # 录下一个界面 → 上一步自动指过来
+    after = engine.call(
+        "record.template",
+        {
+            "deviceId": DEVICE_ID,
+            "rect": [0.10, 0.10, 0.20, 0.10],
+            "label": "detail",
+            "nodeId": "detail",
+            "nodeName": "详情",
+        },
+    )
+    linked = next(edge for edge in after["graph"]["edges"] if edge["id"] == edge_id)
+    assert linked["to"] == "detail", f"录制的步骤应该接到新节点: {linked}"
+
+    # 再录一步滑动：属于某个已录界面（不再是无条件）
+    time.sleep(0.6)
+    swipe = engine.call(
+        "record.action",
+        {
+            "deviceId": DEVICE_ID,
+            "action": {"type": "swipe", "x": 0.5, "y": 0.8, "to_x": 0.5, "to_y": 0.2, "duration_ms": 350},
+        },
+    )
+    swipe_edge = next(edge for edge in swipe["graph"]["edges"] if edge["id"] == swipe["edgeId"])
+    assert swipe_edge["action"] == {
+        "type": "swipe",
+        "x": 0.5,
+        "y": 0.8,
+        "to_x": 0.5,
+        "to_y": 0.2,
+        "duration_ms": 350,
+    }, swipe_edge["action"]
+    assert swipe_edge["from"], "应该挂在某个界面上"
+
+    # 录制要在事件栏留痕
+    recorded_events = [item for item in engine.seen if item.get("method") == "engine.event"]
+    assert any(item["params"]["type"] == "action_recorded" for item in recorded_events)
+
+
+def test_graph_editor_node_and_edge_rpcs(engine: EngineProcess, tmp_path: Path) -> None:
+    """图编辑器：加节点、连边、改节点、删节点（引用的边一起删）。"""
+    engine.call("device.connect", {"uri": DEVICE_URI})
+    engine.call(
+        "record.template",
+        {
+            "deviceId": DEVICE_ID,
+            "rect": [0.60, 0.30, 0.16, 0.12],
+            "label": "home",
+            "nodeId": "main",
+            "nodeName": "首页",
+        },
+    )
+
+    added = engine.call("graph.node.add", {"deviceId": DEVICE_ID, "name": "结算页"})
+    node_id = added["nodeId"]
+    assert any(node["id"] == node_id for node in added["graph"]["nodes"])
+
+    # 从界面拖一条线过来：默认条件是源节点的进入识别器
+    edge = engine.call("graph.edge.add", {"deviceId": DEVICE_ID, "from": "main", "to": node_id})
+    edge_id = edge["edgeId"]
+    created = next(item for item in edge["graph"]["edges"] if item["id"] == edge_id)
+    # 默认形态（等于 when）不写 condition 字段，读回来就是 all_of=[when]
+    assert created.get("condition") is None and created["when"] == "home"
+    assert created["from"] == "main" and created["to"] == node_id
+
+    # 把识别器挂到新节点上
+    updated = engine.call(
+        "graph.node.update", {"deviceId": DEVICE_ID, "nodeId": node_id, "patch": {"enter": ["home"], "name": "结果页"}}
+    )
+    target = next(node for node in updated["graph"]["nodes"] if node["id"] == node_id)
+    assert target["name"] == "结果页" and target["enter"] == ["home"]
+
+    # 删节点：引用它的边一起删
+    removed = engine.call("graph.node.remove", {"deviceId": DEVICE_ID, "nodeId": node_id})
+    assert not any(node["id"] == node_id for node in removed["graph"]["nodes"])
+    assert not any(item["from"] == node_id or item.get("to") == node_id for item in removed["graph"]["edges"])
+
+    # 删不存在的节点要报错
+    request_id = engine.send("graph.node.remove", {"deviceId": DEVICE_ID, "nodeId": "不存在"})
+    error = engine.wait_for(lambda item: item.get("id") == request_id)
+    assert "error" in error

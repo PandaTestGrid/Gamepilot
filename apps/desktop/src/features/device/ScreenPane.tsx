@@ -6,6 +6,7 @@
  * （而且坐标本来就是归一化的，连换算都不需要）。
  */
 import {
+  CircleDot,
   House,
   Layers,
   MousePointerClick,
@@ -43,6 +44,12 @@ export function ScreenPane(): ReactNode {
   const toggleDevicePopover = useUiStore((state) => state.toggleDevicePopover);
   const controlMode = useUiStore((state) => state.controlMode);
   const toggleControl = useUiStore((state) => state.toggleControl);
+  const recordActionMode = useUiStore((state) => state.recordActionMode);
+  const toggleRecordAction = useUiStore((state) => state.toggleRecordAction);
+  const recordStep = useSessionStore((state) => state.recordStep);
+  const recordWait = (seconds: number): void => {
+    void recordStep(activeId, { type: 'wait', seconds });
+  };
   const pressKey = useSessionStore((state) => state.pressKey);
   const recordMode = useUiStore((state) => state.recordMode);
   const frame = useSessionStore((state) => state.frames[activeId]);
@@ -107,6 +114,33 @@ export function ScreenPane(): ReactNode {
           </GhostButton>
           <GhostButton title="当前帧命中的识别器数量">读数 {confirmedCount}</GhostButton>
           <span className="mx-0.5 h-3 w-px bg-line" />
+          <GhostButton
+            active={recordActionMode}
+            onClick={toggleRecordAction}
+            title={
+              recordActionMode
+                ? '正在录操作：画面上的每次点击/滑动都会变成脚本里的一步（再点一下关闭）'
+                : '录操作：把点击/滑动录成脚本里的一步'
+            }
+          >
+            <CircleDot className="size-3" />
+            录操作
+          </GhostButton>
+          {recordActionMode && (
+            <span className="flex items-center gap-1">
+              {[0.5, 1, 3].map((seconds) => (
+                <button
+                  key={seconds}
+                  type="button"
+                  onClick={() => void recordWait(seconds)}
+                  className="h-5 rounded-sm border border-line px-1 text-badge text-dim hover:bg-raised hover:text-fg"
+                  title={`录一步"等待 ${seconds}s"`}
+                >
+                  +等{seconds}s
+                </button>
+              ))}
+            </span>
+          )}
           <GhostButton
             active={controlMode}
             onClick={toggleControl}
@@ -224,6 +258,9 @@ function SingleScreen({
   const recordMode = useUiStore((state) => state.recordMode);
   const controlMode = useUiStore((state) => state.controlMode);
   const touchDevice = useSessionStore((state) => state.touch);
+  const recordStep = useSessionStore((state) => state.recordStep);
+  const recordActionMode = useUiStore((state) => state.recordActionMode);
+  const recordStart = useRef<{ x: number; y: number; at: number } | null>(null);
   const draft = useUiStore((state) => state.draft);
   const beginDraft = useUiStore((state) => state.beginDraft);
   const viewport = useRef<HTMLDivElement>(null);
@@ -376,6 +413,7 @@ function SingleScreen({
         }
         event.currentTarget.setPointerCapture(event.pointerId);
         controlStart.current = { x: point[0], y: point[1], at: performance.now(), moved: false };
+        recordStart.current = { x: point[0], y: point[1], at: performance.now() };
         lastMoveAt.current = 0;
         flashRipple(point[0], point[1]);
         touchDevice(deviceId, 'down', point[0], point[1]);
@@ -406,6 +444,29 @@ function SingleScreen({
         const point = toCanvas(event.clientX, event.clientY, true) ?? [start.x, start.y];
         flashRipple(point[0], point[1]);
         touchDevice(deviceId, 'up', point[0], point[1]);
+        // 录操作：抬手时把这一个手势写成脚本里的一步（点了=click，拖了=swipe）
+        const origin = recordStart.current;
+        recordStart.current = null;
+        if (recordActionMode && origin) {
+          const durationMs = Math.round(performance.now() - origin.at);
+          const moved = Math.hypot(point[0] - origin.x, point[1] - origin.y) > 0.012;
+          if (moved) {
+            void recordStep(deviceId, {
+              type: 'swipe',
+              x: Number(origin.x.toFixed(4)),
+              y: Number(origin.y.toFixed(4)),
+              to_x: Number(point[0].toFixed(4)),
+              to_y: Number(point[1].toFixed(4)),
+              duration_ms: Math.min(1500, Math.max(80, durationMs)),
+            });
+          } else {
+            void recordStep(deviceId, {
+              type: 'click',
+              x: Number(point[0].toFixed(4)),
+              y: Number(point[1].toFixed(4)),
+            });
+          }
+        }
       }}
       onPointerCancel={() => {
         const start = controlStart.current;

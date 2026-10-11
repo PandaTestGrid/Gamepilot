@@ -22,6 +22,7 @@ import {
   projectSet,
   fetchFrame,
   fetchFrameDataUrl,
+  recordAction,
   setStreamFps,
   type ProjectInfo,
   disconnectDevice,
@@ -92,6 +93,8 @@ interface SessionState {
   /** 实时触控事件（down/move/up）；move 是高频的，不等待响应 */
   readonly touch: (deviceId: string, phase: 'down' | 'move' | 'up', x: number, y: number) => void;
   /** 刷新脚本目录信息（顶栏显示） */
+  /** 把一步操作录进脚本（返回新边 id，失败返回 null） */
+  readonly recordStep: (deviceId: string, action: Record<string, unknown>) => Promise<string | null>;
   readonly refreshProject: () => Promise<void>;
   /** 切换脚本目录：引擎会热重载所有设备的状态图 */
   readonly switchProject: (dir: string) => Promise<void>;
@@ -412,6 +415,24 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   clearError: () => set({ error: null }),
 
   setStreamPolicy: (deviceId, fps) => applyStreamPolicy(deviceId, fps),
+
+  recordStep: async (deviceId, action) => {
+    if (!get().ready[deviceId]) {
+      set({ error: '设备未连接：录操作需要先连上设备（否则不知道该录到哪个界面）' });
+      return null;
+    }
+    try {
+      const result = await recordAction(deviceId, action);
+      useGraphStore
+        .getState()
+        .setGraph(deviceId, toGraphData(deviceId, result.graph, get().frames[deviceId]), result.graph);
+      devLog(`录制步骤 ${result.edgeId}: ${String(action.type)}`);
+      return result.edgeId;
+    } catch (error) {
+      set({ error: `录制失败: ${error instanceof Error ? error.message : String(error)}` });
+      return null;
+    }
+  },
 
   refreshProject: async () => {
     try {
