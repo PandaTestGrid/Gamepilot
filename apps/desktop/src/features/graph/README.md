@@ -29,11 +29,43 @@
 - 节点里的 store 选择器**不要写 `?? []`**：selector 每次返回新数组会让 `useSyncExternalStore`
   认为状态一直在变 → 无限重渲染（图还没加载完时必炸）。
 
+## 画布手势：左键框选、中键/空格平移
+
+用户反馈过两件事："鼠标一放上去就是个小手"、"怎么框选多个界面"。根因是同一个 ——
+**左键拖空白原来是平移**（xyflow 默认），所以画布常驻 `cursor: grab`（`.react-flow__pane.draggable`），
+而框选得靠 Shift+拖（没人知道）。现在：
+
+| 操作 | 行为 |
+|---|---|
+| 左键拖空白 | **框选**（`selectionOnDrag`），框选矩形用品牌色（`.react-flow__nodesselection-rect`） |
+| **滚动 / 双指滑动** | **平移画布**（`panOnScroll`）—— Mac 触控板没有中键，只靠空格太别扭 |
+| **⌘+滚动** | 缩放（`zoomOnScroll={false}` + xyflow 的 `zoomActivationKeyCode`，Mac 上默认 Meta）；捏合也能缩放 |
+| 中键拖 / **空格+拖动** | 平移（`panOnDrag={[1]}` + 默认 `panActivationKeyCode='Space'`） |
+| 右键 | 右键菜单 |
+| 点节点 | 选中（进下方编辑器）；`Shift/Meta/Ctrl` + 点 = 加选 |
+| `Delete` / `Backspace` | 删除选中的界面 / 边（`deleteKeyCode`，macOS 上 Delete 要 Fn+Backspace，所以两个都收） |
+
+规则：
+
+- **`panOnDrag` 不能含 0**：含 0 时 xyflow 给 `.react-flow__pane` 加 `draggable` → `cursor: grab`
+  就是那个"小手"，同时也意味着左键做不了框选；
+- **`panOnDrag` 也不能含 2**（右键）：xyflow 的 `Pane.onContextMenu` 里，只要 `panOnDrag` 含 2 就
+  `preventDefault()` 然后 return —— **右键菜单会被整个吞掉**，两者不能共存。所以 `[1]` 只能是中键；
+- 多选状态（`GraphPane` 的 `selectedIds`）是**画布本地的临时状态**，不进 store：
+  它和"下方编辑器在编辑哪一个"（`graph.store.selectedNodeId`）是两件事，画边框时取并集。
+  但**必须喂回节点数据**（`selected`）并进 `nodeSignature` —— 引擎每帧推数据都会重建节点，
+  不带上的话框选结果下一次同步就没了；
+- 删界面**逐个调** `graph.node.remove`：引擎会把它连着的边一起删（`session.py: graph_node_remove`），
+  所以不用自己先删边；正被下方编辑器编辑的那个被删掉时要 `selectNode(null)` 收起编辑器；
+- 画布左下角的图例里写了"拖动空白 = 框选 · 空格/中键拖动 = 平移"，选中后还多一条
+  "已选 N 个界面 · 删除 / 取消选择"的工具条（不然没人知道左键不再是平移）。
+
 ## 画布上的模板截图与右键菜单
 
 | 文件 | 职责 |
 |---|---|
-| `GraphContextMenu.tsx` | 右键菜单 + 节点里的「＋操作」菜单（**portal 到 body**，见下） |
+| `GraphContextMenu.tsx` | 菜单（支持**二级**：`item.submenu`）：右键三套 + 节点 ⋯ + ＋添加操作（**portal 到 body**） |
+| `action-menu.ts` | 「＋添加操作」的内容：一级动作类型、二级参数预设（纯函数，见 `action-menu.test.ts`） |
 | `DockBar.tsx` | 详情坞的 `▸展开/▾收起` 控制条（收起时也显示在编辑什么） |
 | `RunStatusStrip.tsx` | 运行状态条：当前界面 / 下一步 / 还差什么 |
 | `stores/template.store.ts` | 模板截图**进程级缓存**：一张模板只取一次，取到过就不再消失，失败可重试 |
@@ -72,6 +104,9 @@
   - **尺寸沿用本地**（别重新测量），`data` 每次重建。
 - 连线必须用 `ConnectionMode.Strict`：Loose 允许从 target 圆点起拖并交换方向，
   会出现"从左圆点拖，结果连成了反向边"。
+- 菜单项要区分"要做什么"和"怎么做"：一级动作类型、二级参数（`action-menu.ts`）。
+  每类最后留一项「自定义…」指向详情面板，别把参数全塞进一级。
+- 节点卡片里**可点元素 ≥24px**（`size-5` / `h-6`）；小字号标签可以小，按钮不能小。
 - 弹菜单/浮层一律 **portal 到 `document.body`**：节点卡片在 React Flow 的
   `scale()/translate()` 变换里，卡片内 `position: fixed` 会被变换劫持（菜单飞到视口外、点不到）。
 - 节点里的操作：点行 = 选中那一步；`▶` = `action.run` 立即执行（结果进事件流）；`✕` = 删除。

@@ -32,6 +32,7 @@ import { GraphContextMenu, type MenuAnchor } from '@/features/graph/GraphContext
 import { RunStatusStrip } from '@/features/graph/RunStatusStrip';
 import { StateNode, type StateNodeType } from '@/features/graph/StateNode';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
+import { TaskTabs } from '@/features/graph/TaskTabs';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
 
 import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
@@ -630,6 +631,7 @@ export function GraphPane(): ReactNode {
           */}
           <RunButton size="compact" />
           <span className="mx-0.5 h-3 w-px bg-line" />
+          <TaskTabs />
           <GhostButton
             active={view === 'graph'}
             onClick={() => setView('graph')}
@@ -768,12 +770,18 @@ export function GraphPane(): ReactNode {
                 /*
                  * 画布手势（用户反馈"鼠标一放上去就是小手，而且没法框选多个"）：
                  *   - `selectionOnDrag`：**左键拖空白 = 框选**多个界面；
-                 *   - `panOnDrag={[1]}`：平移只留给**中键**（外加 xyflow 默认的"空格+拖动"）——
-                 *     原来左键拖 = 平移，所以画布常驻 `cursor: grab`（那个小手），而且框选只能靠 Shift；
-                 *   - 右键空出来给右键菜单（原本就是它）。
+                 *   - `panOnDrag={[1]}`：平移给**中键**（外加 xyflow 默认的"空格+拖动"）。
+                 *     `[1]` 是 DOM 的 `MouseEvent.button`：**1 = 中键、2 = 右键**。
+                 *     **不能用右键平移**：xyflow 的实现里，只要 panOnDrag 含 2，
+                 *     它就把 `contextmenu` 事件 preventDefault 掉并 return —— 右键菜单会被整个吞掉；
+                 *   - `panOnScroll` + `zoomOnScroll={false}`：**滚动/双指滑动 = 平移**，
+                 *     ⌘+滚动 = 缩放（Mac 上 zoomActivationKeyCode 默认就是 Meta），捏合仍然缩放。
+                 *     Mac 触控板没有中键，原来"滚动=缩放"意味着不按空格就没法平移。
                  */
                 selectionOnDrag
                 panOnDrag={[1]}
+                panOnScroll
+                zoomOnScroll={false}
                 multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
                 // Delete 和 Backspace 都能删（macOS 键盘上 Delete 是 Fn+Backspace，不给 Backspace 就没人删得动）
                 deleteKeyCode={['Delete', 'Backspace']}
@@ -842,8 +850,9 @@ export function GraphPane(): ReactNode {
               <span className="pointer-events-none">
                 拖节点右侧圆点连到另一个节点 = 连一条边；点节点/边可在下方编辑
               </span>
+              <span className="pointer-events-none">拖动空白 = 框选多个界面（Delete 删除选中）</span>
               <span className="pointer-events-none">
-                拖动空白 = 框选多个界面（Delete 删除选中）· 空格/中键拖动 = 平移画布
+                滚动 / 双指滑动 = 平移画布，⌘+滚动 = 缩放（空格或中键拖动也能平移）
               </span>
               {selectedIds.length > 0 && (
                 <span className="pointer-events-auto flex items-center gap-1 rounded-sm border border-brand bg-panel px-1 text-brand">

@@ -28,6 +28,8 @@ const probe = vi.hoisted(() => ({
   props: null as null | {
     selectionOnDrag?: boolean;
     panOnDrag?: boolean | number[];
+    panOnScroll?: boolean;
+    zoomOnScroll?: boolean;
     deleteKeyCode?: string | string[] | null;
     multiSelectionKeyCode?: string | string[] | null;
     nodes: ProbeNode[];
@@ -64,9 +66,15 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 
 const DEVICE = 'mock:1';
 
-function setup(): { removeNode: ReturnType<typeof vi.fn>; removeEdge: ReturnType<typeof vi.fn> } {
-  const removeNode = vi.fn(() => Promise.resolve());
-  const removeEdge = vi.fn(() => Promise.resolve());
+type RemoveNodeMock = (deviceId: string, nodeId: string) => Promise<void>;
+type RemoveEdgeMock = (deviceId: string, edgeId: string) => Promise<void>;
+
+function setup(): {
+  removeNode: ReturnType<typeof vi.fn<RemoveNodeMock>>;
+  removeEdge: ReturnType<typeof vi.fn<RemoveEdgeMock>>;
+} {
+  const removeNode = vi.fn<RemoveNodeMock>(() => Promise.resolve());
+  const removeEdge = vi.fn<RemoveEdgeMock>(() => Promise.resolve());
   useDeviceStore.setState({ activeId: DEVICE });
   useGraphStore.setState({
     selectedNodeId: null,
@@ -105,13 +113,24 @@ describe('画布手势：左键框选，不是拖动平移', () => {
     probe.props = null;
   });
 
-  it('左键拖空白 = 框选（selectionOnDrag），平移只留给中键', () => {
+  it('左键拖空白 = 框选（selectionOnDrag），平移给中键 + 滚动', () => {
     setup();
 
     expect(probe.props?.selectionOnDrag).toBe(true);
     // 关键：panOnDrag 不含 0（左键）—— 含 0 时 xyflow 会给画布加 cursor: grab，就是那个"小手"
     expect(probe.props?.panOnDrag).toEqual([1]);
     expect(probe.props?.multiSelectionKeyCode).toEqual(['Shift', 'Meta', 'Control']);
+    // 滚动/双指滑动 = 平移，⌘+滚动 = 缩放（Mac 触控板没有中键）
+    expect(probe.props?.panOnScroll).toBe(true);
+    expect(probe.props?.zoomOnScroll).toBe(false);
+  });
+
+  it('**不用右键平移**：xyflow 只要看到 panOnDrag 含 2 就会吞掉右键菜单', () => {
+    setup();
+
+    const panOnDrag = probe.props?.panOnDrag;
+    const buttons = Array.isArray(panOnDrag) ? panOnDrag : [];
+    expect(buttons).not.toContain(2);
   });
 
   it('Delete 和 Backspace 都能删（macOS 键盘上 Delete 要按 Fn+Backspace）', () => {
@@ -144,6 +163,8 @@ describe('框选多个界面 → 删除', () => {
 
     await act(async () => {
       screen.getByTestId('delete-selection').click();
+      // 让 deleteSelection 里那串 await removeNode 落下来（否则断言跑在请求之前）
+      await Promise.resolve();
     });
 
     expect(removeNode).toHaveBeenCalledTimes(2);
@@ -151,10 +172,10 @@ describe('框选多个界面 → 删除', () => {
     expect(screen.queryByTestId('selection-count')).toBeNull();
   });
 
-  it('Delete 键（xyflow 的 onNodesDelete）走同一条删除路径', async () => {
+  it('Delete 键（xyflow 的 onNodesDelete）走同一条删除路径', () => {
     const { removeNode } = setup();
 
-    await act(async () => {
+    act(() => {
       probe.props?.onNodesDelete?.([{ id: 'n_2' }]);
     });
 
@@ -162,13 +183,13 @@ describe('框选多个界面 → 删除', () => {
     expect(removeNode).toHaveBeenCalledWith(DEVICE, 'n_2');
   });
 
-  it('删的正好是"下方编辑器在编辑的那一个"：编辑器一并收起（否则在编辑一个不存在的界面）', async () => {
+  it('删的正好是"下方编辑器在编辑的那一个"：编辑器一并收起（否则在编辑一个不存在的界面）', () => {
     const { removeNode } = setup();
     act(() => {
       useGraphStore.setState({ selectedNodeId: 'n_1' });
     });
 
-    await act(async () => {
+    act(() => {
       probe.props?.onNodesDelete?.([{ id: 'n_1' }]);
     });
 
@@ -176,10 +197,10 @@ describe('框选多个界面 → 删除', () => {
     expect(useGraphStore.getState().selectedNodeId).toBeNull();
   });
 
-  it('边被删除键删掉时同步到引擎（单独删边那条路）', async () => {
+  it('边被删除键删掉时同步到引擎（单独删边那条路）', () => {
     const { removeEdge } = setup();
 
-    await act(async () => {
+    act(() => {
       probe.props?.onEdgesDelete?.([{ id: 'e_1' }, { id: 'e_2' }]);
     });
 
@@ -190,6 +211,6 @@ describe('框选多个界面 → 删除', () => {
     setup();
 
     expect(screen.getByText(/拖动空白 = 框选多个界面/)).toBeInTheDocument();
-    expect(screen.getByText(/空格\/中键拖动 = 平移画布/)).toBeInTheDocument();
+    expect(screen.getByText(/滚动 \/ 双指滑动 = 平移画布/)).toBeInTheDocument();
   });
 });
