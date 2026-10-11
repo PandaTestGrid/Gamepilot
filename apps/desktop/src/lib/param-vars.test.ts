@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { extractParamsToVariables } from '@/lib/param-vars';
+import { extractParamsToVariables, togglePin } from '@/lib/param-vars';
 
 describe('把参数存成变量', () => {
   it('点击：x/y 抽成变量，动作改成 $引用', () => {
@@ -46,5 +46,34 @@ describe('把参数存成变量', () => {
     const taken = new Set(['点击_X', '点击_Y']);
     const { variables } = extractParamsToVariables({ type: 'click', x: 0.1, y: 0.2 }, '点击', taken);
     expect(Object.keys(variables)).toEqual(['点击_X2', '点击_Y2']);
+  });
+});
+
+describe('引脚上切换 变量/字面量', () => {
+  it('点字面量引脚 → 绑成变量（值取当前数字）', () => {
+    const out = togglePin({ type: 'click', x: 0.42, y: 0.9 }, 'x', { variables: [], name: '步骤1' });
+    expect(out.bound).toBe(true);
+    expect(out.action.x).toBe('$步骤1_x');
+    expect(out.variables['步骤1_x']?.value).toBeCloseTo(0.42);
+  });
+
+  it('点已绑定的引脚 → 拆回字面量（用变量当前值）', () => {
+    const out = togglePin({ type: 'click', x: '$点击X', y: 0.9 }, 'x', {
+      variables: [{ name: '点击X', value: 0.77 }],
+      name: '步骤1',
+    });
+    expect(out.bound).toBe(false);
+    expect(out.action.x).toBeCloseTo(0.77);
+  });
+
+  it('重名自动加序号、非数字引脚不动', () => {
+    const out = togglePin({ type: 'click', x: 0.1 }, 'x', {
+      variables: [{ name: '步骤1_x', value: 1 }],
+      name: '步骤1',
+    });
+    expect(out.action.x).toBe('$步骤1_x2');
+    const text = togglePin({ type: 'click', x: undefined }, 'x', { variables: [], name: '步骤1' });
+    expect(text.bound).toBe(false);
+    expect(text.action.x).toBeUndefined();
   });
 });

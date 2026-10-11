@@ -27,6 +27,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
+import { PIN_KEYS, togglePin } from '@/lib/param-vars';
 import { NodeEditor } from '@/features/graph/NodeEditor';
 import { ScriptStepsView } from '@/features/graph/ScriptStepsView';
 import { VariablesPanel } from '@/features/graph/VariablesPanel';
@@ -35,9 +36,10 @@ import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell } from '@/layout/PanelShell';
 import { RunButton } from '@/layout/RunButton';
+import type { EdgeAction } from '@/types';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
-import { toGraphData } from '@/lib/graph-adapter';
+import { toActionPayload, toGraphData } from '@/lib/graph-adapter';
 import { type EdgeStatus, evaluateEdge, markShadowed } from '@/lib/edge-status';
 import { actionPins, summarizePins, type ActionPin } from '@/lib/action-pins';
 import { describeAction, edgeLabel } from '@/lib/graph-logic';
@@ -49,7 +51,12 @@ interface StateNodeData extends Record<string, unknown> {
   sub: string;
   deviceId: string;
   /** 这个界面的出口操作（选中时摊开成"引脚"） */
-  pins: ReadonlyArray<{ key: string; title: string; pins: readonly ActionPin[] }>;
+  pins: ReadonlyArray<{
+    key: string;
+    title: string;
+    action: EdgeAction;
+    pins: readonly ActionPin[];
+  }>;
   expanded?: boolean;
   visits: number;
   active: boolean;
@@ -62,6 +69,9 @@ function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
   // 选中（或状态机停在这）时摊开这个界面的操作参数 —— 蓝图里的"引脚"，
   // 变量引用会高亮：一眼看出哪一步的参数是"活的"
   const showPins = (data.active || data.expanded) && data.pins.length > 0;
+  const setVariables = useGraphStore((state) => state.setVariables);
+  const saveEdge = useGraphStore((state) => state.saveEdge);
+  const graphVariables = useGraphStore((state) => state.graphs[String(data.deviceId)]?.variables ?? []);
   // 双击就地改名：这是最常用的一次编辑，不该每次都跑到下面的面板
   const updateNode = useGraphStore((state) => state.updateNode);
   const [editing, setEditing] = useState(false);
@@ -125,16 +135,45 @@ function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
           <div key={item.key} className="mt-0.5 flex flex-wrap items-center gap-0.5">
             <span className="text-badge text-dim">{item.title}</span>
             {item.pins.map((pin) => (
-              <span
+              <button
                 key={`${item.key}-${pin.label}`}
+                type="button"
+                onClick={(event) => {
+                  // 点引脚：字面量 ↔ 变量（"这一步的参数是活的"）
+                  event.stopPropagation();
+                  const key = PIN_KEYS[pin.label as keyof typeof PIN_KEYS];
+                  if (!key) {
+                    return;
+                  }
+                  void (async () => {
+                    const result = togglePin(item.action, key, {
+                      variables: graphVariables,
+                      name: String(data.sub ?? '步骤'),
+                    });
+                    if (Object.keys(result.variables).length > 0) {
+                      const merged: Record<string, { type: string; value: string | number | boolean }> = {};
+                      for (const item of graphVariables) {
+                        merged[item.name] = { type: item.type, value: item.value };
+                      }
+                      for (const [name, spec] of Object.entries(result.variables)) {
+                        merged[name] = { type: spec.type, value: spec.value };
+                      }
+                      await setVariables(String(data.deviceId), merged);
+                    }
+                    await saveEdge(String(data.deviceId), item.key, {
+                      action: toActionPayload(result.action),
+                    });
+                  })();
+                }}
                 className={cn(
                   'rounded-sm border px-0.5 text-badge',
                   pin.isVar ? 'border-brand text-brand' : 'border-line text-faint',
+                  'hover:bg-raised',
                 )}
-                title={`${pin.label} = ${pin.value}${pin.isVar ? '（变量）' : ''}`}
+                title={`${pin.label} = ${pin.value}${pin.isVar ? '（变量）' : ''}｜点一下切换：写死 ↔ 变量`}
               >
                 {pin.label}:{pin.value}
-              </span>
+              </button>
             ))}
           </div>
         ))}
@@ -225,6 +264,7 @@ export function GraphPane(): ReactNode {
             .map((edge) => ({
               key: edge.id,
               title: describeAction(edge.actionSpec, true),
+              action: edge.actionSpec,
               pins: summarizePins(actionPins(edge.actionSpec)),
             })),
           visits: node.visits,
