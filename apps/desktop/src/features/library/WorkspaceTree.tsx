@@ -81,7 +81,7 @@ export function WorkspaceTree(): ReactNode {
 
       {groups.map((workspace) => (
         <div key={workspace.name}>
-          <div className="mt-1 flex items-center gap-1 px-2 text-faint">
+          <div className="mt-1 flex h-6 items-center gap-1 px-2 text-faint">
             <span>▾</span>
             <span className="truncate">{workspace.name}</span>
           </div>
@@ -89,7 +89,7 @@ export function WorkspaceTree(): ReactNode {
             const folded = collapsed[project.root] === true;
             return (
               <div key={project.root}>
-                <div className="flex items-center gap-1 px-1 py-0.5 hover:bg-raised">
+                <div className="flex h-6 items-center gap-1 px-1 hover:bg-raised">
                   <button
                     type="button"
                     onClick={() => setCollapsed((current) => ({ ...current, [project.root]: !folded }))}
@@ -98,7 +98,6 @@ export function WorkspaceTree(): ReactNode {
                   >
                     {folded ? '▸' : '▾'}
                   </button>
-                  <span className="shrink-0 text-faint">🗂</span>
                   <span className="min-w-0 flex-1 truncate text-fg">{project.name}</span>
                   <span className="shrink-0 text-faint">{(project.tasks ?? []).length} 张状态图</span>
                   <button
@@ -117,9 +116,9 @@ export function WorkspaceTree(): ReactNode {
                         })();
                       }
                     }}
-                    className="shrink-0 rounded-sm border border-line px-1 text-dim hover:bg-raised hover:text-fg"
+                    className="h-4.5 shrink-0 rounded-sm border border-line px-1 text-dim hover:bg-raised hover:text-fg"
                   >
-                    ＋
+                    ＋状态图
                   </button>
                 </div>
 
@@ -178,7 +177,7 @@ export function WorkspaceTree(): ReactNode {
                 })();
               }
             }}
-            className="w-full px-2 py-0.5 text-left text-faint hover:bg-raised hover:text-fg"
+            className="w-full px-4 py-0.5 text-left text-faint hover:bg-raised hover:text-fg"
           >
             ＋项目
           </button>
