@@ -32,7 +32,8 @@ export function TaskTabs(): ReactNode {
   };
 
   useEffect(() => {
-    void load();
+    // 异步拉：不要同步 setState（会触发级联渲染，lint 会拦）
+    void Promise.resolve().then(load);
     // 依赖 root：引擎握手完成或切换任务后再拉一次
   }, [root]);
 
