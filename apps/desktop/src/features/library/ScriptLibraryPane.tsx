@@ -13,6 +13,7 @@ import { type ReactNode, useEffect, useState } from 'react';
 
 import { ScriptNameForm } from '@/features/library/ScriptNameForm';
 import { ScriptRow } from '@/features/library/ScriptRow';
+import { WorkspaceTree } from '@/features/library/WorkspaceTree';
 import { WelcomeCard } from '@/features/script/WelcomeCard';
 import { GhostButton } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
@@ -132,6 +133,7 @@ export function ScriptLibraryPane(): ReactNode {
       )}
 
       <div className="min-h-0 flex-1 overflow-auto">
+        <WorkspaceTree />
         {items.map((item) => (
           <ScriptRow
             key={item.root}
