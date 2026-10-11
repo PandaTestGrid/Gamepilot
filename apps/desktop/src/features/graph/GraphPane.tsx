@@ -86,6 +86,9 @@ export function GraphPane(): ReactNode {
    * `onNodeDragStop`（一次写图 + 通知引擎），不会每移动一像素就写一次盘。
    */
   const [dragging, setDragging] = useState<Record<string, XYPosition>>({});
+  // 鼠标停在哪条边上：边的线宽是**内联样式**（每条边按状态上色），CSS 的 :hover 盖不住，
+  // 所以悬停反馈只能走 React 状态（顺带能在单测里断言）
+  const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const onNodesChange = useCallback((changes: NodeChange<StateNodeType>[]) => {
     setDragging((current) => {
       let next = current;
@@ -159,6 +162,7 @@ export function GraphPane(): ReactNode {
         // 逐条判断"是不是正在编辑的那条"：以前这里误用了外层那个 selected 对象，
         // 结果是"只要选中了任意一条边，所有边都变粗"
         const selectedEdge = edge.id === selectedEdgeId;
+        const hovered = edge.id === hoveredEdge;
         // 调试用：运行中按"这条边现在走不走得通"上色（逻辑见 lib/edge-status.ts）
         const status = statuses.get(edge.id);
         const color =
@@ -180,8 +184,8 @@ export function GraphPane(): ReactNode {
           animated: false,
           style: {
             stroke: color,
-            // 选中的边加粗：它对应下方编辑器里正在改的那条
-            strokeWidth: selectedEdge ? 2.5 : 1,
+            // 选中（正在编辑）> 悬停（鼠标指到）> 默认，三级粗细
+            strokeWidth: selectedEdge ? 2.5 : hovered ? 2 : 1,
             strokeDasharray: recovery ? '4 3' : undefined,
           },
           labelStyle: { fill: color, fontSize: 11 },
@@ -190,7 +194,7 @@ export function GraphPane(): ReactNode {
         } satisfies Edge;
       });
     // 上色跟着实时状态走，否则运行时边的颜色不会变；选中态也要跟着（编辑器换了一条边）
-  }, [graph, statuses, selectedEdgeId]);
+  }, [graph, statuses, selectedEdgeId, hoveredEdge]);
 
   /** 让底部边编辑器把"动作"区滚进视野（双击边时用）。 */
   const focusEdgeAction = useCallback(() => {
@@ -355,6 +359,8 @@ export function GraphPane(): ReactNode {
                 onNodesChange={onNodesChange}
                 onNodeDragStop={onNodeDragStop}
                 onEdgeClick={(_event, edge) => selectEdge(edge.id === selectedEdgeId ? null : edge.id)}
+                onEdgeMouseEnter={(_event, edge) => setHoveredEdge(edge.id)}
+                onEdgeMouseLeave={() => setHoveredEdge(null)}
                 // 双击边 = 直接进编辑（底部面板会聚焦到动作区）
                 onEdgeDoubleClick={(_event, edge) => {
                   selectEdge(edge.id);

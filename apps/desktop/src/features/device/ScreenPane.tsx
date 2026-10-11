@@ -6,16 +6,17 @@
  * （而且坐标本来就是归一化的，连换算都不需要）。
  */
 import { Grid2x2, MousePointerSquareDashed, ScanLine } from 'lucide-react';
-import { type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 
 import { DeviceControls } from '@/features/device/DeviceControls';
 import { RecordOverlay } from '@/features/device/RecordOverlay';
+import { type GesturePoint, isSwipeGesture } from '@/features/device/touch-gesture';
 import { SCREEN_LAYOUT } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell, StatusDot } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
-import { type Box, canvasRectToPixels, containBox, pointToCanvas } from '@/lib/canvas';
+import { type Box, canvasPointToPixels, canvasRectToPixels, containBox, pointToCanvas } from '@/lib/canvas';
 import { devLog } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { activeDevice, connectedDevices, useDeviceStore } from '@/stores/device.store';
@@ -201,6 +202,28 @@ function EmptyState({ onConnect }: { onConnect: () => void }): ReactNode {
 
 /* --------------------------------------------------------------- 单画面 */
 
+/**
+ * 「录操作」时的触控辅助（不是控制反馈 —— 正常控制画面上必须干干净净）。
+ *
+ * 两种形态**互斥**，同一时刻只画一个：
+ * - `tap`   —— 轻触：落点上一个小圆点 + 一圈从中心荡开的扩散环
+ * - `swipe` —— 滑动：起点实心点 →（虚线）→ 终点空心圈 + 箭头，拖动中落点实时更新
+ *
+ * 只在 `recordActionMode` 为真时出现：这两样东西的用途是"看清这一段会被录成什么"，
+ * 正常控制时它们只是糊在投屏上的杂物（用户明确要求过：正常控制一个辅助都不要）。
+ *
+ * 为什么强调互斥：曾经是"按下闪一个 + 抬手闪一个"，滑动时就成了**两个分开的点击**，
+ * 用户看到的是"我点歪了两下"，而实际发生的是"从 A 滑到 B"。
+ */
+type TouchFeedbackDraft =
+  | { readonly kind: 'tap'; readonly point: GesturePoint }
+  | { readonly kind: 'swipe'; readonly from: GesturePoint; readonly to: GesturePoint };
+
+type TouchFeedback = TouchFeedbackDraft & { readonly id: number };
+
+/** 辅助在画面上停留多久（ms）：和 `animate-touch-ping` 的时长一致，扩散环播完即收。 */
+const FEEDBACK_TTL_MS = 520;
+
 function SingleScreen({
   deviceId,
   deviceName,
@@ -225,8 +248,49 @@ function SingleScreen({
   // 控制模式下的鼠标操作：按下→抬起是轻触，拖拽是滑动
   const controlStart = useRef<{ x: number; y: number; at: number; moved: boolean } | null>(null);
   const lastMoveAt = useRef(0);
-  // 反馈点存的是**画面归一化坐标**，渲染时要换算成容器像素（否则有黑边时看起来是偏的）
-  const [ripple, setRipple] = useState<{ x: number; y: number; id: number } | null>(null);
+  // 触控反馈存的是**画面归一化坐标**，渲染时要换算成容器像素（否则有黑边时看起来是偏的）
+  const [feedback, setFeedback] = useState<TouchFeedback | null>(null);
+  const feedbackSeq = useRef(0);
+  const feedbackTimer = useRef<number | null>(null);
+
+  /**
+   * 画一次触控反馈（同一时刻只画一个）。
+   *
+   * 这里是"滑动被画成两个点击"那个 bug 的关键：反馈是**互斥**的两种形态，
+   * 抬手时不能在终点再补一个波纹 —— 起点一个 + 终点一个，看起来就是点歪了两下。
+   */
+  const showFeedback = (next: TouchFeedbackDraft): void => {
+    feedbackSeq.current += 1;
+    const id = feedbackSeq.current;
+    const value: TouchFeedback = { ...next, id };
+    if (feedbackTimer.current !== null) {
+      window.clearTimeout(feedbackTimer.current);
+    }
+    setFeedback(value);
+    feedbackTimer.current = window.setTimeout(() => {
+      feedbackTimer.current = null;
+      setFeedback((current) => (current?.id === id ? null : current));
+    }, FEEDBACK_TTL_MS);
+  };
+
+  /** 立刻收掉反馈（拖动开始时要把"按下那一下"的波纹抹掉，正常控制不给滑动留痕迹）。 */
+  const clearFeedback = (): void => {
+    if (feedbackTimer.current !== null) {
+      window.clearTimeout(feedbackTimer.current);
+      feedbackTimer.current = null;
+    }
+    setFeedback(null);
+  };
+
+  // 卸载时把定时器收掉：换设备/关面板后不该再有 setState
+  useEffect(
+    () => () => {
+      if (feedbackTimer.current !== null) {
+        window.clearTimeout(feedbackTimer.current);
+      }
+    },
+    [],
+  );
 
   // 画面的实际显示矩形（容器相对坐标）：object-contain 会有黑边，控制坐标只按画面算
   const [imageBox, setImageBox] = useState<Box | null>(null);
@@ -293,11 +357,6 @@ function SingleScreen({
     };
   };
 
-  const flashRipple = (x: number, y: number): void => {
-    const id = Date.now();
-    setRipple({ x, y, id });
-    window.setTimeout(() => setRipple((current) => (current?.id === id ? null : current)), 450);
-  };
   const [selection, setSelection] = useState<[number, number, number, number] | null>(null);
   const dragStart = useRef<[number, number] | null>(null);
   const [pointer, setPointer] = useState<[number, number] | null>(null);
@@ -419,16 +478,31 @@ function SingleScreen({
         controlStart.current = { x: point[0], y: point[1], at: performance.now(), moved: false };
         recordStart.current = { x: point[0], y: point[1], at: performance.now() };
         lastMoveAt.current = 0;
-        flashRipple(point[0], point[1]);
+        // 按下先闪一下：手感反馈不等抬手（这一下是点还是滑，要拖出去才知道）。
+        // 只有录操作时才画 —— 正常控制不给投屏加任何东西
+        if (recordActionMode) {
+          showFeedback({ kind: 'tap', point });
+        }
         touchDevice(deviceId, 'down', point[0], point[1]);
       }}
       onPointerMove={(event) => {
-        if (!controlStart.current) {
+        const start = controlStart.current;
+        if (!start) {
           return;
         }
         const point = toCanvas(event.clientX, event.clientY, true);
         if (!point) {
           return;
+        }
+        // 手势判定用**合位移**，不是"有没有 move 事件"：轻触时手抖 1px 也会发 move，
+        // 按 move 判会把所有轻触都误判成滑动
+        if (!start.moved && isSwipeGesture([start.x, start.y], point)) {
+          start.moved = true;
+          // 从"按一下"变成"拖出去"了：正常控制下把按下那个波纹收掉 ——
+          // 画面要干净，滑动不留在投屏上（只有录操作时才画轨迹）
+          if (!recordActionMode) {
+            clearFeedback();
+          }
         }
         // 实时滑动：拖动过程中直接转发 move（约 60Hz 限频），不是松手后合成一次滑动
         const now = performance.now();
@@ -436,8 +510,11 @@ function SingleScreen({
           return;
         }
         lastMoveAt.current = now;
-        controlStart.current.moved = true;
         touchDevice(deviceId, 'move', point[0], point[1]);
+        if (start.moved && recordActionMode) {
+          // 轨迹跟着指针走：起点不动、落点实时更新 —— 一眼看出"这一段会被录成滑动"
+          showFeedback({ kind: 'swipe', from: [start.x, start.y], to: point });
+        }
       }}
       onPointerUp={(event) => {
         const start = controlStart.current;
@@ -446,15 +523,30 @@ function SingleScreen({
           return;
         }
         const point = toCanvas(event.clientX, event.clientY, true) ?? [start.x, start.y];
-        flashRipple(point[0], point[1]);
+        const from: GesturePoint = [start.x, start.y];
+        const swipe = isSwipeGesture(from, point);
+        if (recordActionMode) {
+          // 录操作：手指抬起来了，画面上留一份"这一段会录成什么"的辅助 ——
+          // 轻触 = 落点上的点击标记，滑动 = 停在终点的轨迹（**不补第二个点击标记**，
+          // 起点一个 + 终点一个就是"一次滑动看起来像点了两下"的根因）
+          showFeedback(swipe ? { kind: 'swipe', from, to: point } : { kind: 'tap', point });
+        } else {
+          // 正常控制：画面上不留任何痕迹（辅助只在录操作时出现）
+          clearFeedback();
+        }
+        // 诊断：手势的判定结果（和画面上看到的反馈必须一致）
+        devLog(
+          `控制: 手势=${swipe ? '滑动' : '轻触'} (${from[0].toFixed(3)},${from[1].toFixed(3)})` +
+            ` → (${point[0].toFixed(3)},${point[1].toFixed(3)})`,
+        );
         touchDevice(deviceId, 'up', point[0], point[1]);
-        // 录操作：抬手时把这一个手势写成脚本里的一步（点了=click，拖了=swipe）
+        // 录操作：抬手时把这一个手势写成脚本里的一步（点了=click，拖了=swipe）。
+        // 判定用上面同一个 `swipe`：画面上画成什么样，录下来就是什么样
         const origin = recordStart.current;
         recordStart.current = null;
         if (recordActionMode && origin) {
           const durationMs = Math.round(performance.now() - origin.at);
-          const moved = Math.hypot(point[0] - origin.x, point[1] - origin.y) > 0.012;
-          if (moved) {
+          if (swipe) {
             void recordStep(deviceId, {
               type: 'swipe',
               x: Number(origin.x.toFixed(4)),
@@ -476,9 +568,11 @@ function SingleScreen({
         const start = controlStart.current;
         controlStart.current = null;
         if (start) {
+          // 已发出的 move 收个尾；画面上的轨迹不用管，它自己会过期消失
           touchDevice(deviceId, 'up', start.x, start.y);
         }
       }}
+      data-testid="screen-viewport"
       className={cn(
         'relative min-h-0 w-full flex-1 border border-line bg-[#0b0d12]',
         (recordMode !== 'off' || controlMode) && 'cursor-crosshair',
@@ -520,21 +614,26 @@ function SingleScreen({
         />
       )}
 
-      {/* 触控反馈：点下去在画面上闪一下，能直观确认"点到了哪里" */}
-      {ripple && (
+      {/* 录操作辅助（两种形态互斥，**只有录操作时才画**；正常控制一个都不画）：
+          轻触 = 落点上的小圆点 + 一圈从中心荡开的扩散环（抬手再播一次 = "这一下录进去了"）；
+          滑动 = 起点实心点 → 虚线 → 终点空心圈 + 箭头（"这一段会被录成 swipe"）。
+          **滑动抬手时绝不补点击标记** —— 否则一次滑动会画出两个"点击" */}
+      {feedback?.kind === 'tap' && (
         <span
-          key={ripple.id}
-          className="pointer-events-none absolute size-8 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full border-2 border-brand/80 bg-brand/15"
-          style={
-            imageBox
-              ? {
-                  // 归一化 → 容器像素：画在"手机真正收到触摸的位置"上
-                  left: imageBox.left + ripple.x * imageBox.width,
-                  top: imageBox.top + ripple.y * imageBox.height,
-                }
-              : { left: `${ripple.x * 100}%`, top: `${ripple.y * 100}%` }
-          }
-        />
+          key={feedback.id}
+          data-testid="touch-tap"
+          className="pointer-events-none absolute animate-touch-fade"
+          style={feedbackPointStyle(imageBox, feedback.point)}
+        >
+          {/* 扩散环：位移和缩放都在 keyframes 里（动画会盖掉 transform 工具类） */}
+          <span className="absolute animate-touch-ping rounded-full border-2 border-brand size-7" />
+          {/* 中心点：真正的落点。带一圈暗色描边，压在亮画面上也看得清 */}
+          <span className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand ring-2 ring-canvas/55 size-[7px]" />
+        </span>
+      )}
+      {feedback?.kind === 'swipe' && imageBox && (
+        // 不给 key：拖动中每一步都在更新落点，重挂 SVG 是白扔性能（改属性就够）
+        <SwipeTrail from={feedback.from} to={feedback.to} box={imageBox} />
       )}
 
       {/* 画面角标：一眼看出"有没有帧、多大、多少帧率"。排查"看不见画面"时这是最直接的证据 */}
@@ -620,6 +719,96 @@ function SingleScreen({
 
       {draft && imageBox && <RecordOverlay deviceId={deviceId} anchor={selectionViewportRect(draft.rect)} />}
     </div>
+  );
+}
+
+/**
+ * 反馈点的绝对定位：按**实际画面区域**换算（有黑边时用容器百分比会飘到黑边上）。
+ * 画面还没量出来时退回容器百分比：宁可偏一点，也别"点了完全没反馈"。
+ */
+function feedbackPointStyle(box: Box | null, point: GesturePoint): CSSProperties {
+  const pixels = canvasPointToPixels(box, point);
+  return pixels
+    ? { left: pixels.left, top: pixels.top }
+    : { left: `${point[0] * 100}%`, top: `${point[1] * 100}%` };
+}
+
+/**
+ * 滑动轨迹（**只在录操作时出现**）：起点实心点 → 虚线 → 终点空心圈 + 方向箭头。
+ *
+ * 用一条"从这里滑到那里"的轨迹，而不是两个点：点和点的组合传达的是**两次点击**，
+ * 轨迹传达的才是**一次滑动**。拖动过程中落点实时更新，所以看得见自己滑了多远。
+ *
+ * 两处样式上的讲究：
+ * - 每个形状都先铺一层**暗色垫层**：投屏内容可能是白底/亮色，单画蓝线会糊在画面里；
+ * - 终点带一个顺着方向的**箭头**：滑动的"方向"是它和点击最大的区别，必须一眼看出来。
+ */
+function SwipeTrail({ from, to, box }: { from: GesturePoint; to: GesturePoint; box: Box }): ReactNode {
+  const start = canvasPointToPixels(box, from);
+  const end = canvasPointToPixels(box, to);
+  if (!start || !end) {
+    return null;
+  }
+  const dx = end.left - start.left;
+  const dy = end.top - start.top;
+  const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+  // 太短的轨迹不放箭头：箭头会盖在两个圆点上，反而看不清（刚过阈值的滑动就属于这种）
+  const arrow = Math.hypot(dx, dy) > 34;
+  const arrowPath = 'M 0 -4.5 L 8.5 0 L 0 4.5 Z';
+  const arrowAt = `translate(${end.left} ${end.top}) rotate(${angle}) translate(15 0)`;
+  return (
+    <svg
+      data-testid="touch-swipe"
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 h-full w-full text-brand"
+    >
+      {/* 暗色垫层（比本体粗一圈）：保证在亮画面上也看得清 */}
+      <line
+        x1={start.left}
+        y1={start.top}
+        x2={end.left}
+        y2={end.top}
+        className="stroke-canvas"
+        strokeOpacity={0.5}
+        strokeWidth={5}
+        strokeLinecap="round"
+      />
+      <circle
+        cx={start.left}
+        cy={start.top}
+        r={6.5}
+        className="stroke-canvas"
+        strokeOpacity={0.5}
+        strokeWidth={3}
+        fill="none"
+      />
+      <circle
+        cx={end.left}
+        cy={end.top}
+        r={11.5}
+        className="stroke-canvas"
+        strokeOpacity={0.5}
+        strokeWidth={3}
+        fill="none"
+      />
+      {arrow && <path d={arrowPath} transform={arrowAt} className="fill-canvas" fillOpacity={0.5} />}
+
+      {/* 本体：起点实心点 → 虚线 → 终点空心圈 */}
+      <line
+        data-testid="touch-swipe-line"
+        x1={start.left}
+        y1={start.top}
+        x2={end.left}
+        y2={end.top}
+        className="stroke-brand"
+        strokeWidth={2}
+        strokeDasharray="6 5"
+        strokeLinecap="round"
+      />
+      <circle cx={start.left} cy={start.top} r={5} className="fill-brand" />
+      <circle cx={end.left} cy={end.top} r={10} className="stroke-brand" strokeWidth={2.5} fill="none" />
+      {arrow && <path d={arrowPath} transform={arrowAt} className="fill-brand" />}
+    </svg>
   );
 }
 

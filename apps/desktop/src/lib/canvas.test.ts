@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { containBox, pointToCanvas, canvasRectToPixels } from '@/lib/canvas';
+import { containBox, pointToCanvas, canvasPointToPixels, canvasRectToPixels } from '@/lib/canvas';
 
 describe('画面坐标换算', () => {
   it('竖屏画面放进横容器：两侧留黑边，画面矩形居中', () => {
@@ -99,5 +99,30 @@ describe('canvasRectToPixels（画面矩形 → 容器像素）', () => {
   it('没有画面区域时返回 null（还没量出画面就别画）', () => {
     expect(canvasRectToPixels(null, [0, 0, 1, 1])).toBeNull();
     expect(canvasRectToPixels({ left: 0, top: 0, width: 0, height: 0 }, [0, 0, 1, 1])).toBeNull();
+  });
+});
+
+describe('canvasPointToPixels（画面归一化点 → 容器像素）', () => {
+  const box = { left: 148, top: 0, width: 353, height: 766 };
+
+  it('触控反馈点落在画面上，而不是容器里的百分比位置', () => {
+    expect(canvasPointToPixels(box, [0.5, 0.5])).toEqual({ left: 148 + 0.5 * 353, top: 0.5 * 766 });
+    // 画面左边缘 = 黑边右边，不是容器左边
+    expect(canvasPointToPixels(box, [0, 0])).toEqual({ left: 148, top: 0 });
+    expect(canvasPointToPixels(box, [1, 1])).toEqual({ left: 148 + 353, top: 766 });
+  });
+
+  it('和 pointToCanvas 互为逆运算（波纹画在手指真正点到的地方）', () => {
+    const pixels = canvasPointToPixels(box, [0.412, 0.536]);
+    expect(pixels).not.toBeNull();
+    if (!pixels) return;
+    const back = pointToCanvas(box, { x: pixels.left, y: pixels.top }, false);
+    expect(back?.[0]).toBeCloseTo(0.412, 10);
+    expect(back?.[1]).toBeCloseTo(0.536, 10);
+  });
+
+  it('没有画面区域时返回 null（宁可什么都不画，也不要画在黑边上）', () => {
+    expect(canvasPointToPixels(null, [0.5, 0.5])).toBeNull();
+    expect(canvasPointToPixels({ left: 0, top: 0, width: 0, height: 0 }, [0.5, 0.5])).toBeNull();
   });
 });

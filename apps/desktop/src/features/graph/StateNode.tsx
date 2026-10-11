@@ -48,7 +48,12 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
   const showPins = (data.active || data.expanded) && data.pins.length > 0;
   const setVariables = useGraphStore((state) => state.setVariables);
   const saveEdge = useGraphStore((state) => state.saveEdge);
-  const graphVariables = useGraphStore((state) => state.graphs[String(data.deviceId)]?.variables ?? []);
+  /*
+   * ⚠️ selector 里**不能**写 `?? []`：那样每次 getSnapshot 都返回新数组，
+   * useSyncExternalStore 会认为状态一直在变 → 无限重渲染（"Maximum update depth exceeded"，
+   * 图还没加载完时就会撞上）。先取稳定的 graph 对象，空值在组件里兜。
+   */
+  const graphVariables = useGraphStore((state) => state.graphs[String(data.deviceId)])?.variables ?? [];
   // 双击就地改名：这是最常用的一次编辑，不该每次都跑到下面的面板
   const updateNode = useGraphStore((state) => state.updateNode);
   const [editing, setEditing] = useState(false);
@@ -58,7 +63,8 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
     setEditing(false);
     const name = draft.trim();
     if (name && name !== data.label) {
-      void updateNode(String(data.deviceId), String(data.id), { name });
+      // 节点 id 放在 data.sub 里（data 上没有 id 字段）：写成 data.id 会传成 "undefined"，改名静默失效
+      void updateNode(String(data.deviceId), data.sub, { name });
     } else {
       setDraft(data.label);
     }
@@ -66,6 +72,8 @@ export function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
 
   return (
     <div
+      // data-testid：单测直接拿整张卡片断言描边/底色（比从文字往上找稳妥）
+      data-testid="state-node"
       className={cn(
         // group：悬停卡片时，连线圆点跟着变亮（不然 10px 的点很难瞄准）
         'group relative w-[132px] rounded-sm border bg-panel px-2 py-1',

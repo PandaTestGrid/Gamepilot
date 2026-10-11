@@ -26,7 +26,8 @@ export function TemplateThumb({ label, size = 26 }: { label: string; size?: numb
     let alive = true;
     void templateImage(label, grayscale)
       .then((data) => {
-        const url = typeof data === 'string' ? data : String((data as { image?: string })?.image ?? '');
+        // 引擎返回 { label, mode, width, height, png }：图片在 png 字段（data URL）
+        const url = typeof data === 'string' ? data : String((data as { png?: string })?.png ?? '');
         if (alive && url) {
           setCache((current) => ({ ...current, [key]: url }));
         } else if (alive) {

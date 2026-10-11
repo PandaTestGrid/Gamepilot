@@ -17,8 +17,15 @@ import { useGraphStore } from '@/stores/graph.store';
 
 const probe = vi.hoisted(() => ({
   props: null as null | {
-    nodes: Array<{ id: string; position: { x: number; y: number } }>;
+    nodes: Array<{
+      id: string;
+      position: { x: number; y: number };
+      data: { expanded?: boolean; active?: boolean };
+    }>;
+    edges: Array<{ id: string; selected?: boolean; style?: { strokeWidth?: number } }>;
     onNodesChange: (changes: unknown[]) => void;
+    onEdgeMouseEnter: (event: unknown, edge: { id: string }) => void;
+    onEdgeMouseLeave: () => void;
   },
 }));
 
@@ -166,20 +173,44 @@ describe('状态图拖动', () => {
       pendingNodeId: null,
     });
 
+    // 选节点（节点与边是互斥的：下方编辑器一次只显示一个）
     act(() => {
       useGraphStore.getState().selectNode('n2');
-      useGraphStore.getState().selectEdge('e2');
     });
     render(<GraphPane />);
 
     const nodes = probe.props?.nodes ?? [];
     expect(nodes.find((node) => node.id === 'n2')?.data.expanded).toBe(true);
     expect(nodes.find((node) => node.id === 'n1')?.data.expanded).toBe(false);
+    // 没选边时所有边都是细线
+    const thin = probe.props?.edges ?? [];
+    expect(thin).toHaveLength(2);
+    for (const edge of thin) {
+      expect(edge.style?.strokeWidth).toBe(1);
+    }
+
+    // 再选一条边：只有它加粗（逐条判断；曾经误用外层 selected，结果"选一条全部变粗"）
+    act(() => {
+      useGraphStore.getState().selectEdge('e2');
+    });
 
     const edges = probe.props?.edges ?? [];
     expect(edges.find((edge) => edge.id === 'e2')).toMatchObject({ selected: true });
     expect(edges.find((edge) => edge.id === 'e2')?.style?.strokeWidth).toBe(2.5);
-    // 另一条边**不能**跟着变粗（逐条判断；曾经误用外层 selected，结果"选一条全部变粗"）
     expect(edges.find((edge) => edge.id === 'e1')?.style?.strokeWidth).toBe(1);
+    expect(edges.find((edge) => edge.id === 'e1')).toMatchObject({ selected: false });
+
+    // 悬停也要有反馈：线宽 1 → 2（CSS 盖不住内联样式，所以走 React 状态）
+    act(() => {
+      probe.props?.onEdgeMouseEnter(null, { id: 'e1' });
+    });
+    const hovered = probe.props?.edges ?? [];
+    expect(hovered.find((edge) => edge.id === 'e1')?.style?.strokeWidth).toBe(2);
+    expect(hovered.find((edge) => edge.id === 'e2')?.style?.strokeWidth).toBe(2.5); // 选中的仍然最粗
+
+    act(() => {
+      probe.props?.onEdgeMouseLeave();
+    });
+    expect((probe.props?.edges ?? []).find((edge) => edge.id === 'e1')?.style?.strokeWidth).toBe(1);
   });
 });

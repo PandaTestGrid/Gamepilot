@@ -113,6 +113,35 @@
   --height-panelhead: 28px;
   --height-row: 26px;
   --height-statusbar: 24px;
+
+  /*
+   * 画面栏「录操作」时的点击辅助：中心点 + 从中心荡开的一圈。
+   * 单次播完停住（forwards）—— 什么时候移除由反馈状态（TTL）决定，不靠动画循环。
+   */
+  --animate-touch-ping: touch-ping 520ms cubic-bezier(0.16, 0.84, 0.44, 1) forwards;
+  /* 整枚标记的收尾淡出：中心点不能"啪"地消失（和 touch-ping 同时长） */
+  --animate-touch-fade: touch-fade 520ms linear forwards;
+}
+
+@keyframes touch-ping {
+  from {
+    transform: translate(-50%, -50%) scale(0.45);
+    opacity: 0.95;
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1.9);
+    opacity: 0;
+  }
+}
+
+@keyframes touch-fade {
+  0%,
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
 @layer base {

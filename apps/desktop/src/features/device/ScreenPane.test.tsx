@@ -1,0 +1,260 @@
+/**
+ * 画面栏控制手势的**反馈**测试。
+ *
+ * 守的是一个真实 bug：滑动（按下 → 拖出去 → 抬手）原来会画出**两个点击波纹** ——
+ * 起点闪一个、抬手在终点再闪一个，看起来像"我点歪了两下"，
+ * 而实际发生的是一次滑动。现在的规则：
+ *
+ * - 轻触：按下闪波纹，抬手在同一个位置再闪一下（"点进去了"）
+ * - 滑动：**不补波纹**；轨迹（起点实心点 → 终点空心圈）只在「录操作」开着时画 ——
+ *   那是"这一段会被录成 swipe"的预览，正常控制滑完不留痕迹
+ *
+ * 另外守住"画面反馈"和"录操作"用同一把尺子：画成滑动，录下来就必须是 swipe。
+ */
+import { act, fireEvent, render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { ScreenPane } from '@/features/device/ScreenPane';
+import { useDeviceStore } from '@/stores/device.store';
+import { useSessionStore, type FrameState } from '@/stores/session.store';
+import { useUiStore } from '@/stores/ui.store';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve({})) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => undefined)) }));
+
+const DEVICE = 'mock:1';
+const DEVICE_NAME = 'Mock 竖屏';
+/**
+ * 画面 720x1280（竖屏）放进 400x640 的容器：等比缩放后画面是 360x640，
+ * 左右各 20px 黑边。**故意留黑边** —— 反馈点必须按画面算，不能按容器百分比。
+ */
+const CONTAINER = { width: 400, height: 640 };
+const IMAGE = { width: 720, height: 1280 };
+const IMAGE_LEFT = 20;
+
+function frameAt(index: number): FrameState {
+  return {
+    imageUrl: 'data:image/jpeg;base64,AAAA',
+    index,
+    resolution: [IMAGE.width, IMAGE.height],
+    node: null,
+    pending: null,
+    tick: 0,
+    fps: 12,
+    captureMs: 1,
+    detections: [],
+    ts: 0,
+  };
+}
+
+/** 按真实签名打桩（`session.store.touch` / `recordStep`）：断言里才不用碰 any。 */
+type TouchMock = (deviceId: string, phase: string, x: number, y: number) => void;
+type RecordStepMock = (deviceId: string, action: Record<string, unknown>) => Promise<string | null>;
+
+/** 每测试一条独立用例：都从"控制开着、没在录制"开始。 */
+function renderScreen(options: { recordAction?: boolean } = {}): {
+  viewport: HTMLElement;
+  touch: ReturnType<typeof vi.fn<TouchMock>>;
+  recordStep: ReturnType<typeof vi.fn<RecordStepMock>>;
+} {
+  const touch = vi.fn<TouchMock>(() => undefined);
+  const recordStep = vi.fn<RecordStepMock>(() => Promise.resolve('e_1'));
+  useSessionStore.setState({
+    ready: { [DEVICE]: true },
+    frames: { [DEVICE]: frameAt(1) },
+    touch,
+    recordStep,
+  });
+  useDeviceStore.setState({
+    activeId: DEVICE,
+    gridView: false,
+    devices: [
+      {
+        id: DEVICE,
+        name: DEVICE_NAME,
+        uri: 'mock:1',
+        kind: 'mock',
+        status: 'connected',
+        resolution: [IMAGE.width, IMAGE.height],
+        fps: 12,
+      },
+    ],
+  });
+  useUiStore.setState({
+    controlMode: true,
+    recordMode: 'off',
+    recordActionMode: options.recordAction ?? false,
+    draft: null,
+  });
+
+  render(<ScreenPane />);
+
+  // 把容器尺寸和画面尺寸喂给组件：jsdom 没有布局，`object-contain` 的换算得手工指定
+  const viewport = screen.getByTestId('screen-viewport');
+  viewport.getBoundingClientRect = () =>
+    ({
+      left: 0,
+      top: 0,
+      ...CONTAINER,
+      right: CONTAINER.width,
+      bottom: CONTAINER.height,
+      x: 0,
+      y: 0,
+    }) as DOMRect;
+  const img = screen.getByAltText(`${DEVICE_NAME} 实时画面`);
+  Object.defineProperty(img, 'naturalWidth', { value: IMAGE.width, configurable: true });
+  Object.defineProperty(img, 'naturalHeight', { value: IMAGE.height, configurable: true });
+  // 帧号变化 → 触发一次量测（真实环境里由 ResizeObserver / 新帧驱动；jsdom 里是空实现）
+  act(() => {
+    useSessionStore.setState({ frames: { [DEVICE]: frameAt(2) } });
+  });
+
+  return { viewport, touch, recordStep };
+}
+
+/** 一次滑动：按下 → 拖两步（隔开 20ms 绕开 16ms 限频）→ 抬手。 */
+async function swipe(viewport: HTMLElement, from: Point, to: Point): Promise<void> {
+  fireEvent.pointerDown(viewport, { clientX: from.x, clientY: from.y, pointerId: 1, button: 0 });
+  fireEvent.pointerMove(viewport, {
+    clientX: (from.x + to.x) / 2,
+    clientY: (from.y + to.y) / 2,
+    pointerId: 1,
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  fireEvent.pointerMove(viewport, { clientX: to.x, clientY: to.y, pointerId: 1 });
+  fireEvent.pointerUp(viewport, { clientX: to.x, clientY: to.y, pointerId: 1 });
+}
+
+interface Point {
+  readonly x: number;
+  readonly y: number;
+}
+
+/** 画面归一化点 → 容器像素（和组件里的换算同一套：画面区域 360x640，左边 20px 黑边）。 */
+function pixel(x: number, y: number): Point {
+  return { x: IMAGE_LEFT + x * (CONTAINER.width - IMAGE_LEFT * 2), y: y * CONTAINER.height };
+}
+
+describe('画面栏控制手势的反馈', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ ready: {}, frames: {}, touch: vi.fn(), recordStep: vi.fn() });
+  });
+
+  it('录操作·轻触：按下就有点击标记（落在画面坐标上，不是容器百分比）', () => {
+    const { viewport } = renderScreen({ recordAction: true });
+
+    fireEvent.pointerDown(viewport, { clientX: 110, clientY: 320, pointerId: 1, button: 0 });
+
+    // (110, 320) → 归一化 (0.25, 0.5) → 画回画面像素还是 (110, 320)：黑边没参与换算
+    expect(screen.getByTestId('touch-tap')).toHaveStyle({ left: '110px', top: '320px' });
+    expect(screen.queryByTestId('touch-swipe')).toBeNull();
+  });
+
+  it('录操作·轻触抬手：还是那一个标记（同一个位置），没有轨迹', () => {
+    const { viewport, touch } = renderScreen({ recordAction: true });
+
+    fireEvent.pointerDown(viewport, { clientX: 110, clientY: 320, pointerId: 1, button: 0 });
+    fireEvent.pointerUp(viewport, { clientX: 110, clientY: 320, pointerId: 1 });
+
+    expect(screen.getAllByTestId('touch-tap')).toHaveLength(1);
+    expect(screen.getByTestId('touch-tap')).toHaveStyle({ left: '110px', top: '320px' });
+    expect(screen.queryByTestId('touch-swipe')).toBeNull();
+    expect(touch.mock.calls.map((call) => call[1])).toEqual(['down', 'up']);
+  });
+
+  it('正常控制：**一个辅助都不画**（轻触/滑动都没有），但手势照常发给设备', async () => {
+    const { viewport, touch } = renderScreen();
+
+    // 轻触：按下、抬手都不画
+    fireEvent.pointerDown(viewport, { clientX: 110, clientY: 320, pointerId: 1, button: 0 });
+    expect(screen.queryByTestId('touch-tap')).toBeNull();
+    fireEvent.pointerUp(viewport, { clientX: 110, clientY: 320, pointerId: 1 });
+    expect(screen.queryByTestId('touch-tap')).toBeNull();
+    expect(screen.queryByTestId('touch-swipe')).toBeNull();
+
+    // 滑动：同样什么都不画
+    await swipe(viewport, pixel(0.25, 0.16), pixel(0.75, 0.78));
+    expect(screen.queryByTestId('touch-tap')).toBeNull();
+    expect(screen.queryByTestId('touch-swipe')).toBeNull();
+
+    // 控制本身不受影响（画面上不画 ≠ 不控制）
+    const phases = touch.mock.calls.map((call) => call[1]);
+    expect(phases[0]).toBe('down');
+    expect(phases).toContain('move');
+    expect(phases.at(-1)).toBe('up');
+    expect(phases.filter((phase) => phase === 'up')).toHaveLength(2);
+  });
+
+  it('录操作·滑动：轨迹（起点→落点）带方向箭头，抬手后停在终点', async () => {
+    const { viewport } = renderScreen({ recordAction: true });
+    const start = pixel(0.25, 0.16);
+    const end = pixel(0.75, 0.78);
+
+    await swipe(viewport, start, end);
+
+    const trail = screen.getByTestId('touch-swipe');
+    const line = trail.querySelector('[data-testid="touch-swipe-line"]');
+    expect(line).toHaveAttribute('x1', String(start.x));
+    expect(line).toHaveAttribute('y1', String(start.y));
+    expect(line).toHaveAttribute('x2', String(end.x));
+    expect(line).toHaveAttribute('y2', String(end.y));
+    // 方向箭头：终点处按滑动方向旋转（向左下 → atan2(500-100, 290-110) ≈ 65.8°）
+    const arrow = trail.querySelector('path');
+    expect(arrow?.getAttribute('transform')).toContain(
+      `rotate(${(Math.atan2(end.y - start.y, end.x - start.x) * 180) / Math.PI})`,
+    );
+    // 滑动过程中点击标记已被轨迹取代：不是"起点一个点 + 终点一个点"
+    expect(screen.queryByTestId('touch-tap')).toBeNull();
+  });
+
+  it('录操作·滑动抬手：**不会** 在终点再补一个点击标记（原 bug）', async () => {
+    const { viewport, touch } = renderScreen({ recordAction: true });
+    const start = pixel(0.25, 0.16);
+    const end = pixel(0.75, 0.78);
+
+    await swipe(viewport, start, end);
+
+    expect(screen.queryByTestId('touch-tap')).toBeNull();
+    const line = screen.getByTestId('touch-swipe-line');
+    expect(line).toHaveAttribute('x2', String(end.x));
+    expect(line).toHaveAttribute('y2', String(end.y));
+
+    const phases = touch.mock.calls.map((call) => call[1]);
+    expect(phases[0]).toBe('down');
+    expect(phases).toContain('move');
+    expect(phases.at(-1)).toBe('up');
+  });
+
+  it('录操作·手抖 1~2px 不算滑动：还是一枚点击标记，不出轨迹', async () => {
+    const { viewport } = renderScreen({ recordAction: true });
+    const start = pixel(0.5, 0.5);
+
+    fireEvent.pointerDown(viewport, { clientX: start.x, clientY: start.y, pointerId: 1, button: 0 });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    fireEvent.pointerMove(viewport, { clientX: start.x + 1, clientY: start.y + 1, pointerId: 1 });
+    fireEvent.pointerUp(viewport, { clientX: start.x + 1, clientY: start.y + 1, pointerId: 1 });
+
+    expect(screen.getAllByTestId('touch-tap')).toHaveLength(1);
+    expect(screen.queryByTestId('touch-swipe')).toBeNull();
+  });
+
+  it('录操作：画成滑动就录成 swipe，画成轻触就录成 click（同一把尺子）', async () => {
+    const { viewport, recordStep } = renderScreen({ recordAction: true });
+
+    await swipe(viewport, pixel(0.5, 0.8), pixel(0.5, 0.2));
+
+    const swipeCall = recordStep.mock.calls.at(-1);
+    expect(swipeCall?.[0]).toBe(DEVICE);
+    expect(swipeCall?.[1]).toMatchObject({ type: 'swipe', x: 0.5, y: 0.8, to_x: 0.5, to_y: 0.2 });
+    expect(typeof swipeCall?.[1].duration_ms).toBe('number');
+
+    fireEvent.pointerDown(viewport, { clientX: 110, clientY: 320, pointerId: 1, button: 0 });
+    fireEvent.pointerUp(viewport, { clientX: 110, clientY: 320, pointerId: 1 });
+
+    expect(recordStep).toHaveBeenLastCalledWith(DEVICE, { type: 'click', x: 0.25, y: 0.5 });
+  });
+});

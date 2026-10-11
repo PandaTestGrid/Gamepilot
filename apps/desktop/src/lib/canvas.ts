@@ -70,6 +70,25 @@ export interface PixelRect {
   readonly height: number;
 }
 
+/** 容器像素点（绝对定位 `left/top` 直接用这两个值）。 */
+export interface PixelPoint {
+  readonly left: number;
+  readonly top: number;
+}
+
+/**
+ * **画面归一化点 → 容器像素点**：画"手指按/滑在哪里"这类反馈用。
+ *
+ * 和 `canvasRectToPixels` 同一条规矩 —— 必须按**实际画出来的画面区域**换算。
+ * 有黑边时用容器百分比画反馈点，点会落在黑边上（"我明明点的这里，波纹却飘了"）。
+ */
+export function canvasPointToPixels(box: Box | null, point: readonly [number, number]): PixelPoint | null {
+  if (!box || box.width <= 0 || box.height <= 0) {
+    return null;
+  }
+  return { left: box.left + point[0] * box.width, top: box.top + point[1] * box.height };
+}
+
 /**
  * **画面归一化矩形 → 容器像素矩形**（`pointToCanvas` 的逆运算）。
  *

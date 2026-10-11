@@ -21,19 +21,13 @@
   background-color: var(--bg-raised);
 }
 
-/* 边是可点的（点它看/改属性），但默认和背景一样细：悬停必须能看出"这条能点" */
+/* 边是可点的（点它看/改属性），光标要给；线宽/颜色是逐条内联的，由 JS 按
+   "选中 > 悬停 > 默认"决定（见 GraphPane 的 hoveredEdge）—— CSS 盖不住内联样式 */
 .react-flow__edge {
   cursor: pointer;
 }
-.react-flow__edge:hover .react-flow__edge-path {
-  stroke-width: 2.5;
-}
 .react-flow__edge:hover .react-flow__edge-text {
   font-weight: 600;
-}
-/* 选中的边：加粗（颜色由 JS 内联给出，避免被主题变量改掉） */
-.react-flow__edge.selected .react-flow__edge-path {
-  stroke-width: 2.5;
 }
 
 /* 连线中的预览线（从圆点拖出来时）跟着主题色，别用默认的灰 */

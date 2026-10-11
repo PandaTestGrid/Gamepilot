@@ -33,3 +33,14 @@ if (typeof URL.createObjectURL !== 'function') {
   });
   Object.defineProperty(URL, 'revokeObjectURL', { writable: true, value: () => undefined });
 }
+
+// jsdom 有 PointerEvent 但没有指针捕获：画面栏按下时会把指针捕获到自己身上
+// （拖出画面也不丢手势），测试里补成空实现，不然 pointerdown 直接抛 TypeError
+if (typeof Element.prototype.setPointerCapture !== 'function') {
+  Object.defineProperty(Element.prototype, 'setPointerCapture', { writable: true, value: () => undefined });
+  Object.defineProperty(Element.prototype, 'releasePointerCapture', {
+    writable: true,
+    value: () => undefined,
+  });
+  Object.defineProperty(Element.prototype, 'hasPointerCapture', { writable: true, value: () => false });
+}
