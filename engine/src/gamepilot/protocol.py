@@ -39,6 +39,8 @@ METHOD_SHUTDOWN = "engine.shutdown"
 
 # 设备（多设备：所有设备相关方法与通知都带 deviceId，见 docs/rpc.md）
 METHOD_DEVICE_LIST = "device.list"
+# macOS 本机窗口枚举（界面上的窗口选择器用；也可手动输句柄）
+METHOD_MAC_WINDOWS = "mac.windows"
 METHOD_DEVICE_CONNECT = "device.connect"
 METHOD_DEVICE_DISCONNECT = "device.disconnect"
 METHOD_DEVICE_STATUS = "device.status"
@@ -55,6 +57,11 @@ METHOD_DEVICE_KEY = "device.key"
 METHOD_PROJECT_GET = "project.get"
 METHOD_PROJECT_SET = "project.set"
 METHOD_PROJECT_LIST = "project.list"
+# 脚本库（多状态图）：一个目录 = 一个状态图；四个方法成功都返回 {items, current}
+METHOD_PROJECT_CREATE = "project.create"
+METHOD_PROJECT_DUPLICATE = "project.duplicate"
+METHOD_PROJECT_RENAME = "project.rename"
+METHOD_PROJECT_DELETE = "project.delete"
 METHOD_TEMPLATE_IMAGE = "template.image"
 # 录制：把手动操作变成脚本里的一步
 METHOD_RECORD_ACTION = "record.action"

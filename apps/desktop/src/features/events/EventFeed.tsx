@@ -1,12 +1,12 @@
 /**
- * 事件栏：事件流 + 时间轴（DESIGN.md §4.2 D/E）。
+ * 事件流（列表 + 过滤）：**一处实现，多处挂载**（底部调试抽屉的「事件流」Tab）。
  *
- * 事件按设备分桶，切换设备标签时自动跟着切；类型用语义色，失败类高亮。
+ * 事件按设备分桶，切设备标签自动跟着切；类型用语义色，失败类高亮。
  * 录制产生的 +recognizer / +node / +edge 事件也会出现在这里（可回看每一步）。
  */
 import { type ReactNode, useMemo } from 'react';
 
-import { GhostButton, PanelShell, StatusDot, type DotTone } from '@/layout/PanelShell';
+import { GhostButton, StatusDot, type DotTone } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { matchFilter, useEventStore, type EventFilter } from '@/stores/event.store';
@@ -34,7 +34,7 @@ const FILTERS: Array<{ id: EventFilter; label: string }> = [
   { id: 'device', label: '设备' },
 ];
 
-export function EventPane(): ReactNode {
+export function EventFeed(): ReactNode {
   const activeId = useDeviceStore((state) => state.activeId);
   const events = useEventStore((state) => state.events[activeId]);
   const filter = useEventStore((state) => state.filter);
@@ -43,22 +43,18 @@ export function EventPane(): ReactNode {
   const rows = useMemo(() => (events ?? []).filter((event) => matchFilter(event, filter)), [events, filter]);
 
   return (
-    <PanelShell
-      title="事件"
-      // 高度由父级纵向 Group 决定（右栏可上下拖），面板自己撑满即可
-      className="h-full"
-      actions={
-        <>
-          {FILTERS.map((item) => (
-            <GhostButton key={item.id} active={filter === item.id} onClick={() => setFilter(item.id)}>
-              {item.label}
-            </GhostButton>
-          ))}
-        </>
-      }
-      footer={<Timeline total={rows.length} />}
-    >
-      <div className="h-full overflow-auto">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-6 shrink-0 items-center gap-1 border-b border-line px-2">
+        {FILTERS.map((item) => (
+          <GhostButton key={item.id} active={filter === item.id} onClick={() => setFilter(item.id)}>
+            {item.label}
+          </GhostButton>
+        ))}
+        <span className="flex-1" />
+        <span className="text-badge text-faint">{rows.length} 条</span>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto">
         {rows.length === 0 && <div className="px-3 py-6 text-center text-badge text-faint">没有事件</div>}
         {rows.map((event) => (
           <div
@@ -77,7 +73,7 @@ export function EventPane(): ReactNode {
           </div>
         ))}
       </div>
-    </PanelShell>
+    </div>
   );
 }
 
@@ -92,20 +88,4 @@ function toneClass(type: TraceEventType): string {
     return 'text-pending';
   }
   return 'text-brand';
-}
-
-function Timeline({ total }: { total: number }): ReactNode {
-  // M4 接入真实时间轴：环形缓冲最近 60s 的帧，拖动时画面栏切到历史帧（只读）
-  return (
-    <div className="shrink-0 border-t border-line px-2 py-1.5">
-      <div className="flex items-center gap-2">
-        <span className="text-badge text-faint">时间轴</span>
-        <div className="relative h-1 flex-1 bg-raised">
-          <span className="absolute top-[-3px] left-[38%] size-2 rounded-full bg-brand" />
-          <span className="absolute inset-y-0 left-0 w-[38%] bg-brand/40" />
-        </div>
-        <span className="text-badge text-faint">{total} 条 · 60s</span>
-      </div>
-    </div>
-  );
 }

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from . import android, ios, mock
+from . import android, ios, macos, mock
 from .base import (  # noqa: F401
     KIND_ANDROID,
     KIND_EMULATOR,
@@ -38,6 +38,7 @@ def _providers() -> list[tuple[str, Callable[[], list[DeviceInfo]]]]:
     return [
         ("android", android.discover),
         ("ios", ios.discover),  # 仅 iOS 17.4+；没装 pymobiledevice3 时返回空列表
+        ("macos", macos.discover),  # macOS 本机窗口（非 macOS 自动返回空）
         ("mock", mock.discover),
     ]
 

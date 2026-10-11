@@ -1,23 +1,18 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Group, Panel, Separator } from 'react-resizable-panels';
 
 import { DevicePopover } from '@/features/device/DevicePopover';
-import { ScreenPane } from '@/features/device/ScreenPane';
-import { EventPane } from '@/features/events/EventPane';
-import { GraphPane } from '@/features/graph/GraphPane';
-import { RecognizerPane } from '@/features/recognizers/RecognizerPane';
 import { DeviceTabs } from '@/layout/DeviceTabs';
 import { ErrorBanner } from '@/layout/ErrorBanner';
-import { RIGHT_LAYOUT, SHELL_LAYOUT } from '@/layout/layout-specs';
-import { StatusBar } from '@/layout/StatusBar';
+import { StandalonePane } from '@/layout/StandalonePane';
 import { Toolbar } from '@/layout/Toolbar';
-import { useLayoutGroup } from '@/layout/useLayoutGroup';
+import { WorkspaceLayout } from '@/layout/WorkspaceLayout';
 import { devLog } from '@/lib/rpc';
-import { readPaneQuery, type PaneKind } from '@/lib/windows';
+import { readPaneQuery } from '@/lib/windows';
 import { connectedDevices, useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
+import { useLogStore } from '@/stores/log.store';
 import { useSessionStore } from '@/stores/session.store';
 
 /**
@@ -33,15 +28,11 @@ export function App(): ReactNode {
   const selfCheck = useEngineStore((state) => state.selfCheck);
   const initSession = useSessionStore((state) => state.init);
   const activeId = useDeviceStore((state) => state.activeId);
-  const running = useSessionStore((state) => Boolean(state.running[activeId]));
-  const startRun = useSessionStore((state) => state.startRun);
-  const stopRun = useSessionStore((state) => state.stopRun);
-  // 布局记忆：拖过的比例会存进 localStorage，下次启动恢复（见 layout-specs.ts）
-  const shell = useLayoutGroup(SHELL_LAYOUT);
 
-  // 两条订阅：引擎通知（engine.ready/...）与运行时消息（engine.frame / engine.event / device.*）
+  // 三条订阅：引擎通知（engine.ready/...）、运行时消息（engine.frame / engine.event / device.*）、
+  // 界面日志（devLog → 底部「日志」抽屉）
   useEffect(() => {
-    const disposers: Array<() => void> = [];
+    const disposers: Array<() => void> = [useLogStore.getState().subscribeUi()];
     void init().then((unlisten) => disposers.push(unlisten));
     void initSession().then((unlisten) => disposers.push(unlisten));
     return () => {
@@ -134,114 +125,16 @@ export function App(): ReactNode {
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden">
-      <Toolbar
-        running={running}
-        onToggleRun={() => {
-          if (running) {
-            void stopRun(activeId);
-          } else {
-            void startRun(activeId);
-          }
-        }}
-      />
+      <Toolbar />
       <DeviceTabs />
       <ErrorBanner />
 
+      {/* 主区（三栏，可左右拖） + 底部调试抽屉（可上下拖），见 layout/WorkspaceLayout.tsx */}
       <main className="min-h-0 flex-1">
-        {/* 三栏可拖拽 + 布局记忆（DESIGN.md 决策 P3）；栏内还能再上下拖，见 RightColumn */}
-        <Group
-          id={SHELL_LAYOUT.id}
-          orientation="horizontal"
-          defaultLayout={shell.defaultLayout}
-          onLayoutChanged={shell.onLayoutChanged}
-          groupRef={shell.groupRef}
-          className="h-full"
-        >
-          <Panel id="screen" defaultSize="34%" minSize="22%">
-            <ScreenPane />
-          </Panel>
-          <Separator
-            className="w-px bg-line transition-colors hover:bg-brand"
-            title="拖动改宽度 · 双击恢复默认"
-          />
-          <Panel id="graph" defaultSize="40%" minSize="24%">
-            <GraphPane />
-          </Panel>
-          <Separator
-            className="w-px bg-line transition-colors hover:bg-brand"
-            title="拖动改宽度 · 双击恢复默认"
-          />
-          <Panel id="right" defaultSize="26%" minSize="18%">
-            <RightColumn />
-          </Panel>
-        </Group>
+        <WorkspaceLayout />
       </main>
 
-      <StatusBar running={running} />
       <DevicePopover />
-    </div>
-  );
-}
-
-/**
- * 右栏：事件流 + 识别器。
- *
- * 上下可拖是关键——事件流要盯失败原因，识别器要现场调阈值，
- * 两者谁更重要随场景变（调试时事件大、调参时识别器大），固定 220px 根本不够用。
- */
-function RightColumn(): ReactNode {
-  const right = useLayoutGroup(RIGHT_LAYOUT);
-
-  return (
-    <Group
-      id={RIGHT_LAYOUT.id}
-      orientation="vertical"
-      defaultLayout={right.defaultLayout}
-      onLayoutChanged={right.onLayoutChanged}
-      groupRef={right.groupRef}
-      className="h-full"
-    >
-      <Panel id="events" defaultSize="62%" minSize="25%">
-        <EventPane />
-      </Panel>
-      <Separator
-        className="h-px bg-line transition-colors hover:bg-brand"
-        title="拖动改高度 · 双击恢复默认"
-      />
-      <Panel id="recognizers" defaultSize="38%" minSize="15%">
-        <RecognizerPane />
-      </Panel>
-    </Group>
-  );
-}
-
-/** 独立窗口：只渲染一栏，给第二块屏用（画面丢过去，主窗口留状态图与事件）。 */
-function StandalonePane({ pane, deviceId }: { pane: PaneKind; deviceId: string | null }): ReactNode {
-  const devices = useDeviceStore((state) => state.devices);
-  const setActive = useDeviceStore((state) => state.setActive);
-  const device = devices.find((item) => item.id === deviceId) ?? null;
-
-  useEffect(() => {
-    if (device) {
-      setActive(device.id);
-    }
-  }, [device, setActive]);
-
-  return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <header className="flex h-7 shrink-0 items-center gap-2 border-b border-line bg-panel px-2">
-        <span className="text-panelhead font-medium">
-          {pane === 'screen' ? '画面' : pane === 'graph' ? '状态图' : '事件'}
-        </span>
-        <span className="text-badge text-faint">{device?.name ?? '未指定设备'}</span>
-        <div className="flex-1" />
-        <span className="text-badge text-faint">独立窗口 · 关闭不影响运行</span>
-      </header>
-      <div className="min-h-0 flex-1">
-        {pane === 'screen' && <ScreenPane />}
-        {pane === 'graph' && <GraphPane />}
-        {pane === 'events' && <EventPane />}
-      </div>
     </div>
   );
 }

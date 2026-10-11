@@ -35,18 +35,29 @@ gamepilot/
 │   └── adr/                     # 重大决策记录（一决策一文件）
 ├── apps/desktop/                # Tauri 2 壳 + React 前端
 │   ├── src/
-│   │   ├── App.tsx              # 主壳 + 独立窗口（?pane=）路由
-│   │   ├── types.ts             # 界面层数据模型（M1 起由引擎填充）
-│   │   ├── layout/              # Toolbar / DeviceTabs / StatusBar / PanelShell
+│   │   ├── App.tsx              # 主壳：装壳 + 订阅；具体布局在 layout/
+│   │   ├── types.ts             # 界面层数据模型 + Tab 枚举（RightTab / DockTab）
+│   │   ├── layout/              # 壳与布局：Toolbar / DeviceTabs / PanelShell / StatusBar
+│   │   │   ├── WorkspaceLayout.tsx  # 主区 + 底部调试抽屉（纵向可拖）
+│   │   │   ├── PaneColumns.tsx      # 三栏（画面/状态图/右栏，横向可拖）
+│   │   │   ├── RightColumn.tsx      # 右栏 Tab（脚本库 / 识别器）
+│   │   │   ├── BottomDock.tsx       # 底栏状态行 + 抽屉开关
+│   │   │   ├── RunButton.tsx        # 运行/停止（顶栏与图栏头共用）
+│   │   │   └── StandalonePane.tsx   # ?pane= 独立窗口
 │   │   ├── features/
 │   │   │   ├── device/          # ScreenPane（画面/网格/录制）、RecordOverlay、DevicePopover
-│   │   │   ├── graph/           # GraphPane（React Flow）
-│   │   │   ├── events/          # EventPane（事件流 + 时间轴）
+│   │   │   ├── graph/           # GraphPane（React Flow）+ 节点/边编辑器
+│   │   │   ├── events/          # EventFeed（事件流，可复用）+ TimelinePane
+│   │   │   ├── library/         # 脚本库（多状态图：列表/新建/复制/重命名/移除）
+│   │   │   ├── debug/           # 底部抽屉（日志 / 控制台）+ Tab 元数据
 │   │   │   └── recognizers/     # RecognizerPane（分数 + 阈值滑块）
 │   │   ├── components/ui/       # shadcn/ui 组件（CLI 生成，可改）
 │   │   ├── lib/rpc.ts           # 与引擎通信的唯一出口
+│   │   ├── lib/log-bus.ts       # 界面日志总线（devLog → 日志抽屉，避免 lib 反向依赖 store）
+│   │   ├── lib/useRunControl.ts # 运行/停止的唯一控制器（顶栏 + 图栏头共用）
 │   │   ├── lib/windows.ts       # 多窗口（Tauri）与 ?pane= 解析
-│   │   ├── stores/              # Zustand：device / graph / event / ui / engine
+│   │   ├── stores/              # Zustand：device / graph / event / ui / engine / session
+│   │   │                        #          / library（脚本库）/ log（日志环形缓冲）
 │   │   ├── mock/seed.ts         # 布局用样本数据（M1 删除或仅留演示模式）
 │   │   └── test/                # 测试 setup（jsdom 补丁）
 │   └── src-tauri/               # Rust：窗口 / sidecar 守护 / RPC 转发
@@ -78,6 +89,7 @@ gamepilot/
 | R4 | Rust 业务逻辑一律不写：它只做窗口 + sidecar 生命周期 + 转发 | code review |
 | R5 | 像素坐标不得跨出 `devices/` 层（见 §4） | code review + 单测 |
 | R6 | 不允许 `features/A` 直接 import `features/B` 的内部文件；需要共享就提到 `lib/` 或 `stores/` | ESLint `no-restricted-imports` |
+| R7 | 一个面板一个文件、一个 store 一个文件；壳只负责装壳（`App.tsx` 不写具体布局），布局都在 `layout/` | code review |
 
 > R1/R2 会在 M1 加进 ruff 的 `flake8-tidy-imports`（`banned-api`）配置；R3/R6 在 M1 加进 ESLint。
 

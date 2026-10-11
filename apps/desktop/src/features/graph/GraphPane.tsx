@@ -32,6 +32,7 @@ import { NodeEditor } from '@/features/graph/NodeEditor';
 import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell } from '@/layout/PanelShell';
+import { RunButton } from '@/layout/RunButton';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { toGraphData } from '@/lib/graph-adapter';
@@ -257,6 +258,13 @@ export function GraphPane(): ReactNode {
       title="状态图"
       actions={
         <>
+          {/*
+            就近的运行/停止：和图是同一件事的两面（图=脚本，运行=让当前设备按它跑）。
+            和顶栏那个是**同一个开关**（lib/useRunControl.ts），不是第二份状态；
+            图栏被双击弹成独立窗口时，这里就是那个窗口里唯一能跑的地方。
+          */}
+          <RunButton size="compact" />
+          <span className="mx-0.5 h-3 w-px bg-line" />
           <GhostButton
             onClick={() => {
               void createNode(activeId, `界面${(graph?.nodes.length ?? 0) + 1}`).then((nodeId) => {

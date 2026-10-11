@@ -7,7 +7,7 @@
 import { type ReactNode, useRef } from 'react';
 
 import { TemplateThumb } from '@/features/recognizers/TemplateThumb';
-import { PanelShell, StatusDot } from '@/layout/PanelShell';
+import { StatusDot } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
 import { useGraphStore } from '@/stores/graph.store';
@@ -24,13 +24,15 @@ export function RecognizerPane(): ReactNode {
   const recognizers = graph?.recognizers ?? [];
 
   return (
-    <PanelShell
-      title="识别器"
-      // 高度由父级纵向 Group 决定（右栏可上下拖）；原来写死 220px，识别器一多就看不全
-      className="h-full"
-      actions={<span className="text-badge text-faint">{recognizers.length} 个</span>}
-    >
-      <div className="h-full overflow-auto">
+    // 右栏 Tab 的**内容**（Tab 头在 layout/RightColumn.tsx）：这里不再套 PanelShell，
+    // 否则会出现"Tab 头 + 面板头"两层标题
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-6 shrink-0 items-center gap-2 border-b border-line px-2 text-badge text-faint">
+        <span>阈值拖动即时重算当前帧分数</span>
+        <span className="flex-1" />
+        <span>{recognizers.length} 个</span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
         {recognizers.map((item) => {
           const pass = item.score >= item.threshold;
           return (
@@ -92,7 +94,7 @@ export function RecognizerPane(): ReactNode {
           </div>
         )}
       </div>
-    </PanelShell>
+    </div>
   );
 }
 

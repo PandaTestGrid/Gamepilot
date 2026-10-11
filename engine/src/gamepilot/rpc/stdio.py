@@ -34,6 +34,7 @@ from ..protocol import (
     PARSE_ERROR,
     PROTOCOL_VERSION,
 )
+from . import logs
 
 logger = logging.getLogger("gamepilot.rpc")
 
@@ -52,10 +53,13 @@ class RpcServer:
         self._register_builtin()
         # 延迟导入：devices 方法模块需要 RpcServer 的类型，反过来运行时依赖 stdio
         from . import devices as device_methods
+        from . import projects as project_methods
         from . import session as session_methods
 
         device_methods.register(self)
         self.sessions = session_methods.register(self)
+        # project.* 集中在 projects 模块里（脚本库的库操作），显式传入 manager 而不是全局
+        project_methods.register(self, self.sessions)
 
     # ------------------------------------------------------------------ #
     # 注册与分发
@@ -212,6 +216,8 @@ def main() -> int:
     )
     _install_stack_dump()
     server = RpcServer(sys.stdin, sys.stdout)
+    # 额外通道：日志照旧进 stderr，同时限频推 engine.log 给界面的「日志」抽屉
+    logs.install(server)
     return server.serve_forever()
 
 

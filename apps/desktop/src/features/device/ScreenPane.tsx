@@ -5,20 +5,11 @@
  * 识别框、node/tick/fps 浮层全部是引擎的真实数据，前端只做展示与坐标换算
  * （而且坐标本来就是归一化的，连换算都不需要）。
  */
-import {
-  CircleDot,
-  House,
-  Layers,
-  MousePointerClick,
-  Power,
-  Grid2x2,
-  MousePointerSquareDashed,
-  ScanLine,
-  Undo2,
-} from 'lucide-react';
+import { Grid2x2, MousePointerSquareDashed, ScanLine } from 'lucide-react';
 import { type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 
+import { DeviceControls } from '@/features/device/DeviceControls';
 import { RecordOverlay } from '@/features/device/RecordOverlay';
 import { SCREEN_LAYOUT } from '@/layout/layout-specs';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
@@ -45,15 +36,6 @@ export function ScreenPane(): ReactNode {
   const gridView = useDeviceStore((state) => state.gridView);
   const toggleGrid = useDeviceStore((state) => state.toggleGrid);
   const toggleDevicePopover = useUiStore((state) => state.toggleDevicePopover);
-  const controlMode = useUiStore((state) => state.controlMode);
-  const toggleControl = useUiStore((state) => state.toggleControl);
-  const recordActionMode = useUiStore((state) => state.recordActionMode);
-  const toggleRecordAction = useUiStore((state) => state.toggleRecordAction);
-  const recordStep = useSessionStore((state) => state.recordStep);
-  const recordWait = (seconds: number): void => {
-    void recordStep(activeId, { type: 'wait', seconds });
-  };
-  const pressKey = useSessionStore((state) => state.pressKey);
   const recordMode = useUiStore((state) => state.recordMode);
   const frame = useSessionStore((state) => state.frames[activeId]);
   const graph = useGraphStore((state) => state.graphs[activeId]);
@@ -118,64 +100,6 @@ export function ScreenPane(): ReactNode {
             多开{connected.length > 0 ? ` ${connected.length}` : ''}
           </GhostButton>
           <GhostButton title="当前帧命中的识别器数量">读数 {confirmedCount}</GhostButton>
-          <span className="mx-0.5 h-3 w-px bg-line" />
-          <GhostButton
-            active={recordActionMode}
-            onClick={toggleRecordAction}
-            title={
-              recordActionMode
-                ? '正在录操作：画面上的每次点击/滑动都会变成脚本里的一步（再点一下关闭）'
-                : '录操作：把点击/滑动录成脚本里的一步'
-            }
-          >
-            <CircleDot className="size-3" />
-            录操作
-          </GhostButton>
-          {recordActionMode && (
-            <span className="flex items-center gap-1">
-              {[0.5, 1, 3].map((seconds) => (
-                <button
-                  key={seconds}
-                  type="button"
-                  onClick={() => void recordWait(seconds)}
-                  className="h-5 rounded-sm border border-line px-1 text-badge text-dim hover:bg-raised hover:text-fg"
-                  title={`录一步"等待 ${seconds}s"`}
-                >
-                  +等{seconds}s
-                </button>
-              ))}
-            </span>
-          )}
-          <GhostButton
-            active={controlMode}
-            onClick={toggleControl}
-            title={
-              controlMode
-                ? '控制已开启：点击画面=轻触，拖拽=滑动（录制时自动让位）'
-                : '控制已关闭：画面上的操作只用于框选/点选录制'
-            }
-          >
-            <MousePointerClick className="size-3" />
-            控制
-          </GhostButton>
-          {(['back', 'home', 'recents'] as const).map((key) => (
-            <GhostButton
-              key={key}
-              onClick={() => void pressKey(activeId, key)}
-              title={key === 'back' ? '返回' : key === 'home' ? '回到桌面（Home）' : '最近任务'}
-            >
-              {key === 'back' ? (
-                <Undo2 className="size-3" />
-              ) : key === 'home' ? (
-                <House className="size-3" />
-              ) : (
-                <Layers className="size-3" />
-              )}
-            </GhostButton>
-          ))}
-          <GhostButton onClick={() => void pressKey(activeId, 'power')} title="电源键（锁屏/亮屏）">
-            <Power className="size-3" />
-          </GhostButton>
         </>
       }
     >
@@ -188,18 +112,25 @@ export function ScreenPane(): ReactNode {
         className="h-full"
       >
         <Panel id="view" defaultSize="70%" minSize="30%" style={{ overflow: 'hidden' }}>
-          <div className="flex h-full min-h-0 flex-col bg-canvas p-2">
-            {gridView ? (
-              <ScreenGrid />
-            ) : device?.status === 'connected' ? (
-              <SingleScreen
-                deviceId={device.id}
-                deviceName={device.name}
-                resolution={device.resolution}
-                frame={frame}
-              />
-            ) : (
-              <EmptyState onConnect={() => toggleDevicePopover(true)} />
+          {/* 画面 + 紧跟其下的设备控制条（返回/桌面/最近任务/电源/控制/录操作）：
+              控制条属于"画面"这一格，拖高识别读数时它不会被推走 */}
+          <div className="flex h-full min-h-0 flex-col gap-1 bg-canvas p-2">
+            <div className="flex min-h-0 flex-1 flex-col">
+              {gridView ? (
+                <ScreenGrid />
+              ) : device?.status === 'connected' ? (
+                <SingleScreen
+                  deviceId={device.id}
+                  deviceName={device.name}
+                  resolution={device.resolution}
+                  frame={frame}
+                />
+              ) : (
+                <EmptyState onConnect={() => toggleDevicePopover(true)} />
+              )}
+            </div>
+            {device && device.status === 'connected' && (
+              <DeviceControls deviceId={device.id} deviceName={device.name} />
             )}
           </div>
         </Panel>
@@ -282,10 +213,11 @@ function SingleScreen({
   frame: FrameState | undefined;
 }): ReactNode {
   const recordMode = useUiStore((state) => state.recordMode);
+  // 画面上的鼠标/指针操作按"控制"与"录操作"两个开关决定行为（开关按钮在画面下方的控制条里）
   const controlMode = useUiStore((state) => state.controlMode);
+  const recordActionMode = useUiStore((state) => state.recordActionMode);
   const touchDevice = useSessionStore((state) => state.touch);
   const recordStep = useSessionStore((state) => state.recordStep);
-  const recordActionMode = useUiStore((state) => state.recordActionMode);
   const recordStart = useRef<{ x: number; y: number; at: number } | null>(null);
   const draft = useUiStore((state) => state.draft);
   const beginDraft = useUiStore((state) => state.beginDraft);

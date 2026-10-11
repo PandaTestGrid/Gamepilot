@@ -11,6 +11,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+import { pushUiLog } from '@/lib/log-bus';
+
 /** 与 engine/src/gamepilot/protocol.py 的 PROTOCOL_VERSION 必须一致。 */
 export const PROTOCOL_VERSION = 1;
 
@@ -283,6 +285,28 @@ export function graphGet(deviceId: string): Promise<GraphPayload> {
   return rpc<GraphPayload>('graph.get', { deviceId });
 }
 
+/** macOS 本机窗口列表（界面上的窗口选择器；也可手动输句柄） */
+export interface MacWindowInfo {
+  readonly handle: number;
+  readonly pid: number;
+  readonly app: string;
+  readonly title: string;
+  readonly label: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly uri: string;
+}
+
+export function macWindows(): Promise<{
+  platform: string;
+  allowed: boolean;
+  windows: MacWindowInfo[];
+}> {
+  return rpc<{ platform: string; allowed: boolean; windows: MacWindowInfo[] }>('mac.windows', {});
+}
+
 /** 把一步手动操作录成脚本里的一条边（画面栏开着「录操作」时调） */
 export function recordAction(
   deviceId: string,
@@ -347,6 +371,13 @@ export interface ProjectSummary {
   readonly nodes: number;
   readonly edges: number;
   readonly recognizers: number;
+  readonly templates: number;
+}
+
+/** 库操作（新建/复制/重命名/删除）的统一返回：刷新后的整份列表 + 当前脚本 root。 */
+export interface ScriptLibrary {
+  readonly items: ProjectSummary[];
+  readonly current: string;
 }
 
 export function projectGet(): Promise<ProjectInfo> {
@@ -359,6 +390,25 @@ export function projectSet(dir: string): Promise<ProjectInfo> {
 
 export function projectList(base?: string): Promise<{ items: ProjectSummary[] }> {
   return rpc<{ items: ProjectSummary[] }>('project.list', base ? { base } : {});
+}
+
+/** 新建空脚本目录并切过去（多状态图 = 多个目录，见 docs/rpc.md「脚本库」）。 */
+export function projectCreate(name: string, base?: string): Promise<ScriptLibrary> {
+  return rpc<ScriptLibrary>('project.create', base ? { name, base } : { name });
+}
+
+/** 复制一个已有脚本（graph.json + templates/）到新名字，并切过去。 */
+export function projectDuplicate(dir: string, name: string): Promise<ScriptLibrary> {
+  return rpc<ScriptLibrary>('project.duplicate', { dir, name });
+}
+
+export function projectRename(dir: string, name: string): Promise<ScriptLibrary> {
+  return rpc<ScriptLibrary>('project.rename', { dir, name });
+}
+
+/** 移到 <库根>/.trash/（可恢复，引擎不做真删除）。 */
+export function projectDelete(dir: string): Promise<ScriptLibrary> {
+  return rpc<ScriptLibrary>('project.delete', { dir });
 }
 
 export function graphSave(deviceId: string, graph: GraphPayload): Promise<GraphPayload> {
@@ -401,6 +451,8 @@ export function timelineGet(deviceId: string, limit = 60): Promise<{ frames: unk
  * 排查"引擎在推、界面没反应"这类问题时，这是唯一能从终端看到前端状态的手段。
  */
 export function devLog(message: string): void {
+  // 两条路：Tauri 应用日志（排查启动期问题）+ 界面日志抽屉（底部「日志」Tab 与引擎日志混排）
+  pushUiLog('debug', 'ui', message);
   void invoke('dev_log', { message }).catch(() => undefined);
 }
 

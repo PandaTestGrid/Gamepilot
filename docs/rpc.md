@@ -154,7 +154,7 @@ Rust 桥的调度规则：
 | `engine.frame` | ✅ | 每帧画面：`deviceId, index, ts, resolution, node, pending, tick, fps, captureMs, detections[], jpeg(base64)`。fps 是实际交付节奏；scrcpy 静止画面会复用上一帧与上次的 JPEG 编码 |
 | `engine.event` | ✅ | 状态机事件：`deviceId, seq, ts, type, node, edge, message` |
 | `run.started` / `run.stopped` | ✅ | 运行控制：`deviceId` |
-| `engine.log` | ⬜ 计划 | 引擎侧结构化日志（当前日志走 stderr） |
+| `engine.log` | ✅ | 引擎侧结构化日志：`level`（DEBUG/INFO/WARNING/ERROR）、`logger`、`message`、`ts`。日志仍然照旧进 stderr；这条通知是给界面的「日志」抽屉用的（**限频**：同一条消息 200ms 内只发一次） |
 
 > 帧推送是**限频**的，且受设备截图耗时限制（adb 通道实测 ~550ms/帧 → ~1.8fps）。
 > UI 不要假设固定帧率。真实时投屏要等 scrcpy 通道（H.264，目标 30~60ms）。
@@ -226,6 +226,14 @@ Rust 桥的调度规则：
 `{ deviceId }` → `{ ok: true, running: boolean }`。
 `run.start` 要求状态图里至少有一个节点，否则报「状态图还没有节点：先在画面上框选录制一个界面」。
 
+### macOS 本机窗口（`Mac:///?window=<句柄>`）
+
+- `mac.windows` → `{platform, allowed, windows:[{handle,pid,app,title,label,x,y,width,height,uri}]}`
+  - `allowed=false` 表示缺「屏幕录制」权限，抓到的是空白
+  - `handle` 就是 `kCGWindowNumber`，可以直接拼 URI：`Mac:///?window=89`
+- 也支持 `Mac:///?pid=<pid>` 和 `Mac:///?app=<App 名>`（取该 App 最前面的窗口）
+- `channel` 返回 `quartz`；`linkNote` 里带窗口标题与位置尺寸
+
 ### iOS 设备（`iOS:///?udid=xxx`）
 
 URI 里用 `udid`（`pymobiledevice3 usbmux list` 的 `Identifier`）。
@@ -269,7 +277,27 @@ URI 里用 `udid`（`pymobiledevice3 usbmux list` 的 `Identifier`）。
 - `project.get` → `{ root, graphPath, nodes, edges, recognizers, templates }`
 - `project.set { dir }` → 切到该目录（不存在就创建），**热重载所有已连接设备的状态图**
   （保留各自当前节点与运行态），并广播 `project.changed`
-- `project.list { base? }` → 列出该目录下所有像工程的子目录（含 `graph.json` 的）
+- `project.list { base? }` → 列出该目录下所有像工程的子目录（含 `graph.json` 的）：
+  `{ items: [{ name, root, nodes, edges, recognizers, templates }] }`（按 name 排序，不含 `.trash`）
+
+### 脚本库（多状态图）：`project.create` / `project.duplicate` / `project.rename` / `project.delete`
+
+多状态图 = **多个脚本目录**（一个目录一份 `graph.json` + 自己的 `templates/`），互相隔离。
+四个方法都作用在"库"上（默认库根 = 当前脚本目录的父目录，可用 `base` 指定），
+**成功后统一返回 `{ items, current }`**（刷新后的整份列表 + 当前脚本 root），前端一次调用即可重绘。
+
+| 方法 | 参数 | 语义 |
+|---|---|---|
+| `project.create` | `{ name, base? }` | 新建空脚本目录（空 `graph.json` + `templates/`），**并切换过去** |
+| `project.duplicate` | `{ dir, name }` | 复制一个已有脚本（`graph.json` + 整个 `templates/`）到新名字，**并切换过去** |
+| `project.rename` | `{ dir, name }` | 重命名脚本目录；若它正是当前脚本，当前脚本跟着改 |
+| `project.delete` | `{ dir }` | **移到 `<base>/.trash/<名字>-<时间戳>/`（可恢复，不做真删除）**；若删的是当前脚本，自动切到列表里剩下的第一个（一个都不剩则回到 `default`） |
+
+名称规则（引擎校验，错误信息要能直接给用户看）：
+
+- 长度 1~64；不允许 `/` `\` `:` `*` `?` `"` `<` `>` `|`；不允许以 `.` 开头或结尾
+- 不允许与同库中已有脚本重名
+- `base` 默认为当前脚本的父目录；`base` 不存在时报错
 
 ### `template.image`
 

@@ -139,3 +139,9 @@ export interface RecordDraft {
 }
 
 export type RecordMode = 'off' | 'marquee' | 'pick';
+
+/** 右栏 Tab：脚本库（多张状态图）/ 识别器（阈值现场调参） */
+export type RightTab = 'library' | 'identifiers';
+
+/** 底部调试抽屉的 Tab：事件流 / 日志 / 控制台 / 时间轴 */
+export type DockTab = 'events' | 'logs' | 'console' | 'timeline';

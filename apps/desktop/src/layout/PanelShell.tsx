@@ -73,35 +73,6 @@ export function GhostButton({
   );
 }
 
-/**
- * 运行/停止按钮：顶栏与状态图头部共用同一个组件 + 同一份 `useRunControl`。
- *
- * 为什么允许出现在两处：运行是**设备会话**的开关（不是状态图的一部分，见 lib/useRunControl.ts），
- * 顶栏那处在任何布局下都在、还能解释"为什么不能跑"；图栏头那处是"就近"——
- * 图栏被双击弹成独立窗口时（?pane=graph）也能直接跑。
- * 两处只共用一个开关，不存在第二份状态。
- */
-export function RunButton({ size = 'normal' }: { size?: 'normal' | 'compact' }): ReactNode {
-  const run = useRunControl();
-  const label = run.running ? '停止' : '运行';
-  const title = run.blocker
-    ? run.blocker
-    : run.running
-      ? `停止运行（${run.deviceName ?? '当前设备'}）`
-      : `让 ${run.deviceName ?? '当前设备'} 按状态图跑（不运行时也在识别，只是不发动作）`;
-
-  return (
-    <GhostButton active={run.running} disabled={Boolean(run.blocker)} onClick={run.toggle} title={title}>
-      {run.running ? (
-        <Square className={size === 'compact' ? 'size-3' : 'size-3.5'} />
-      ) : (
-        <CirclePlay className={size === 'compact' ? 'size-3' : 'size-3.5'} />
-      )}
-      {label}
-    </GhostButton>
-  );
-}
-
 export type DotTone = 'confirmed' | 'pending' | 'failed' | 'idle';
 
 const TONE_CLASS: Record<DotTone, string> = {

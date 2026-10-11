@@ -10,7 +10,7 @@ import { create } from 'zustand';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { useSessionStore } from '@/stores/session.store';
-import type { RecordDraft, RecordMode } from '@/types';
+import type { DockTab, RecordDraft, RecordMode, RightTab } from '@/types';
 
 const DEFAULT_THRESHOLD = 0.82;
 
@@ -18,7 +18,10 @@ interface UiState {
   readonly recordMode: RecordMode;
   readonly draft: RecordDraft | null;
   readonly devicePopoverOpen: boolean;
-  readonly rightTab: 'events' | 'recognizers';
+  readonly rightTab: RightTab;
+  /** 底部调试抽屉：当前 Tab + 是否展开（点同一个 Tab = 收起） */
+  readonly dockTab: DockTab;
+  readonly dockOpen: boolean;
   readonly sequence: number;
   readonly setRecordMode: (mode: RecordMode) => void;
   readonly toggleRecording: () => void;
@@ -29,7 +32,9 @@ interface UiState {
   readonly recordActionMode: boolean;
   readonly toggleRecordAction: () => void;
   readonly toggleDevicePopover: (open?: boolean) => void;
-  readonly setRightTab: (tab: 'events' | 'recognizers') => void;
+  readonly setRightTab: (tab: RightTab) => void;
+  readonly toggleDock: (tab: DockTab) => void;
+  readonly closeDock: () => void;
   readonly beginDraft: (input: { rect: readonly [number, number, number, number]; score: number }) => void;
   readonly updateDraft: (patch: Partial<RecordDraft>) => void;
   readonly cancelDraft: () => void;
@@ -43,7 +48,9 @@ export const useUiStore = create<UiState>()((set, get) => ({
   recordActionMode: false,
   draft: null,
   devicePopoverOpen: false,
-  rightTab: 'events',
+  rightTab: 'library',
+  dockTab: 'events',
+  dockOpen: false,
   sequence: 1,
 
   setRecordMode: (mode) => set({ recordMode: mode, draft: mode === 'off' ? null : get().draft }),
@@ -53,6 +60,11 @@ export const useUiStore = create<UiState>()((set, get) => ({
   toggleRecordAction: () => set((state) => ({ recordActionMode: !state.recordActionMode })),
   toggleDevicePopover: (open) => set((state) => ({ devicePopoverOpen: open ?? !state.devicePopoverOpen })),
   setRightTab: (rightTab) => set({ rightTab }),
+  toggleDock: (tab) =>
+    set((state) =>
+      state.dockOpen && state.dockTab === tab ? { dockOpen: false } : { dockTab: tab, dockOpen: true },
+    ),
+  closeDock: () => set({ dockOpen: false }),
 
   beginDraft: ({ rect, score }) => {
     const sequence = get().sequence;

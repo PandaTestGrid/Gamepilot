@@ -6,10 +6,16 @@ import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
 
-/** 底栏 24px：运行指标。任一指标异常变红（DESIGN.md §4.2 E）。 */
-export function StatusBar({ running }: { running: boolean }): ReactNode {
+/**
+ * 底栏状态行：运行指标 + 最后一条事件摘要。任一指标异常变红（DESIGN.md §4.2 E）。
+ *
+ * 不再自己画边框/背景：它是底部抽屉那条 28px 状态行的一部分（见 layout/BottomDock.tsx），
+ * 所以也不需要外面传 `running` —— 直接从会话 store 读，少一层 prop 传递。
+ */
+export function StatusBar(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
+  const running = useSessionStore((state) => Boolean(state.running[activeId]));
   const graph = useGraphStore((state) => state.graphs[activeId]);
   const events = useEventStore((state) => state.events[activeId]);
   const engineStatus = useEngineStore((state) => state.status);
@@ -41,21 +47,21 @@ export function StatusBar({ running }: { running: boolean }): ReactNode {
   ];
 
   return (
-    <footer className="flex h-6 shrink-0 items-center gap-3 border-t border-line bg-panel px-3 text-badge text-dim">
+    <div className="flex h-6 min-w-0 flex-1 items-center gap-3 text-badge text-dim">
       {items.map((item) => (
         <span key={item.key} className="flex items-center gap-1">
           <span className="text-faint">{item.key}</span>
           <span className={item.bad ? 'text-failed' : undefined}>{item.value}</span>
         </span>
       ))}
-      <div className="flex-1" />
-      <span className="truncate">
+      <div className="min-w-2 flex-1" />
+      <span className="max-w-[40%] truncate" title={last?.message}>
         {engineStatus === 'ready'
           ? last
             ? `${last.type} · ${last.message}`
             : '引擎已就绪，暂无事件'
           : '骨架自检未运行'}
       </span>
-    </footer>
+    </div>
   );
 }

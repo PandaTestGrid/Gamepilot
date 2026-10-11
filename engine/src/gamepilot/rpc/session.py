@@ -10,6 +10,7 @@ import base64
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import cv2
 
+from .. import library
 from ..core.geometry import Rect
 from ..core.graph import Graph
 from ..devices.base import Controller, controller_for_scheme
@@ -37,9 +39,7 @@ from ..protocol import (
     METHOD_GRAPH_NODE_REMOVE,
     METHOD_GRAPH_NODE_UPDATE,
     METHOD_GRAPH_SAVE,
-    METHOD_PROJECT_GET,
-    METHOD_PROJECT_LIST,
-    METHOD_PROJECT_SET,
+    METHOD_MAC_WINDOWS,
     METHOD_RECOGNIZER_THRESHOLD,
     METHOD_RECORD_ACTION,
     METHOD_RECORD_TEMPLATE,
@@ -158,29 +158,12 @@ class SessionManager:
         self.emit(NOTIFY_PROJECT_CHANGED, self.project_info())
 
     def list_projects(self, base: str | None = None) -> list[dict[str, Any]]:
-        """列出一个目录下所有"像工程"的子目录（含 graph.json 的）。"""
-        root = os.path.abspath(os.path.expanduser(base)) if base else os.path.dirname(self.project.root)
-        if not os.path.isdir(root):
-            return []
-        items: list[dict[str, Any]] = []
-        for name in sorted(os.listdir(root)):
-            child = os.path.join(root, name)
-            if not os.path.isdir(child):
-                continue
-            graph_path = os.path.join(child, "graph.json")
-            if not os.path.isfile(graph_path):
-                continue
-            graph = Graph.load(graph_path)
-            items.append(
-                {
-                    "name": name,
-                    "root": child,
-                    "nodes": len(graph.nodes),
-                    "edges": len(graph.edges),
-                    "recognizers": len(graph.recognizers),
-                }
-            )
-        return items
+        """列出库根下所有脚本目录（含 `graph.json` 的）；实现在 `library`。
+
+        `project.*` 的库操作在 `rpc/projects.py`，这里只保留"当前脚本"的解析。
+        """
+        root = os.path.abspath(os.path.expanduser(base)) if base else library.library_root(self.project.root)
+        return library.list_scripts(root)
 
     def template_image(self, label: str, *, grayscale: bool = False) -> dict[str, Any]:
         """取模板截图（PNG，base64）。黑白模式返回灰度图，方便界面直接看匹配用的样子。"""
@@ -270,28 +253,25 @@ class SessionManager:
 def register(server: RpcServer) -> SessionManager:
     manager = SessionManager(server.notify)
 
-    @server.method(METHOD_PROJECT_GET)
-    def _project_get(params: dict[str, Any]) -> dict[str, Any]:
-        return manager.project_info()
-
-    @server.method(METHOD_PROJECT_SET)
-    def _project_set(params: dict[str, Any]) -> dict[str, Any]:
-        """切换脚本目录：新建目录、热重载所有已连接设备的状态图。"""
-        target = _require_str(params, "dir")
-        manager.use_project(target)
-        return manager.project_info()
-
-    @server.method(METHOD_PROJECT_LIST)
-    def _project_list(params: dict[str, Any]) -> dict[str, Any]:
-        base = params.get("base")
-        return {"items": manager.list_projects(str(base) if base else None)}
-
     @server.method(METHOD_TEMPLATE_IMAGE)
     def _template_image(params: dict[str, Any]) -> dict[str, Any]:
         """取识别器用的模板截图（界面里显示"我录的是什么"）。"""
         label = _require_str(params, "label")
         grayscale = bool(params.get("grayscale", False))
         return manager.template_image(label, grayscale=grayscale)
+
+    @server.method(METHOD_MAC_WINDOWS)
+    def _mac_windows(params: dict[str, Any]) -> dict[str, Any]:
+        """列出 macOS 上可以当设备用的窗口（界面上的选择器用它，也可手输句柄）。"""
+        from ..devices import macos
+
+        if not macos.available():
+            return {"platform": sys.platform, "allowed": False, "windows": []}
+        return {
+            "platform": sys.platform,
+            "allowed": macos.screen_capture_allowed(),
+            "windows": [item.to_dict() for item in macos.list_windows()],
+        }
 
     @server.method(METHOD_DEVICE_CONNECT)
     def _connect(params: dict[str, Any]) -> dict[str, Any]:

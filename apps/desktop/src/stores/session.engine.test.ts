@@ -9,14 +9,21 @@
  * 用 Mock 设备，所以 CI 里不需要真机。
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { graphSave, type GraphPayload } from '@/lib/rpc';
+import {
+  graphSave,
+  projectCreate,
+  projectDelete,
+  projectList,
+  projectRename,
+  type GraphPayload,
+} from '@/lib/rpc';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
@@ -184,6 +191,53 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     expect(useSessionStore.getState().frames[DEVICE_ID]?.fps).toBeGreaterThan(0);
   });
 
+  it(
+    '脚本库（多状态图）：create → list → rename → delete 全部落到真实磁盘目录',
+    { timeout: 20000 },
+    async () => {
+      // 用一个**独立**的库根：系统临时目录里可能还躺着别的残留脚本，
+      // 混在一起会让"删掉当前脚本之后切到谁"变得不可预测
+      const libraryRoot = mkdtempSync(path.join(tmpdir(), 'gamepilot-lib-'));
+
+      // 新建：会在库根下建目录（graph.json + templates/），并切过去
+      const created = await projectCreate('日常任务', libraryRoot);
+      const createdItem = created.items.find((item) => item.name === '日常任务');
+      expect(createdItem?.root).toBe(path.join(libraryRoot, '日常任务'));
+      expect(created.current).toBe(createdItem?.root);
+      expect(existsSync(path.join(libraryRoot, '日常任务', 'graph.json'))).toBe(true);
+      expect(existsSync(path.join(libraryRoot, '日常任务', 'templates'))).toBe(true);
+
+      // 列表：库里就这一个脚本（库根是独立的）
+      const listed = await projectList(libraryRoot);
+      expect(listed.items.map((item) => item.name)).toEqual(['日常任务']);
+
+      // 重命名：目录真的改名了，且当前脚本跟着走
+      const renamed = await projectRename(createdItem!.root, '日常任务2');
+      const renamedItem = renamed.items.find((item) => item.name === '日常任务2');
+      expect(renamedItem?.root).toBe(path.join(libraryRoot, '日常任务2'));
+      expect(renamed.current).toBe(renamedItem?.root);
+      expect(existsSync(createdItem!.root)).toBe(false);
+
+      // 删除 = 移到 .trash/（可恢复），不是真删
+      const deleted = await projectDelete(renamedItem!.root);
+      expect(deleted.items.map((item) => item.name)).not.toContain('日常任务2');
+      expect(existsSync(renamedItem!.root)).toBe(false);
+      const trash = path.join(libraryRoot, '.trash');
+      expect(existsSync(trash)).toBe(true);
+      expect(readdirSync(trash).some((name) => name.startsWith('日常任务2-'))).toBe(true);
+
+      // 库操作会把"当前脚本"切走，后面的用例要用回本用例自己的目录。
+      // 切回来之后要**等通知落地**：project.changed 是异步推来的，不等就可能被上一条覆盖
+      await useSessionStore.getState().switchProject(projectDir);
+      await waitFor(() => useSessionStore.getState().project?.root === projectDir);
+      expect(useSessionStore.getState().project?.root).toBe(projectDir);
+    },
+  );
+
+  it('非法脚本名：引擎拒绝并给出可直接显示的中文原因', { timeout: 20000 }, async () => {
+    await expect(projectCreate('日常/任务', projectDir)).rejects.toThrow(/不能包含/);
+  });
+
   it('录制模板：真裁剪落盘 + 识别器进状态图 + 后续帧带出分数', async () => {
     const draft: RecordDraft = {
       rect: [0.6, 0.3, 0.16, 0.12], // Mock 画面里的棋盘格 LOGO（有纹理 → 走模板匹配）
@@ -197,6 +251,8 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
       newNodeName: '主界面',
       newNodeId: 'main',
     };
+    // 录制写的是"当前脚本目录"，先确认它真的回到了本用例的目录（上一条库用例会切走）
+    expect(useSessionStore.getState().project?.root).toBe(projectDir);
     await useSessionStore.getState().record(DEVICE_ID, draft);
 
     expect(existsSync(path.join(projectDir, 'templates', 'logo.png'))).toBe(true);

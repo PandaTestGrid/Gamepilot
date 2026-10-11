@@ -1,13 +1,13 @@
-import { Cable, ChevronDown, CirclePlay, LayoutGrid, Redo2, Square, Undo2, Video } from 'lucide-react';
+import { Cable, ChevronDown, LayoutGrid, Redo2, Undo2, Video } from 'lucide-react';
 import { type ReactNode } from 'react';
 
 import { ProjectMenu } from '@/layout/ProjectMenu';
 import { LayoutMenu } from '@/layout/LayoutMenu';
 import { ToolbarButton, VDivider } from '@/layout/PanelShell';
+import { RunButton } from '@/layout/RunButton';
 import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { activeDevice, useDeviceStore } from '@/stores/device.store';
-import { useGraphStore } from '@/stores/graph.store';
 import { useEngineStore } from '@/stores/engine.store';
 import { useUiStore } from '@/stores/ui.store';
 import type { DotTone } from '@/layout/PanelShell';
@@ -27,7 +27,7 @@ function toneOf(status: DeviceStatus): DotTone {
   }
 }
 
-export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRun: () => void }): ReactNode {
+export function Toolbar(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
   const toggleDevicePopover = useUiStore((state) => state.toggleDevicePopover);
@@ -38,15 +38,6 @@ export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRu
   const selfCheck = useEngineStore((state) => state.selfCheck);
 
   const device = activeDevice(devices, activeId);
-  // 运行按钮要说清"为什么现在不能跑"，而不是点了没反应
-  const nodes = useGraphStore((state) => state.graphs[activeId]?.nodes.length ?? 0);
-  const runBlocker = !device
-    ? '先在设备面板里选择并连接一台设备'
-    : device.status !== 'connected'
-      ? '设备还没连上（点顶栏设备名 → 连接）'
-      : nodes === 0
-        ? '状态图里还没有节点：先在画面栏点「框选」录一个界面元素'
-        : null;
 
   return (
     // 顶栏同样允许换行：窗口窄/按钮多的时候不会把右边的状态挤没
@@ -56,15 +47,8 @@ export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRu
       <ProjectMenu />
       <VDivider />
 
-      <ToolbarButton
-        onClick={runBlocker ? undefined : onToggleRun}
-        active={running}
-        disabled={Boolean(runBlocker)}
-        title={runBlocker ?? '开始按状态图跑（需要先连接设备并录好节点）'}
-      >
-        {running ? <Square className="size-3.5" /> : <CirclePlay className="size-3.5" />}
-        {running ? '停止' : '运行'}
-      </ToolbarButton>
+      {/* 运行/停止：作用域是"当前设备"（不是状态图本身），所以常驻顶栏设备选择器旁 */}
+      <RunButton />
       <ToolbarButton
         onClick={toggleRecording}
         active={recordMode !== 'off'}

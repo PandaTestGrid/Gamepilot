@@ -44,10 +44,15 @@ export const GRAPH_LAYOUT: LayoutSpec = {
   panels: { canvas: 68, editor: 32 },
 };
 
-/** 右栏：事件 62 / 识别器 38 */
-export const RIGHT_LAYOUT: LayoutSpec = {
-  id: 'gamepilot.layout.right.v1',
-  panels: { events: 62, recognizers: 38 },
+/**
+ * 主区 / 底部调试抽屉：78 / 22。
+ *
+ * 右栏不再是纵向分组：它改成 Tab（脚本库 / 识别器，见 layout/RightColumn.tsx），
+ * 事件流搬到了底部抽屉 —— 调试信息集中在下面一处，右栏留给"管理"。
+ */
+export const DOCK_LAYOUT: LayoutSpec = {
+  id: 'gamepilot.layout.dock.v1',
+  panels: { main: 78, dock: 22 },
 };
 
 export interface LayoutPreset {
@@ -68,7 +73,7 @@ export const LAYOUT_PRESETS: readonly LayoutPreset[] = [
       [SHELL_LAYOUT.id]: SHELL_LAYOUT.panels,
       [SCREEN_LAYOUT.id]: SCREEN_LAYOUT.panels,
       [GRAPH_LAYOUT.id]: GRAPH_LAYOUT.panels,
-      [RIGHT_LAYOUT.id]: RIGHT_LAYOUT.panels,
+      [DOCK_LAYOUT.id]: DOCK_LAYOUT.panels,
     },
   },
   {
@@ -78,7 +83,7 @@ export const LAYOUT_PRESETS: readonly LayoutPreset[] = [
     groups: {
       [SHELL_LAYOUT.id]: { screen: 52, graph: 28, right: 20 },
       [SCREEN_LAYOUT.id]: { view: 84, readout: 16 },
-      [RIGHT_LAYOUT.id]: { events: 50, recognizers: 50 },
+      [DOCK_LAYOUT.id]: { main: 90, dock: 10 },
     },
   },
   {
@@ -89,16 +94,17 @@ export const LAYOUT_PRESETS: readonly LayoutPreset[] = [
       [SHELL_LAYOUT.id]: { screen: 26, graph: 52, right: 22 },
       [GRAPH_LAYOUT.id]: { canvas: 78, editor: 22 },
       [SCREEN_LAYOUT.id]: { view: 62, readout: 38 },
+      [DOCK_LAYOUT.id]: { main: 86, dock: 14 },
     },
   },
   {
-    id: 'events',
-    name: '调试优先（事件流最大）',
-    note: '事件与识别器各占一半高度，方便盯失败原因',
+    id: 'debug',
+    name: '调试优先（抽屉最大）',
+    note: '底部抽屉拉开一半：事件流 / 日志 / 控制台一起盯',
     groups: {
-      [SHELL_LAYOUT.id]: { screen: 30, graph: 26, right: 44 },
-      [RIGHT_LAYOUT.id]: { events: 70, recognizers: 30 },
-      [SCREEN_LAYOUT.id]: { view: 56, readout: 44 },
+      [SHELL_LAYOUT.id]: { screen: 32, graph: 42, right: 26 },
+      [DOCK_LAYOUT.id]: { main: 52, dock: 48 },
+      [SCREEN_LAYOUT.id]: { view: 60, readout: 40 },
     },
   },
 ];

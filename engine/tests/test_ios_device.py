@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from gamepilot.devices import ios, ios_usb
+from gamepilot.devices import ios, ios_usb, macos
 
 
 def _fake_binary(directory: Path, name: str, body: str) -> str:
@@ -208,3 +208,65 @@ def test_named_buttons_cover_android_keys() -> None:
     """脚本里用 back/recents 时 iOS 也要能跑（映射到 Home）。"""
     for name in ("home", "lock", "volume_up", "volume_down", "back", "recents"):
         assert name in ios.NAMED_BUTTONS
+
+
+# ---------------------------------------------------------------- macOS 本机窗口
+
+
+def test_macos_window_filtering_drops_chrome_and_tiny_windows() -> None:
+    """窗口过滤是纯函数：菜单栏/层不为 0/太小的窗口不能当设备（依赖真实桌面没法测）。"""
+    raw = [
+        {
+            "kCGWindowNumber": 1,
+            "kCGWindowLayer": 0,
+            "kCGWindowOwnerName": "访达",
+            "kCGWindowName": "gamepilot",
+            "kCGWindowOwnerPID": 100,
+            "kCGWindowBounds": {"X": 10, "Y": 20, "Width": 800, "Height": 500},
+        },
+        {
+            "kCGWindowNumber": 2,
+            "kCGWindowLayer": 25,
+            "kCGWindowOwnerName": "Window Server",
+            "kCGWindowName": "菜单",
+            "kCGWindowBounds": {"X": 0, "Y": 0, "Width": 2000, "Height": 40},
+        },
+        {
+            "kCGWindowNumber": 3,
+            "kCGWindowLayer": 0,
+            "kCGWindowOwnerName": "提示",
+            "kCGWindowName": "",
+            "kCGWindowBounds": {"X": 0, "Y": 0, "Width": 80, "Height": 60},
+        },
+        {
+            "kCGWindowNumber": 4,
+            "kCGWindowLayer": 0,
+            "kCGWindowOwnerName": "访达",
+            "kCGWindowName": "gamepilot",
+            "kCGWindowOwnerPID": 100,
+            "kCGWindowBounds": {"X": 10, "Y": 20, "Width": 800, "Height": 500},
+        },
+    ]
+    windows = macos.filter_windows(raw)
+    assert [item.handle for item in windows] == [1], "只留普通层、够大、去重后的窗口"
+    assert windows[0].label == "访达 — gamepilot"
+    assert windows[0].to_dict()["uri"] == "Mac:///?window=1"
+
+
+def test_macos_window_point_mapping() -> None:
+    """归一化坐标 → 窗口内全局点坐标（CGEvent 用的就是屏幕点，Retina 不影响）。"""
+    bounds = (820.0, 254.0, 920.0, 436.0)
+    assert macos.window_point(bounds, 0.5, 0.5) == (1280.0, 472.0)
+    assert macos.window_point(bounds, 0.0, 0.0) == (820.0, 254.0)
+    assert macos.window_point(bounds, 1.0, 1.0) == (1740.0, 690.0)
+    # 越界钳到边界，别点到别的窗口上去
+    assert macos.window_point(bounds, -1.0, 2.0) == (820.0, 690.0)
+
+
+def test_macos_controller_rejects_unknown_handle() -> None:
+    """句柄不存在要明确报错，而不是随便抓一个窗口。"""
+    if not macos.available():
+        pytest.skip("非 macOS")
+    controller = macos.MacWindowController(window="999999999")
+    with pytest.raises(RuntimeError, match="没找到目标窗口"):
+        controller.connect()

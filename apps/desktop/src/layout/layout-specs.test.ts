@@ -11,13 +11,13 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   applyLayoutPanels,
   applyLayoutPreset,
+  DOCK_LAYOUT,
   GRAPH_LAYOUT,
   LAYOUT_PRESETS,
   layoutStorageKey,
   registerLayoutGroup,
   rememberLayout,
   resetLayouts,
-  RIGHT_LAYOUT,
   SCREEN_LAYOUT,
   SHELL_LAYOUT,
   type LayoutPanels,
@@ -25,7 +25,7 @@ import {
   type LayoutSpec,
 } from '@/layout/layout-specs';
 
-const ALL_SPECS: readonly LayoutSpec[] = [SHELL_LAYOUT, SCREEN_LAYOUT, GRAPH_LAYOUT, RIGHT_LAYOUT];
+const ALL_SPECS: readonly LayoutSpec[] = [SHELL_LAYOUT, SCREEN_LAYOUT, GRAPH_LAYOUT, DOCK_LAYOUT];
 
 function presetById(id: string): LayoutPreset {
   const preset = LAYOUT_PRESETS.find((item) => item.id === id);
@@ -51,7 +51,7 @@ describe('布局分组', () => {
     }
   });
 
-  it('主壳三栏与栏内的纵向分组各用各的 id（记忆不会互相覆盖）', () => {
+  it('主壳三栏、栏内纵向分组、底部抽屉各用各的 id（记忆不会互相覆盖）', () => {
     const ids = ALL_SPECS.map((spec) => spec.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
@@ -103,14 +103,14 @@ describe('预设', () => {
 
   it('恢复默认布局 = 应用第一个预设（均衡）', () => {
     const applied: LayoutPanels[] = [];
-    const unregister = registerLayoutGroup(RIGHT_LAYOUT.id, (panels) => {
+    const unregister = registerLayoutGroup(DOCK_LAYOUT.id, (panels) => {
       applied.push(panels);
       return { ...panels };
     });
 
     resetLayouts();
 
-    expect(applied[0]).toEqual(LAYOUT_PRESETS[0]?.groups[RIGHT_LAYOUT.id]);
+    expect(applied[0]).toEqual(LAYOUT_PRESETS[0]?.groups[DOCK_LAYOUT.id]);
     unregister();
     localStorage.clear();
   });

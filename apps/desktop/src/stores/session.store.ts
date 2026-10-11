@@ -40,6 +40,7 @@ import { toGraphData } from '@/lib/graph-adapter';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
+import { useLogStore } from '@/stores/log.store';
 import type { RecordDraft } from '@/types';
 
 export interface FrameState {
@@ -98,6 +99,11 @@ interface SessionState {
   readonly refreshProject: () => Promise<void>;
   /** 切换脚本目录：引擎会热重载所有设备的状态图 */
   readonly switchProject: (dir: string) => Promise<void>;
+  /**
+   * 引擎那边已经切好脚本了（脚本库的 create/duplicate/rename/delete 都会切），
+   * 界面只做两件事：回显当前脚本信息 + 重新拉每台设备的状态图。不重复发 project.set。
+   */
+  readonly applyProjectChange: () => Promise<void>;
 }
 
 function applyGraph(deviceId: string, payload: GraphPayload, live?: FrameState): void {
@@ -280,6 +286,12 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         return;
       }
 
+      if (method === 'engine.log') {
+        // 引擎结构化日志 → 底部抽屉的「日志」Tab（stderr 那条路照旧）
+        useLogStore.getState().appendEngine(params);
+        return;
+      }
+
       if (method === 'project.changed') {
         const info = params as unknown as ProjectInfo;
         set({ project: info });
@@ -435,6 +447,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   refreshProject: async () => {
+    // 只回显信息，不动各设备的状态图（切换/库操作请用 applyProjectChange）
     try {
       set({ project: await projectGet() });
     } catch (error) {
@@ -444,9 +457,19 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
   switchProject: async (dir) => {
     try {
-      const info = await projectSet(dir);
+      await projectSet(dir);
+      await get().applyProjectChange();
+      set({ error: null });
+    } catch (error) {
+      set({ error: `切换脚本目录失败: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  },
+
+  applyProjectChange: async () => {
+    try {
+      const info = await projectGet();
       set({ project: info, error: null });
-      // 换目录后每台设备的状态图都变了：重新拉一遍（引擎侧已热重载）
+      // 换脚本后每台设备的状态图都变了：重新拉一遍（引擎侧已热重载，当前节点与运行态保留）
       for (const deviceId of Object.keys(get().ready)) {
         if (!get().ready[deviceId]) {
           continue;
@@ -455,7 +478,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         applyGraph(deviceId, graph, get().frames[deviceId]);
       }
     } catch (error) {
-      set({ error: `切换脚本目录失败: ${error instanceof Error ? error.message : String(error)}` });
+      set({ error: `读取脚本目录失败: ${error instanceof Error ? error.message : String(error)}` });
     }
   },
 

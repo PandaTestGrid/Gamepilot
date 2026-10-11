@@ -8,11 +8,12 @@
  *   - iOS 设备由引擎发现（pymobiledevice3 usbmux，仅 17.4+），点一下就连；
  */
 import { MoreHorizontal, RefreshCw, Search } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 
 import { StatusDot, type DotTone } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import { macWindows, type MacWindowInfo } from '@/lib/rpc';
 import { useDeviceStore } from '@/stores/device.store';
 import { useSessionStore } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
@@ -54,6 +55,37 @@ export function DevicePopover(): ReactNode {
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<'all' | DeviceKind>('all');
   const [advanced, setAdvanced] = useState(false);
+  // 本机窗口（macOS）：列表 + 手输句柄
+  const [macOpen, setMacOpen] = useState(false);
+  const [macAllowed, setMacAllowed] = useState(true);
+  const [windows, setWindows] = useState<MacWindowInfo[]>([]);
+  const [handleInput, setHandleInput] = useState('');
+  const [macNote, setMacNote] = useState('');
+
+  const loadWindows = useCallback(async () => {
+    try {
+      const result = await macWindows();
+      setWindows(result.windows);
+      setMacAllowed(result.allowed);
+      setMacNote(
+        result.platform !== 'darwin'
+          ? '本机窗口只在 macOS 上可用（Windows 用同一套接口，待实现）'
+          : result.allowed
+            ? `找到 ${result.windows.length} 个窗口`
+            : '缺少「屏幕录制」权限，抓到的画面会是空白',
+      );
+    } catch (error) {
+      setMacNote(`取窗口列表失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, []);
+
+  const connectWindow = (handle: number | string): void => {
+    if (!handle) {
+      return;
+    }
+    // 设备 id 用句柄拼：引擎侧会按 window=<句柄> 解析出同一个窗口
+    void connectSession(`macos:${handle}`, `Mac:///?window=${handle}`);
+  };
 
   const rows = useMemo(
     () =>
@@ -173,6 +205,75 @@ export function DevicePopover(): ReactNode {
             <MoreHorizontal className="size-3" /> 高级
           </button>
           <div className="flex-1" />
+          {/* 本机窗口（macOS）：选窗口或直接输句柄 */}
+          <div className="mt-1 border-t border-line pt-1">
+            <button
+              type="button"
+              onClick={() => {
+                const next = !macOpen;
+                setMacOpen(next);
+                // 展开时才去枚举窗口（枚举本身会触发一次系统权限检查）
+                if (next) {
+                  void loadWindows();
+                }
+              }}
+              className="flex w-full items-center gap-1 text-badge text-dim hover:text-fg"
+            >
+              {macOpen ? '▾' : '▸'} 本机窗口（macOS）{macNote ? ` · ${macNote}` : ''}
+            </button>
+            {macOpen && (
+              <div className="mt-1 flex flex-col gap-1">
+                {windows.length === 0 && (
+                  <span className="text-badge text-faint">
+                    {macAllowed ? '没有可选窗口（刷新试试）' : '需要先在系统设置里给「屏幕录制」权限'}
+                  </span>
+                )}
+                {windows.slice(0, 40).map((window) => (
+                  <button
+                    key={window.handle}
+                    type="button"
+                    onClick={() => connectWindow(window.handle)}
+                    className="flex items-center gap-1 rounded-sm px-1 text-left text-badge text-dim hover:bg-raised hover:text-fg"
+                    title={`${window.label} · ${window.width}x${window.height}（点一下连上这个窗口）`}
+                  >
+                    <span className="w-10 shrink-0 text-faint">#{window.handle}</span>
+                    <span className="min-w-0 flex-1 truncate">{window.label}</span>
+                    <span className="shrink-0 text-faint">
+                      {window.width}x{window.height}
+                    </span>
+                  </button>
+                ))}
+                <div className="flex items-center gap-1">
+                  <input
+                    value={handleInput}
+                    onChange={(event) => setHandleInput(event.target.value.replace(/\D/g, ''))}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        connectWindow(handleInput);
+                      }
+                    }}
+                    placeholder="或直接输句柄，如 89"
+                    className="h-5 min-w-0 flex-1 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => connectWindow(handleInput)}
+                    className="h-5 shrink-0 rounded-sm border border-line px-1 text-badge text-dim hover:text-fg"
+                  >
+                    连接句柄
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void loadWindows()}
+                    className="h-5 shrink-0 rounded-sm border border-line px-1 text-badge text-dim hover:text-fg"
+                  >
+                    刷新
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <span
             className="text-faint"
             title="pymobiledevice3 隧道 + DVT 采集 + CoreDevice HID；需要 iOS 17.4+"
