@@ -39,6 +39,14 @@ export function RecordOverlay({ deviceId, imageBox }: { deviceId: string; imageB
 
   const [x, , w] = draft.rect;
   const flip = x + w > 0.55;
+  // 选区在容器里的位置（取左上角），再夹进视口，保证弹框永远看得见
+  const anchor = canvasRectToPixels(imageBox, draft.rect) ?? { left: 0, top: 0, width: 0, height: 0 };
+  const PANEL_W = 280;
+  const PANEL_H = 300;
+  const clamp = (value: number): number =>
+    Math.min(Math.max(value, 8), Math.max(8, window.innerWidth - PANEL_W - 8));
+  const clampY = (value: number): number =>
+    Math.min(Math.max(value, 8), Math.max(8, window.innerHeight - PANEL_H - 8));
 
   return (
     <div
@@ -47,11 +55,14 @@ export function RecordOverlay({ deviceId, imageBox }: { deviceId: string; imageB
         'border-l-2 border-l-brand',
       )}
       style={{
-        ...(canvasRectToPixels(imageBox, draft.rect) ?? { left: 0, top: 0, width: 0, height: 0 }),
-        // 浮层只需要落点，宽高由内容决定
+        // 用 fixed + 视口内贴边：面板很窄时（画面栏 ~270px），跟着选区定位会被裁掉
+        // （用户截图反馈"选中后弹框被遮挡"）。这里只取选区的落点，然后夹进视口。
+        position: 'fixed',
+        left: clamp(anchor.left + (flip ? -288 : imageBox.width * 0.1 + 8)),
+        top: clampY(anchor.top),
+        transform: undefined,
         width: undefined,
         height: undefined,
-        transform: flip ? 'translateX(8px)' : undefined,
       }}
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
