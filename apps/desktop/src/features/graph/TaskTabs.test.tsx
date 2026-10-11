@@ -28,7 +28,7 @@ describe('任务标签栏', () => {
       project: {
         root: '/tmp/x/y',
         graphPath: '/tmp/x/y/graph.json',
-        templates: '/tmp/x/y/templates',
+        templates: 0,
         nodes: 0,
         edges: 0,
         recognizers: 0,
