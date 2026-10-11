@@ -124,7 +124,7 @@ export function WorkspaceTree(): ReactNode {
                 </div>
 
                 {!folded && (project.tasks ?? []).length > 0 && (
-                  <div className="ml-3 border-l border-line pl-1">
+                  <div className="ml-3 border-l border-line pl-1 [&_button]:h-6 [&_button]:py-0 [&_button]:leading-6">
                     {(project.tasks ?? []).map((task) => {
                       const asScript: ProjectSummary = {
                         name: task.name,
@@ -178,7 +178,7 @@ export function WorkspaceTree(): ReactNode {
                 })();
               }
             }}
-            className="w-full px-4 py-0.5 text-left text-faint hover:bg-raised hover:text-fg"
+            className="h-6 w-full px-4 text-left leading-6 text-faint hover:bg-raised hover:text-fg"
           >
             ＋项目
           </button>
