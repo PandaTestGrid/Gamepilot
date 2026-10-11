@@ -39,6 +39,42 @@ describe('底部调试抽屉', () => {
     useSessionStore.setState({ frames: {}, links: {}, running: {}, ready: {}, error: null });
   });
 
+  it('状态行不换行也不压扁：指标 shrink-0/nowrap，按钮 shrink-0（小窗口的布局回归）', () => {
+    const { ref } = fakePanelRef();
+    render(<BottomDock panelRef={ref} />);
+
+    // 小窗口下的老毛病：`link dvt（慢）` 的 `（慢）` 掉到第二行、`run 运行中` 被截成半个字。
+    // jsdom 没有排版引擎，所以这里锁的是"不许换行/不许压缩"这条 CSS 契约本身。
+    for (const key of ['node', 'tick', 'vote', 'link', 'fps', 'capture', 'input', 'run']) {
+      const chip = screen.getByText(key).parentElement;
+      expect(chip?.className, `${key} 这一枚应当不换行`).toContain('whitespace-nowrap');
+      expect(chip?.className, `${key} 这一枚不参与压缩`).toContain('shrink-0');
+    }
+
+    // 挤不下时收起谁：node / run 永不收起（"在哪 / 跑没跑"必须看得见），
+    // 其余六枚都带一个容器查询阈值（容器 = 状态行自己，见 StatusBar 的 `@container`）
+    expect(screen.getByText('node').parentElement?.className).not.toContain('@max-');
+    expect(screen.getByText('run').parentElement?.className).not.toContain('@max-');
+    for (const key of ['input', 'capture', 'vote', 'link', 'fps', 'tick']) {
+      expect(screen.getByText(key).parentElement?.className, `${key} 应当有收起阈值`).toMatch(
+        /@max-\[\d+px\]:hidden/,
+      );
+    }
+
+    // 事件摘要先让位（截断 + 窄了整条收起），不会去挤指标
+    const summary = screen.getByText('骨架自检未运行');
+    expect(summary.className).toContain('truncate');
+    expect(summary.className).toContain('min-w-0');
+    expect(summary.className).toMatch(/@max-\[\d+px\]:hidden/);
+
+    // 右侧 Tab / 抽屉按钮整组不压缩：中文标签被挤成竖排文字就点不了了
+    for (const label of ['事件流', '日志', '控制台', '时间轴', '抽屉']) {
+      const button = screen.getByText(label).closest('button');
+      expect(button?.className, `${label} 按钮应当不压缩`).toContain('shrink-0');
+      expect(button?.className, `${label} 按钮应当不换行`).toContain('whitespace-nowrap');
+    }
+  });
+
   it('四个 Tab 都在，且收起时面板是 collapse（不占纵向空间）', () => {
     const { ref, calls } = fakePanelRef();
     render(<BottomDock panelRef={ref} />);

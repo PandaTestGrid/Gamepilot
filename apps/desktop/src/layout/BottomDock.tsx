@@ -48,37 +48,40 @@ export function BottomDock({
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-panel">
-      <div className="flex h-7 shrink-0 items-center gap-1 border-t border-line pl-3">
+      {/* 左右各 12px：状态行贴左边、抽屉开关贴右边，两边留白对称（原来右边只有 8px 的 mr-2）。
+          右侧这一组一律 `shrink-0` + `whitespace-nowrap`：小窗口下要收的是左边的指标
+          （见 StatusBar 的容器查询），按钮被挤成竖排文字就完全没法点了 */}
+      <div className="flex h-7 shrink-0 items-center border-t border-line px-3">
         <StatusBar />
 
-        <span className="flex-1" />
+        <div className="ml-2 flex shrink-0 items-center gap-1">
+          {DOCK_TABS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              title={item.hint}
+              onClick={() => toggleDock(item.id)}
+              className={cn(
+                'flex h-5 shrink-0 items-center gap-1 rounded-sm px-1.5 text-badge whitespace-nowrap',
+                open && tab === item.id ? 'bg-active text-fg' : 'text-dim hover:bg-raised hover:text-fg',
+              )}
+            >
+              {item.label}
+            </button>
+          ))}
 
-        {DOCK_TABS.map((item) => (
           <button
-            key={item.id}
             type="button"
-            title={item.hint}
-            onClick={() => toggleDock(item.id)}
-            className={cn(
-              'flex h-5 items-center gap-1 rounded-sm px-1.5 text-badge whitespace-nowrap',
-              open && tab === item.id ? 'bg-active text-fg' : 'text-dim hover:bg-raised hover:text-fg',
-            )}
+            onClick={() => (open ? closeDock() : toggleDock(tab))}
+            title={
+              open ? '收起调试抽屉（也可以拖上面的横线）' : '展开调试抽屉（事件流 / 日志 / 控制台 / 时间轴）'
+            }
+            className="flex h-5 shrink-0 items-center gap-1 rounded-sm px-1.5 text-badge whitespace-nowrap text-dim hover:bg-raised hover:text-fg"
           >
-            {item.label}
+            {open ? <ChevronDown className="size-3" /> : <ChevronUp className="size-3" />}
+            {open ? '收起' : '抽屉'}
           </button>
-        ))}
-
-        <button
-          type="button"
-          onClick={() => (open ? closeDock() : toggleDock(tab))}
-          title={
-            open ? '收起调试抽屉（也可以拖上面的横线）' : '展开调试抽屉（事件流 / 日志 / 控制台 / 时间轴）'
-          }
-          className="mr-2 flex h-5 items-center gap-1 rounded-sm px-1.5 text-badge text-dim hover:bg-raised hover:text-fg"
-        >
-          {open ? <ChevronDown className="size-3" /> : <ChevronUp className="size-3" />}
-          {open ? '收起' : '抽屉'}
-        </button>
+        </div>
       </div>
 
       {/* 收起时这块被 Panel 裁掉（collapsedSize=28px），内容不必卸载：

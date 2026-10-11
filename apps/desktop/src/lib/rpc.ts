@@ -539,6 +539,14 @@ export interface TreeProject {
   readonly workspaces: readonly TreeWorkspace[];
 }
 
+/** 在某个项目（库根）下建工作区目录 */
+export function workspaceMkdir(
+  project: string,
+  name: string,
+): Promise<{ created: string; projects: TreeProject[] }> {
+  return rpc<{ created: string; projects: TreeProject[] }>('workspace.mkdir', { project, name });
+}
+
 export function workspaceTree(): Promise<{ projects: TreeProject[] }> {
   return rpc<{ projects: TreeProject[] }>('workspace.tree', {});
 }
