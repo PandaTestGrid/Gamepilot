@@ -325,3 +325,30 @@ def test_graph_validates_set_action_target() -> None:
     )
     with pytest.raises(ValueError, match="未定义的变量"):
         graph.validate()
+
+
+def test_graph_round_trip_keeps_variables() -> None:
+    """变量必须写进文件再读回来（踩过：to_dict 漏了这段，存盘后变量就没了）。"""
+    from gamepilot.core.graph import Graph
+
+    graph = Graph.from_dict(
+        {
+            "nodes": [{"id": "main", "name": "主界面", "enter": []}],
+            "recognizers": {},
+            "variables": {"点X": {"type": "number", "value": 0.25}},
+            "edges": [],
+        },
+        base_dir=".",
+    )
+    payload = graph.to_dict()
+    assert payload["variables"] == {"点X": {"type": "number", "value": 0.25}}, payload
+
+    again = Graph.from_dict(payload, base_dir=".")
+    assert again.variables["点X"].value == 0.25
+
+
+def test_graph_omits_empty_variables_section() -> None:
+    """没有变量就不写这段，老脚本文件保持干净。"""
+    from gamepilot.core.graph import Graph
+
+    assert "variables" not in Graph.from_dict({"nodes": [], "recognizers": {}, "edges": []}, base_dir=".").to_dict()

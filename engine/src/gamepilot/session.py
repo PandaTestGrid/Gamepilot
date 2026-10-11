@@ -660,6 +660,10 @@ class DeviceSession:
                 "streamFps": round(self.stream_fps, 1),
                 # iOS 会变：界面方向（横屏坐标变换靠它，排错时一眼能看到）
                 "variables": self.engine.variables.snapshot(),
+                # 断点调试：暂停态与断点列表（界面/命令行都能看）
+                "paused": self.engine.paused,
+                "pausedAt": self.engine.paused_at,
+                "breakpoints": sorted(self.engine.breakpoints),
                 "orientation": orientation_code,
                 "orientationName": ORIENTATION_LABELS.get(orientation_code, None) if orientation_code else None,
                 "linkNote": getattr(self.controller, "link_note", ""),

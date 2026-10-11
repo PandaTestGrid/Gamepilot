@@ -190,13 +190,17 @@ class Graph:
         return cls.from_dict(data, base_dir=os.path.dirname(os.path.abspath(path)), path=os.path.abspath(path))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "version": 1,
             "defaults": dict(self.defaults),
             "recognizers": {label: dict(spec) for label, spec in self.specs.items()},
             "nodes": [node.to_dict() for node in self.nodes.values()],
             "edges": [edge.to_dict() for edge in self.edges],
         }
+        if self.variables:
+            # 没有变量就不写这段（老脚本的文件保持干净）
+            out["variables"] = {name: var.to_dict() for name, var in self.variables.items()}
+        return out
 
     def save(self, path: str | None = None) -> str:
         target = path or self.path
