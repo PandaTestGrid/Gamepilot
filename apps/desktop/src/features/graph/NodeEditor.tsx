@@ -6,6 +6,7 @@
  */
 import { type ReactNode, useState } from 'react';
 
+import { TemplateThumb } from '@/features/recognizers/TemplateThumb';
 import { describeAction, describeCondition, describeNodeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
@@ -71,18 +72,21 @@ export function NodeEditor({
         {labels.map((label) => {
           const active = enter.includes(label);
           return (
-            <button
-              key={label}
-              type="button"
-              disabled={busy}
-              onClick={() => toggleEnter(label)}
-              className={cn(
-                'rounded-sm border px-1 text-badge',
-                active ? 'border-confirmed text-confirmed' : 'border-line text-dim hover:text-fg',
-              )}
-            >
-              {label}
-            </button>
+            <span key={label} className="flex items-center gap-0.5">
+              {/* 模板缩略图：点一下切黑白（模板匹配本来就是按灰度算的） */}
+              <TemplateThumb label={label} size={18} />
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => toggleEnter(label)}
+                className={cn(
+                  'rounded-sm border px-1 text-badge',
+                  active ? 'border-confirmed text-confirmed' : 'border-line text-dim hover:text-fg',
+                )}
+              >
+                {label}
+              </button>
+            </span>
           );
         })}
         {labels.length === 0 && (
@@ -104,6 +108,18 @@ export function NodeEditor({
           删除节点
         </button>
       </div>
+      {enter.length > 0 && (
+        <div className="mb-1 flex flex-wrap items-center gap-1 text-badge text-faint">
+          <span>这个界面用的模板：</span>
+          {enter.map((label) => (
+            <span key={label} className="flex items-center gap-0.5">
+              <TemplateThumb label={label} size={22} />
+              <span className="text-dim">{label}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* 这个界面的逻辑：怎么判定、有哪些操作、怎么进来的 */}
       <div className="flex flex-col gap-0.5 text-badge text-faint">
         {describeNodeLogic(node, graph).map((line) => (
