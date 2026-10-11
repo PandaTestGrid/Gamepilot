@@ -100,7 +100,13 @@
   /* 字号与行高：只用这几档，避免到处出现随手值 */
   --text-badge: 11px;
   --text-body: 12px;
-  --text-panel: 13px;
+  /*
+   * 面板标题 13px。名字里必须带 "panelhead"，不能叫 `--text-panel`：
+   * Tailwind v4 的 `text-*` 同时查字号表和颜色表，而本项目有个背景色 token `--color-panel`，
+   * 于是 `.text-panel` 生成的是 `color: var(--bg-panel)` —— 标题被涂成面板底色，
+   * 四个面板头（画面/状态图/事件/识别器）全部"看不见"。
+   */
+  --text-panelhead: 13px;
   --text-title: 15px;
 
   --height-toolbar: 36px;

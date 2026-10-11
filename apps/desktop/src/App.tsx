@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
+import { Group, Panel, Separator } from 'react-resizable-panels';
 
 import { DevicePopover } from '@/features/device/DevicePopover';
 import { ScreenPane } from '@/features/device/ScreenPane';
@@ -8,8 +8,10 @@ import { GraphPane } from '@/features/graph/GraphPane';
 import { RecognizerPane } from '@/features/recognizers/RecognizerPane';
 import { DeviceTabs } from '@/layout/DeviceTabs';
 import { ErrorBanner } from '@/layout/ErrorBanner';
+import { RIGHT_LAYOUT, SHELL_LAYOUT } from '@/layout/layout-specs';
 import { StatusBar } from '@/layout/StatusBar';
 import { Toolbar } from '@/layout/Toolbar';
+import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { devLog } from '@/lib/rpc';
 import { readPaneQuery, type PaneKind } from '@/lib/windows';
 import { connectedDevices, useDeviceStore } from '@/stores/device.store';
@@ -34,8 +36,8 @@ export function App(): ReactNode {
   const running = useSessionStore((state) => Boolean(state.running[activeId]));
   const startRun = useSessionStore((state) => state.startRun);
   const stopRun = useSessionStore((state) => state.stopRun);
-  // 布局记忆：拖过的栏宽会存进 localStorage，下次启动恢复
-  const { defaultLayout, onLayoutChanged } = useDefaultLayout({ id: 'gamepilot.layout.v1' });
+  // 布局记忆：拖过的比例会存进 localStorage，下次启动恢复（见 layout-specs.ts）
+  const shell = useLayoutGroup(SHELL_LAYOUT);
 
   // 两条订阅：引擎通知（engine.ready/...）与运行时消息（engine.frame / engine.event / device.*）
   useEffect(() => {
@@ -146,27 +148,31 @@ export function App(): ReactNode {
       <ErrorBanner />
 
       <main className="min-h-0 flex-1">
-        {/* 三栏可拖拽 + 布局记忆（DESIGN.md 决策 P3） */}
+        {/* 三栏可拖拽 + 布局记忆（DESIGN.md 决策 P3）；栏内还能再上下拖，见 RightColumn */}
         <Group
-          id="gamepilot.layout.v1"
+          id={SHELL_LAYOUT.id}
           orientation="horizontal"
-          defaultLayout={defaultLayout}
-          onLayoutChanged={onLayoutChanged}
+          defaultLayout={shell.defaultLayout}
+          onLayoutChanged={shell.onLayoutChanged}
+          groupRef={shell.groupRef}
           className="h-full"
         >
           <Panel id="screen" defaultSize="34%" minSize="22%">
             <ScreenPane />
           </Panel>
-          <Separator className="w-px bg-line transition-colors hover:bg-brand" />
+          <Separator
+            className="w-px bg-line transition-colors hover:bg-brand"
+            title="拖动改宽度 · 双击恢复默认"
+          />
           <Panel id="graph" defaultSize="40%" minSize="24%">
             <GraphPane />
           </Panel>
-          <Separator className="w-px bg-line transition-colors hover:bg-brand" />
+          <Separator
+            className="w-px bg-line transition-colors hover:bg-brand"
+            title="拖动改宽度 · 双击恢复默认"
+          />
           <Panel id="right" defaultSize="26%" minSize="18%">
-            <div className="flex h-full flex-col">
-              <EventPane />
-              <RecognizerPane />
-            </div>
+            <RightColumn />
           </Panel>
         </Group>
       </main>
@@ -174,6 +180,38 @@ export function App(): ReactNode {
       <StatusBar running={running} />
       <DevicePopover />
     </div>
+  );
+}
+
+/**
+ * 右栏：事件流 + 识别器。
+ *
+ * 上下可拖是关键——事件流要盯失败原因，识别器要现场调阈值，
+ * 两者谁更重要随场景变（调试时事件大、调参时识别器大），固定 220px 根本不够用。
+ */
+function RightColumn(): ReactNode {
+  const right = useLayoutGroup(RIGHT_LAYOUT);
+
+  return (
+    <Group
+      id={RIGHT_LAYOUT.id}
+      orientation="vertical"
+      defaultLayout={right.defaultLayout}
+      onLayoutChanged={right.onLayoutChanged}
+      groupRef={right.groupRef}
+      className="h-full"
+    >
+      <Panel id="events" defaultSize="62%" minSize="25%">
+        <EventPane />
+      </Panel>
+      <Separator
+        className="h-px bg-line transition-colors hover:bg-brand"
+        title="拖动改高度 · 双击恢复默认"
+      />
+      <Panel id="recognizers" defaultSize="38%" minSize="15%">
+        <RecognizerPane />
+      </Panel>
+    </Group>
   );
 }
 
@@ -192,7 +230,7 @@ function StandalonePane({ pane, deviceId }: { pane: PaneKind; deviceId: string |
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <header className="flex h-7 shrink-0 items-center gap-2 border-b border-line bg-panel px-2">
-        <span className="text-panel font-medium">
+        <span className="text-panelhead font-medium">
           {pane === 'screen' ? '画面' : pane === 'graph' ? '状态图' : '事件'}
         </span>
         <span className="text-badge text-faint">{device?.name ?? '未指定设备'}</span>

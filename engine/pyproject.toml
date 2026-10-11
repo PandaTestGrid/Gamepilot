@@ -13,6 +13,8 @@ dependencies = [
   "adbutils>=2.0",
   # scrcpy 视频通道的 H.264 解码（BSD-3）。有它才能走 30fps 的投屏通道
   "av>=12",
+  # iOS 切 USB 配置（config2）用：小、纯 Python，libusb 在 macOS 自带
+  "pyusb>=1.2",
 ]
 
 [project.optional-dependencies]
@@ -78,7 +80,7 @@ show_error_codes = true
 # pymobiledevice3 是**可选**依赖（iOS 控制用）：本机装了 brew 版就能直接跑，
 # 没装时 iOS 那一路会给出明确提示，其它平台不受影响
 [[tool.mypy.overrides]]
-module = ["pymobiledevice3.*"]
+module = ["pymobiledevice3.*", "usb.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

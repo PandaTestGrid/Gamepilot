@@ -26,7 +26,8 @@ export function RecognizerPane(): ReactNode {
   return (
     <PanelShell
       title="识别器"
-      className="h-[220px] shrink-0"
+      // 高度由父级纵向 Group 决定（右栏可上下拖）；原来写死 220px，识别器一多就看不全
+      className="h-full"
       actions={<span className="text-badge text-faint">{recognizers.length} 个</span>}
     >
       <div className="h-full overflow-auto">

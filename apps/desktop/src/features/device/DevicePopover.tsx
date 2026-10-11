@@ -86,7 +86,7 @@ export function DevicePopover(): ReactNode {
         role="presentation"
       >
         <div className="flex h-7 items-center gap-2 border-b border-line px-2">
-          <span className="text-panel font-medium">设备</span>
+          <span className="text-panelhead font-medium">设备</span>
           <span className="text-badge text-faint">
             {connectedCount} 台已连接 · 上限 4
             {scanState === 'scanning' ? ' · 扫描中…' : lastScanAt ? ' · 已刷新' : ''}
@@ -175,9 +175,9 @@ export function DevicePopover(): ReactNode {
           <div className="flex-1" />
           <span
             className="text-faint"
-            title="QuickTime 采集 + pymobiledevice3 CoreDevice HID；需要 iOS 17.4+"
+            title="pymobiledevice3 隧道 + DVT 采集 + CoreDevice HID；需要 iOS 17.4+"
           >
-            iOS：17.4+（QuickTime 采集）· 用前需切 USB config2
+            iOS：17.4+（隧道采集 ≈8fps · 无需切 USB 配置）
           </span>
 
           {advanced && (

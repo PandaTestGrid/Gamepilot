@@ -47,8 +47,10 @@ export function NodeEditor({
   };
 
   return (
-    <div className="shrink-0 border-t border-line bg-panel px-2 py-1.5">
-      <div className="mb-1 flex items-center gap-2">
+    // 同 EdgeEditor：外框/分隔线交给 GraphPane 的纵向 Group，自己只负责内容
+    <div className="bg-panel px-2 py-1.5">
+      {/* 必须能换行：面板不宽、识别器又多的时候，不换行会把按钮挤成一列竖排文字 */}
+      <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="text-body text-brand">节点 {node.id}</span>
         <label className="flex items-center gap-1 text-badge text-dim">
           名称

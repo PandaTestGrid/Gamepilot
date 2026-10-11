@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from gamepilot.devices import ios
+from gamepilot.devices import ios, ios_usb
 
 
 def _fake_binary(directory: Path, name: str, body: str) -> str:
@@ -67,66 +67,58 @@ def test_discover_marks_unsupported_devices(tmp_path: Path, monkeypatch: pytest.
     assert found[0].status == "discovered"
 
 
+def test_ios_uses_tunnel_capture_not_quicktime() -> None:
+    """实测结论固化下来：不再有 ffmpeg/avfoundation 那条路（macOS 看不到 iPhone 采集设备）。"""
+    assert not hasattr(ios, "find_capture_device")
+    assert not hasattr(ios, "QuickTimeCapture")
+    assert hasattr(ios, "TunnelSession"), "采集走隧道 + DVT 截图"
+
+
 def test_no_pymobiledevice3_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda name: None)
     assert ios.list_devices() == []
     assert ios.discover() == []
 
 
-# ---------------------------------------------------------------- 采集设备名
+# ---------------------------------------------------------------- USB 配置测绘
 
 
-def test_find_capture_device_picks_iphone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    listing = """
-[AVFoundation indev @ 0x7f] AVFoundation video devices:
-[AVFoundation indev @ 0x7f] [0] FaceTime HD Camera
-[AVFoundation indev @ 0x7f] [3] iPhone 屏幕
-[AVFoundation indev @ 0x7f] AVFoundation audio devices:
-[AVFoundation indev @ 0x7f] [0] MacBook Pro Microphone
-"""
-    binary = _fake_binary(tmp_path, "ffmpeg", f"cat <<'EOF' 1>&2\n{listing}\nEOF\n")
-    monkeypatch.setattr(shutil, "which", lambda name: binary if name == "ffmpeg" else None)
-
-    assert ios.find_capture_device(binary) == (3, "iPhone 屏幕")
-    assert ios.find_capture_device(binary, name_hint="FaceTime") == (0, "FaceTime HD Camera")
+def test_usb_configuration_paths_counted() -> None:
+    """配置的"通路数"就是接口数：配置 2 只有 3 条、配置 6 有 11 条（实测机型）。"""
+    config2 = ios_usb.UsbConfiguration(value=2, interfaces=[(0, 0, 0x06), (1, 0, 0x01), (1, 1, 0x01), (2, 0, 0x03)])
+    # 同号接口的多个备用设置只算一条通路
+    config6 = ios_usb.UsbConfiguration(
+        value=6,
+        interfaces=[(0, 0, 0x06), (1, 0, 0xFF), (2, 0, 0xFF), (2, 1, 0xFF), (2, 2, 0xFF), (3, 0, 0x02)],
+    )
+    assert config2.paths == 3
+    assert config6.paths == 4, "接口号去重后 0/1/2/3 = 4 条通路"
+    assert "配置 2：3 条通路" in config2.describe()
 
 
-def test_find_capture_device_returns_none_when_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    listing = "AVFoundation video devices:\n[0] FaceTime HD Camera\nAVFoundation audio devices:\n"
-    binary = _fake_binary(tmp_path, "ffmpeg", f"cat <<'EOF' 1>&2\n{listing}\nEOF\n")
-    assert ios.find_capture_device(binary) is None
+def test_usb_survey_without_device_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ios_usb, "_pyusb", lambda: None)
+    assert ios_usb.survey() == []
+    assert "没看到 Apple 设备" in ios_usb.ensure_configuration(2)
 
 
-# ---------------------------------------------------------------- 采集管线
-
-
-def test_quicktime_capture_pipeline_decodes_frames() -> None:
-    """真的跑一遍 ffmpeg → MJPEG → PyAV：用 lavfi 合成源代替 QuickTime 采集设备。"""
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        pytest.skip("本机没有 ffmpeg")
-
-    capture = ios.QuickTimeCapture(
-        ffmpeg,
-        0,
-        fps=15,
-        input_args=[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=320x240:rate=15",
-            "-t",
-            "5",
+def test_usb_report_includes_current_configuration() -> None:
+    device = ios_usb.AppleUsbDevice(
+        bus=1,
+        address=3,
+        vendor=0x05AC,
+        product=0x12A8,
+        name="iPhone",
+        current=6,
+        configurations=[
+            ios_usb.UsbConfiguration(value=2, interfaces=[(0, 0, 0x06)]),
+            ios_usb.UsbConfiguration(value=6, interfaces=[(index, 0, 0xFF) for index in range(11)]),
         ],
     )
-    try:
-        capture.start(timeout=15)
-        assert capture.size == (320, 240), f"应该拿到合成源的分辨率，实际 {capture.size}"
-        first = capture.latest_frame(timeout=2)
-        assert first is not None and first.shape == (240, 320, 3)
-        assert int(first.max()) > 0, "画面不该是全黑"
-    finally:
-        capture.close()
+    text = device.describe()
+    assert "当前配置：6" in text
+    assert "配置 6：11 条通路" in text
+    assert "← 当前" in text
 
 
 # ---------------------------------------------------------------- 触摸换算

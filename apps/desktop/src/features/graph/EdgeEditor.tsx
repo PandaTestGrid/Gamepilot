@@ -75,8 +75,11 @@ export function EdgeEditor({
   };
 
   return (
-    <div className="shrink-0 border-t border-line bg-panel px-2 py-1.5">
-      <div className="mb-1 flex items-center gap-2">
+    // 这里是画布下方那块"编辑坞"的内容：外框与分隔线由 GraphPane 的纵向 Group 提供，
+    // 所以自己不再画 border-t（否则和分隔线叠成 2px），也不写 shrink-0（高度由拖动决定）
+    <div className="bg-panel px-2 py-1.5">
+      {/* 同 NodeEditor：面板窄的时候宁可换行，也不要把按钮挤成竖排 */}
+      <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className={cn('text-body', edge.kind === 'recovery' ? 'text-recovery' : 'text-confirmed')}>
           {edge.kind === 'recovery' ? '⚡ ' : ''}
           {edge.id}

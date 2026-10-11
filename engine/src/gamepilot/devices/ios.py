@@ -1,31 +1,35 @@
 """iOS 设备支持（**仅 iOS ≥ 17.4**）。
 
-采集走 QuickTime 管线（macOS 的 CoreMediaIO "iOS Screen Capture"，也就是 QuickTime Player
-用的那一 路）：ffmpeg `-f avfoundation` → MJPEG → PyAV 解码。
+采集：pymobiledevice3 用户态 RSD 隧道 + **DVT 截图循环**（实测 iPhone 15 Pro Max / iOS 26.6.2：
+128ms/张 ≈ 7.8fps、2796x1290；和 adb screencap 一个量级，对模板匹配足够）。
 
-控制走 pymobiledevice3 的 CoreDevice（RSD 用户态隧道，不用 sudo）：
+控制：同一条隧道上的 CoreDevice HID
 - 触摸：`UniversalHIDServiceService.send_touchscreen(CONTACT/RELEASE, x, y)`，坐标 0..65535
 - 按键：`IndigoHIDService.send_button(usage_page, usage_code, DOWN/UP)`
 - 文本：`create_keyboard_service()` + `send_keyboard()`
 
-⚠️ 两个前提（踩过才知道的）：
+**为什么不是 QuickTime**（实测结论，别再走弯路）：
 
-1. **USB 配置要先切 config2**：macOS 上 QuickTime 会独占 USB 设备，之后 usbmux / RSD 隧道
-   都连不上。所以采集之前必须先切配置 —— 各家机器上的做法不同，用环境变量
-   `GAMEPILOT_IOS_USB_CONFIG_CMD` 指定你的命令；没设置时只记一条提示，不阻塞。
-2. **触摸注入要有视频流在跑**：pymobiledevice3 的 HID 文档写明"media stream 必须已在运行，
-   否则 backboardd 会把 report 丢掉"。所以顺序必须是：先起 QuickTime 采集，再注入触摸。
-   （`connect()` 里就是按这个顺序做的。）
+1. macOS 上 ffmpeg/avfoundation **看不到** iOS 屏幕采集设备 —— 它属于 Continuity/External
+   类型，进程没有 `NSCameraUseContinuityCameraDeviceType` 声明就会被系统隐藏；
+   配置 1~6 全试过都不出现（ffmpeg 自己也警告这个 key）。
+2. pymobiledevice3 的隧道投屏（`DisplayService.startmediastream`）在 iOS 26 上直接报
+   "Remote control requires iOS 27.0 or later"。
+3. pymobiledevice3 的 HID 文档提到"触摸注入需要媒体流在跑"，但实测 **iOS 26.6.2 上不需要**
+   （UniversalHIDService 连上就能注入，触摸/按键都生效）。
 
-另外：pymobiledevice3 的 `UserspaceRsdTunnel` 是**进程级单例**，一个进程同时只能有一台
-iOS 设备走隧道；多台 iOS 需要拆进程。
+**USB 配置的真相**（用 pyusb 测绘了 6 套配置，见 `ios_usb.py`）：
+把设备切到配置 2 之后 **usbmux 通路会消失**（配置 2 只有 PTP + 音频 + HID），
+所以"QuickTime 独占设备、别的连不上"就是这么来的。正常数据通路在配置 6（11 条接口），
+本实现**不切配置**；`ios_usb.survey()` 只做诊断。
+
+`UserspaceRsdTunnel` 是**进程级单例**，一个进程同时只能带一台 iOS 设备（多台要拆进程）。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -36,6 +40,7 @@ from typing import Any
 
 import numpy as np
 
+from . import ios_usb
 from .base import (
     KIND_ANDROID,
     STATUS_DISCOVERED,
@@ -53,9 +58,6 @@ KIND_IOS = "ios"
 
 # 只有 17.4+ 才有可用的用户态 RSD 隧道（不用 sudo 就能控制）
 IOS_MIN_VERSION = (17, 4)
-
-# QuickTime/avfoundation 采集设备名里的关键字（macOS 上 iPhone 会以设备名出现）
-_QUICKTIME_NAME_HINTS = ("iphone", "ipad", "ios", "屏幕")
 
 # Indigo 按键：名字 → (usage_page, usage_code)
 NAMED_BUTTONS: dict[str, tuple[int, int]] = {
@@ -88,10 +90,6 @@ def version_supported(version: str) -> bool:
 
 def pymobiledevice3_available() -> bool:
     return shutil.which("pymobiledevice3") is not None
-
-
-def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
 
 
 # ---------------------------------------------------------------------- #
@@ -182,207 +180,41 @@ def discover() -> list[DeviceInfo]:
 # ---------------------------------------------------------------------- #
 
 
-def find_capture_device(ffmpeg: str, name_hint: str = "") -> tuple[int, str] | None:
-    """在 `ffmpeg -f avfoundation -list_devices` 里找 iOS 采集设备。"""
-    try:
-        result = subprocess.run(
-            [ffmpeg, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("列出 avfoundation 设备失败: %s", exc)
-        return None
-    stderr = result.stderr or ""
-    in_video = False
-    candidates: list[tuple[int, str]] = []
-    for line in stderr.splitlines():
-        if "AVFoundation video devices" in line:
-            in_video = True
-            continue
-        if "AVFoundation audio devices" in line:
-            break
-        if not in_video:
-            continue
-        match = re.search(r"\[(\d+)\]\s+(.+?)\s*$", line)
-        if match:
-            candidates.append((int(match.group(1)), match.group(2)))
-    if name_hint:
-        for index, name in candidates:
-            if name_hint.lower() in name.lower():
-                return index, name
-    for index, name in candidates:
-        if any(hint in name.lower() for hint in _QUICKTIME_NAME_HINTS):
-            return index, name
-    return None
+class TunnelSession:
+    """iOS 用户态隧道 + DVT 采集（进程级单例：一次一台设备）。
 
+    **为什么不是 QuickTime**：macOS 上 ffmpeg/avfoundation 看不到 iOS 屏幕采集设备
+    （它属于 Continuity/External 类型，进程没有 `NSCameraUseContinuityCameraDeviceType`
+    声明就会被系统隐藏；实测 config 1~6 全都不出现）。而 pymobiledevice3 的隧道投屏
+    （DisplayService.startmediastream）在 iOS 26 上直接报 "requires iOS 27.0 or later"。
+    所以 17.4 ~ 26.x 这条区间用 **DVT 截图循环**出帧：实测 128ms/张 ≈ 7.8fps、2796x1290，
+    对模板匹配足够（和 adb screencap 一个量级）。
 
-class QuickTimeCapture:
-    """QuickTime（CoreMediaIO）屏幕采集：ffmpeg → MJPEG → PyAV。"""
+    隧道不需要 sudo（UserspaceRsdTunnel），也不需要切 USB 配置
+    （配置 6 = 正常数据通路；切到配置 2 反而会让 usbmux 消失 —— 那才是"QT 独占"的真相）。
+    """
 
-    def __init__(
-        self,
-        ffmpeg: str,
-        device_index: int,
-        *,
-        fps: int = 30,
-        input_args: list[str] | None = None,
-    ) -> None:
-        self.ffmpeg = ffmpeg
-        self.device_index = device_index
+    def __init__(self, udid: str, *, fps: float = 8.0) -> None:
+        self.udid = udid
         self.fps = fps
-        # 默认走 QuickTime（avfoundation）；测试里可以换成 lavfi 合成源，
-        # 这样"ffmpeg → MJPEG → PyAV → ndarray"整条管线不依赖真机也能验
-        self.input_args = input_args or [
-            "-f",
-            "avfoundation",
-            "-framerate",
-            str(fps),
-            # 只取视频：音频会让 ffmpeg 去协商麦克风权限
-            "-i",
-            f"{device_index}:none",
-        ]
         self.size: Size = (0, 0)
         self.fps_actual = 0.0
         self.frames = 0
         self.error: str | None = None
+        self._loop: Any = None
+        self._thread: threading.Thread | None = None
+        self._tunnel: Any = None
+        self._rsd: Any = None
+        self._dvt: Any = None
+        self._shot: Any = None
         self._frame: np.ndarray | None = None
         self._frame_id = 0
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._stop = threading.Event()
-        self._proc: subprocess.Popen[bytes] | None = None
-        self._container: Any = None
-        self._thread: threading.Thread | None = None
+        self._task: Any = None
 
-    def start(self, timeout: float = 12.0) -> None:
-        import av
-
-        command = [
-            self.ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            *self.input_args,
-            "-an",
-            "-c:v",
-            "mjpeg",
-            "-q:v",
-            "4",
-            "-f",
-            "mjpeg",
-            "pipe:1",
-        ]
-        logger.info("QuickTime 采集: %s", " ".join(command))
-        self._proc = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-        )
-        assert self._proc.stdout is not None
-        self._container = av.open(self._proc.stdout, format="mjpeg")
-        self._thread = threading.Thread(target=self._loop, name="quicktime", daemon=True)
-        self._thread.start()
-
-        # 等首帧：界面需要分辨率，而且"视频流在跑"也是触摸注入的前提
-        deadline = time.time() + timeout
-        while time.time() < deadline and self._frame is None:
-            time.sleep(0.1)
-        if self._frame is None:
-            raise RuntimeError(
-                "QuickTime 采集没有出帧。检查：① 设备已解锁信任 ② 没被 QuickTime Player 独占 "
-                "③ GAMEPILOT_IOS_USB_CONFIG_CMD 里的 config2 切换是否已执行"
-            )
-
-    def _loop(self) -> None:
-        started = time.time()
-        window = 0
-        try:
-            container = self._container
-            if container is None or not hasattr(container, "decode"):
-                return
-            for frame in container.decode(video=0):
-                image = frame.to_ndarray(format="bgr24")
-                with self._lock:
-                    self._frame = image
-                    self._frame_id += 1
-                    self.size = (int(image.shape[1]), int(image.shape[0]))
-                self._event.set()
-                self.frames += 1
-                window += 1
-                elapsed = time.time() - started
-                if elapsed >= 2.0:
-                    self.fps_actual = window / elapsed
-                    window = 0
-                    started = time.time()
-        except Exception as exc:  # 流断了就记原因，别静默
-            self.error = f"{type(exc).__name__}: {exc}"
-            logger.warning("QuickTime 采集结束: %s", self.error)
-        finally:
-            self._stop.set()
-
-    def latest_frame(self, timeout: float = 1.0) -> np.ndarray | None:
-        if timeout > 0 and self._event.wait(timeout):
-            self._event.clear()
-        with self._lock:
-            return None if self._frame is None else self._frame.copy()
-
-    @property
-    def frame_id(self) -> int:
-        return self._frame_id
-
-    @property
-    def alive(self) -> bool:
-        return not self._stop.is_set()
-
-    def close(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-        if self._proc is not None:
-            if self._proc.poll() is None:
-                self._proc.kill()
-            self._proc.wait(timeout=5)
-            # 管道要显式关：项目开了 filterwarnings=error，未关闭的句柄会直接判失败
-            if self._proc.stdout is not None:
-                with contextlib_suppress():
-                    self._proc.stdout.close()
-            self._proc = None
-        container = self._container
-        if container is not None:
-            with contextlib_suppress():
-                container.close()
-            self._container = None
-
-
-# ---------------------------------------------------------------------- #
-# pymobiledevice3 CoreDevice HID
-# ---------------------------------------------------------------------- #
-
-
-class HidBridge:
-    """CoreDevice HID（触摸 / 按键 / 文本），跑在自己的 asyncio 事件循环里。
-
-    UserspaceRsdTunnel 是进程级单例，所以这里也做成"一个进程一台设备"。
-    """
-
-    def __init__(self, udid: str) -> None:
-        self.udid = udid
-        self._loop: Any = None
-        self._thread: threading.Thread | None = None
-        self._tunnel: Any = None
-        self._rsd: Any = None
-        self._uhs: Any = None
-        self._indigo: Any = None
-        self._keyboard_id: int | None = None
-        self.connected = False
-        self.error: str | None = None
-
-    # ---------- 生命周期 ----------
+    # ---------- 事件循环（pymobiledevice3 全是 async） ----------
 
     def _ensure_loop(self) -> Any:
         import asyncio
@@ -398,17 +230,149 @@ class HidBridge:
             ready.set()
             loop.run_forever()
 
-        self._thread = threading.Thread(target=runner, name="ios-hid", daemon=True)
+        self._thread = threading.Thread(target=runner, name="ios-tunnel", daemon=True)
         self._thread.start()
         ready.wait(timeout=5)
         return self._loop
 
-    def run(self, coro: Any, timeout: float = 20.0) -> Any:
+    def run(self, coro: Any, timeout: float = 30.0) -> Any:
         import asyncio
 
         loop = self._ensure_loop()
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result(timeout=timeout)
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
+
+    # ---------- 连接 ----------
+
+    def start(self, timeout: float = 25.0) -> None:
+        self.run(self._astart(), timeout=timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline and self._frame is None:
+            time.sleep(0.05)
+        if self._frame is None:
+            raise RuntimeError(f"iOS 采集没有出帧: {self.error or '未知原因'}")
+
+    async def _astart(self) -> None:
+        from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
+
+        tunnel = UserspaceRsdTunnel(serial=self.udid)
+        rsd = await tunnel.aopen()
+        self._tunnel = tunnel
+        self._rsd = rsd
+        provider = DvtProvider(rsd)
+        self._dvt = await provider.__aenter__()
+        service = Screenshot(self._dvt)
+        await service.connect()
+        self._shot = service
+        logger.info("iOS 隧道就绪: %s (iOS %s)", self.udid, getattr(rsd, "product_version", "?"))
+        self._task = self._loop.create_task(self._loop_shots())
+
+    # ---------- 采集 ----------
+
+    async def _loop_shots(self) -> None:
+        import asyncio
+
+        import cv2
+
+        interval = 1.0 / max(1.0, self.fps)
+        window_start = time.time()
+        window_count = 0
+        while not self._stop.is_set():
+            begin = time.time()
+            try:
+                raw = await self._shot.get_screenshot()
+                image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+                if image is not None:
+                    with self._lock:
+                        self._frame = image
+                        self._frame_id += 1
+                        self.size = (int(image.shape[1]), int(image.shape[0]))
+                    self._event.set()
+                    self.frames += 1
+                    window_count += 1
+                    elapsed = time.time() - window_start
+                    if elapsed >= 2.0:
+                        self.fps_actual = window_count / elapsed
+                        window_count = 0
+                        window_start = time.time()
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
+                logger.warning("iOS 截图失败: %s", self.error)
+                await asyncio.sleep(0.5)
+            remain = interval - (time.time() - begin)
+            if remain > 0:
+                await asyncio.sleep(remain)
+
+    def latest_frame(self, timeout: float = 1.0) -> np.ndarray | None:
+        if timeout > 0 and self._event.wait(timeout):
+            self._event.clear()
+        with self._lock:
+            return None if self._frame is None else self._frame.copy()
+
+    @property
+    def frame_id(self) -> int:
+        return self._frame_id
+
+    @property
+    def alive(self) -> bool:
+        return not self._stop.is_set()
+
+    def rsd(self) -> Any:
+        return self._rsd
+
+    def close(self) -> None:
+        self._stop.set()
+
+        async def cleanup() -> None:
+            if self._task is not None:
+                self._task.cancel()
+                with contextlib_suppress():
+                    await self._task
+            if self._dvt is not None:
+                with contextlib_suppress():
+                    await self._dvt.__aexit__(None, None, None)
+            if self._tunnel is not None:
+                with contextlib_suppress():
+                    await self._tunnel.aclose()
+
+        with contextlib_suppress():
+            self.run(cleanup(), timeout=10)
+        if self._thread is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop) if self._loop else None
+            self._thread.join(timeout=2)
+
+
+# ---------------------------------------------------------------------- #
+# pymobiledevice3 CoreDevice HID
+# ---------------------------------------------------------------------- #
+
+
+class HidBridge:
+    """CoreDevice HID（触摸 / 按键 / 文本），跑在自己的 asyncio 事件循环里。
+
+    UserspaceRsdTunnel 是进程级单例，所以这里也做成"一个进程一台设备"。
+    """
+
+    def __init__(self, udid: str) -> None:
+        self.udid = udid
+        self._session: TunnelSession | None = None
+        self._uhs: Any = None
+        self._indigo: Any = None
+        self._keyboard_id: int | None = None
+        self.connected = False
+        self.error: str | None = None
+
+    # ---------- 生命周期 ----------
+
+    def attach(self, session: TunnelSession) -> None:
+        """复用采集那条隧道：UserspaceRsdTunnel 是进程级单例，不能开第二条。"""
+        self._session = session
+
+    def run(self, coro: Any, timeout: float = 20.0) -> Any:
+        if self._session is None:
+            raise RuntimeError("HID 未绑定隧道")
+        return self._session.run(coro, timeout=timeout)
 
     def connect(self) -> None:
         try:
@@ -423,37 +387,33 @@ class HidBridge:
             IndigoHIDService,
             UniversalHIDServiceService,
         )
-        from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
-        from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
 
-        tunnel = UserspaceRsdTunnel(serial=self.udid)
-        await tunnel.aopen()
-        self._tunnel = tunnel
-        rsd = RemoteServiceDiscoveryService((tunnel.address, tunnel.port))
-        await rsd.connect()
-        self._rsd = rsd
-        self._uhs = UniversalHIDServiceService(rsd)
-        await self._uhs.connect()
+        assert self._session is not None
+        rsd = self._session.rsd()
+        if rsd is None:
+            raise RuntimeError("隧道还没就绪")
+        uhs = UniversalHIDServiceService(rsd)
+        await uhs.connect()
+        self._uhs = uhs
         try:
-            self._indigo = IndigoHIDService(rsd)
-            await self._indigo.connect()
+            indigo = IndigoHIDService(rsd)
+            await indigo.connect()
+            self._indigo = indigo
         except Exception as exc:  # 按键不可用不该挡住触摸
             logger.warning("Indigo（按键）不可用: %s", exc)
             self._indigo = None
-        logger.info("iOS HID 就绪: %s", self.udid)
+        logger.info("iOS HID 就绪: %s（触摸 ✓%s）", self.udid, " 按键 ✓" if self._indigo else "")
 
     def close(self) -> None:
         async def cleanup() -> None:
-            for service in (self._uhs, self._indigo, self._rsd, self._tunnel):
+            for service in (self._uhs, self._indigo):
                 if service is None:
                     continue
                 with contextlib_suppress():
                     await service.close()
 
-        try:
+        with contextlib_suppress():
             self.run(cleanup(), timeout=10)
-        except Exception:
-            logger.debug("关闭 iOS HID 失败", exc_info=True)
         self.connected = False
 
     # ---------- 触摸 ----------
@@ -541,112 +501,101 @@ async def asyncio_sleep(seconds: float) -> None:
 
 @register
 class IosController(Controller):
-    """URI: ``iOS:///?udid=xxxx``（仅 iOS ≥ 17.4）。"""
+    """URI: ``iOS:///?udid=xxxx``（仅 iOS ≥ 17.4）。
+
+    采集：pymobiledevice3 用户态隧道 + DVT 截图循环（实测 ~8fps / 2796x1290）
+    控制：同一条隧道上的 CoreDevice HID（UHS 触摸 0..65535 + Indigo 按键 + 虚拟键盘）
+    连接前会跑一次 USB 配置测绘：只有当设备不在"有数据通路"的配置上时才提示需要切回来
+    （切到配置 2 会让 usbmux 消失，那正是"QuickTime 独占"的真相）。
+    """
 
     scheme = "iOS"
-    description = "iPhone / iPad（QuickTime 采集 + pymobiledevice3 HID）"
+    description = "iPhone / iPad（DVT 采集 + pymobiledevice3 HID，仅 17.4+）"
 
-    def __init__(self, device_id: str = "", udid: str = "", **options: Any) -> None:
+    def __init__(self, device_id: str = "", udid: str = "", fps: float = 8.0, **options: Any) -> None:
         super().__init__(device_id or f"{KIND_IOS}:{udid}", **options)
         self.udid = udid
-        self.channel = "quicktime"
+        self.channel = "dvt"
         self.link_note = ""
-        self._capture: QuickTimeCapture | None = None
+        self.usb_report = ""
+        self._session: TunnelSession | None = None
         self._hid: HidBridge | None = None
         self._last_frame: np.ndarray | None = None
         self._frame_seq = 0
-        self._capture_name = ""
+        self._fps = fps
 
     # ---------- 连接 ----------
 
     def connect(self) -> None:
         device = next((item for item in list_devices() if item.udid == self.udid), None)
         if device is None:
-            raise RuntimeError(f"找不到 iOS 设备: {self.udid}（`pymobiledevice3 usbmux list` 里没有）")
+            raise RuntimeError(
+                f"找不到 iOS 设备: {self.udid}（`pymobiledevice3 usbmux list` 里没有）。"
+                "常见原因：线只能充电、手机锁着、没点『信任此电脑』，"
+                "或者设备被切到了没有数据通路的 USB 配置（跑 `python -m gamepilot.devices.ios_usb` 看一眼）"
+            )
         if not device.supported():
             raise RuntimeError(
                 f"这台设备是 iOS {device.version}，只支持 {IOS_MIN_VERSION[0]}.{IOS_MIN_VERSION[1]}+"
-                "（低版本没有可用的用户态 RSD 隧道）"
+                "（低版本没有用户态 RSD 隧道）"
             )
-        if not ffmpeg_available():
-            raise RuntimeError("缺少 ffmpeg：QuickTime 采集要用它（brew install ffmpeg）")
+        if not pymobiledevice3_available():
+            raise RuntimeError("缺少 pymobiledevice3（uv sync --extra ios 或 brew install pymobiledevice3）")
 
-        self._ensure_usb_config()
-        self._start_capture(device)
-        self._start_hid()
-        self._connected = True
+        self._report_usb_config()
+        session = TunnelSession(self.udid, fps=self._fps)
+        session.start()
+        self._session = session
+        self.channel = "dvt"
+        self.link_note = f"DVT 采集（{session.size[0]}x{session.size[1]}）"
+        if self.usb_report:
+            self.link_note += f" · {self.usb_report}"
 
-    def _ensure_usb_config(self) -> None:
-        """起 QuickTime 之前先切 USB 配置，否则 QuickTime 独占设备、后面连不上。
-
-        各家机器上的命令不一样，用 `GAMEPILOT_IOS_USB_CONFIG_CMD` 指定；
-        没配置就只提示一条，不阻塞（也许用户已经手动切好了）。
-        """
-        command = os.environ.get("GAMEPILOT_IOS_USB_CONFIG_CMD", "").strip()
-        if not command:
-            self.link_note = "QuickTime 采集（未配置 GAMEPILOT_IOS_USB_CONFIG_CMD，USB 配置需自行切换）"
-            logger.info(
-                "提醒：macOS 上用 QuickTime 采集前要先切 USB 到 config2，否则 QuickTime 会独占设备；"
-                "可用 GAMEPILOT_IOS_USB_CONFIG_CMD 指定切换命令"
-            )
-            return
-        logger.info("切换 iOS USB 配置: %s", command)
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60, check=False)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"USB 配置切换失败（退出码 {result.returncode}）: {(result.stderr or result.stdout).strip()[:200]}"
-            )
-        self.link_note = "QuickTime 采集（已切换 USB 配置）"
-
-    def _start_capture(self, device: IosDevice) -> None:
-        ffmpeg = shutil.which("ffmpeg")
-        assert ffmpeg is not None
-        found = find_capture_device(ffmpeg, name_hint=device.name.split(" ")[0])
-        if found is None:
-            raise RuntimeError(
-                "在 avfoundation 设备列表里找不到 iOS 采集设备。"
-                "确认：① 设备已连接并信任 ② 已在 `系统设置 → 隐私与安全性 → 屏幕录制` 里给终端授权 "
-                "③ 先切好 USB config2（QuickTime 独占时这里就看不到设备）"
-            )
-        index, name = found
-        self._capture_name = name
-        capture = QuickTimeCapture(ffmpeg, index)
-        capture.start()
-        self._capture = capture
-        self.channel = "quicktime"
-        note = self.link_note or "QuickTime 采集"
-        self.link_note = f"{note} · {name}"
-
-    def _start_hid(self) -> None:
         bridge = HidBridge(self.udid)
+        bridge.attach(session)
         bridge.connect()
         self._hid = bridge
+        self._connected = True
+
+    def _report_usb_config(self) -> None:
+        """只测绘、不擅自切换：切错配置会让设备从 usbmux 上消失。"""
+        try:
+            devices = ios_usb.survey()
+        except Exception as exc:  # 测绘失败不影响连接
+            logger.debug("USB 配置测绘失败: %s", exc)
+            return
+        if not devices:
+            self.usb_report = "USB 层没看到 Apple 设备"
+            return
+        device = devices[0]
+        current = next((item for item in device.configurations if item.value == device.current), None)
+        self.usb_report = f"USB 配置 {device.current}（{current.paths if current else '?'} 条通路）"
 
     # ---------- 采集 ----------
 
     @property
     def resolution(self) -> Size:
-        if self._capture is not None and self._capture.size != (0, 0):
-            return self._capture.size
+        if self._session is not None and self._session.size != (0, 0):
+            return self._session.size
         return (0, 0)
 
     @property
     def link_fps(self) -> float:
-        return float(self._capture.fps_actual) if self._capture is not None else 0.0
+        return float(self._session.fps_actual) if self._session is not None else 0.0
 
     def screenshot(self) -> np.ndarray:
-        if self._capture is None:
+        if self._session is None:
             raise RuntimeError("iOS 采集未启动")
-        frame = self._capture.latest_frame(timeout=0.0)
+        frame = self._session.latest_frame(timeout=0.0)
         if frame is None:
-            frame = self._capture.latest_frame(timeout=1.0)
+            frame = self._session.latest_frame(timeout=1.5)
         if frame is not None:
             self._last_frame = frame
-            self._frame_seq = self._capture.frame_id
+            self._frame_seq = self._session.frame_id
             return frame
         if self._last_frame is not None:
             return self._last_frame
-        raise RuntimeError(f"iOS 采集没有画面: {self._capture.error or '未知原因'}")
+        raise RuntimeError(f"iOS 采集没有画面: {self._session.error or '未知原因'}")
 
     def to_dict(self) -> dict[str, Any]:
         data = super().to_dict()
@@ -656,6 +605,7 @@ class IosController(Controller):
                 "linkNote": self.link_note,
                 "linkFps": round(self.link_fps, 1),
                 "udid": self.udid,
+                "usb": self.usb_report,
             }
         )
         return data
@@ -670,8 +620,7 @@ class IosController(Controller):
     def touch(self, phase: str, x: float, y: float) -> None:
         if phase not in ("down", "move", "up"):
             raise ValueError(f"phase 必须是 down/move/up，收到: {phase}")
-        hid = self._hid_or_raise()
-        hid.touch(phase, round(x * DIGITIZER_MAX), round(y * DIGITIZER_MAX))
+        self._hid_or_raise().touch(phase, round(x * DIGITIZER_MAX), round(y * DIGITIZER_MAX))
 
     def click(self, x: float, y: float) -> None:
         self.touch("down", x, y)
@@ -699,7 +648,7 @@ class IosController(Controller):
         if self._hid is not None:
             self._hid.close()
             self._hid = None
-        if self._capture is not None:
-            self._capture.close()
-            self._capture = None
+        if self._session is not None:
+            self._session.close()
+            self._session = None
         super().close()

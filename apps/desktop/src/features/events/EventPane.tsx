@@ -45,7 +45,8 @@ export function EventPane(): ReactNode {
   return (
     <PanelShell
       title="事件"
-      className="flex-1"
+      // 高度由父级纵向 Group 决定（右栏可上下拖），面板自己撑满即可
+      className="h-full"
       actions={
         <>
           {FILTERS.map((item) => (

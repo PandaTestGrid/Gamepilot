@@ -231,7 +231,9 @@ Rust 桥的调度规则：
 URI 里用 `udid`（`pymobiledevice3 usbmux list` 的 `Identifier`）。
 
 - **仅 iOS ≥ 17.4**：低版本没有可用的用户态 RSD 隧道，连接时会直接报错说明
-- `channel` 返回 `quicktime`（QuickTime/CoreMediaIO 采集），`linkNote` 里带采集设备名与 USB 配置状态
+- `channel` 返回 `dvt`（用户态隧道 + DVT 截图循环，实测 ~7.8fps / 2796x1290）；
+  `linkNote` 里带分辨率与当前 USB 配置（`usb` 字段单独给一份测绘结果）
+- 不需要切 USB 配置、不需要 sudo；切到配置 2 反而会让 usbmux 消失
 - 控制走 pymobiledevice3 CoreDevice HID：`device.touch/tap/swipe/key/text` 全部可用；
   `back`/`recents` 映射到 Home（iOS 没有这两个键）
 - 依赖：`ffmpeg`（采集）+ `pymobiledevice3`（控制，`uv sync --extra ios` 或 brew 安装）；

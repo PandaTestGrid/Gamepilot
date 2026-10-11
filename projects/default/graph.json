@@ -25,7 +25,7 @@
         0.03
       ],
       "template": "templates/main_region_10.png",
-      "threshold": 0.82,
+      "threshold": 0.6,
       "type": "template"
     },
     "main_region_2": {
@@ -36,7 +36,7 @@
         0.110305
       ],
       "template": "templates/main_region_2.png",
-      "threshold": 0.59,
+      "threshold": 0.67,
       "type": "template"
     },
     "main_region_3": {
@@ -97,7 +97,7 @@
         0.090317
       ],
       "template": "templates/main_region_7.png",
-      "threshold": 0.71,
+      "threshold": 0.61,
       "type": "template"
     },
     "main_region_8": {
@@ -124,17 +124,6 @@
     }
   },
   "nodes": [
-    {
-      "id": "node_1",
-      "name": "新界面",
-      "enter": [
-        "main_region_1",
-        "main_region_2",
-        "main_region_4",
-        "main_region_7",
-        "main_region_8"
-      ]
-    },
     {
       "id": "node_4",
       "name": "新界面",
@@ -202,30 +191,6 @@
       "cooldown_ms": 600
     },
     {
-      "id": "e_main_region_5_20",
-      "action": {
-        "type": "click",
-        "target": "main_region_5",
-        "duration_ms": 300
-      },
-      "when": "main_region_5",
-      "from": "node_2",
-      "to": "node_1",
-      "cooldown_ms": 600
-    },
-    {
-      "id": "e_main_region_9_21",
-      "action": {
-        "type": "click",
-        "target": "main_region_9",
-        "duration_ms": 300
-      },
-      "when": "main_region_9",
-      "from": "node_3",
-      "to": "node_1",
-      "cooldown_ms": 600
-    },
-    {
       "id": "e_main_region_9_22",
       "action": {
         "type": "click",
@@ -235,6 +200,20 @@
       "when": "main_region_9",
       "from": "node_3",
       "to": "n_7",
+      "cooldown_ms": 600
+    },
+    {
+      "id": "e_new_3",
+      "action": {
+        "type": "wait",
+        "seconds": 0.5
+      },
+      "when": "always",
+      "condition": {
+        "always": true
+      },
+      "from": "n_8",
+      "to": "node_5",
       "cooldown_ms": 600
     }
   ]

@@ -57,7 +57,7 @@ export function RecordOverlay({ deviceId }: { deviceId: string }): ReactNode {
       role="presentation"
     >
       <div className="mb-2 flex items-center gap-2">
-        <span className="text-panel font-medium">录制</span>
+        <span className="text-panelhead font-medium">录制</span>
         <span className="text-badge text-faint">
           {draft.rect[2].toFixed(3)} × {draft.rect[3].toFixed(3)}
         </span>

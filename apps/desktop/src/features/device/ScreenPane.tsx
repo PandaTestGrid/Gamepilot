@@ -17,8 +17,11 @@ import {
   Undo2,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useCallback, useMemo, useRef, useState } from 'react';
+import { Group, Panel, Separator } from 'react-resizable-panels';
 
 import { RecordOverlay } from '@/features/device/RecordOverlay';
+import { SCREEN_LAYOUT } from '@/layout/layout-specs';
+import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell, StatusDot } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
 import { type Box, containBox, pointToCanvas } from '@/lib/canvas';
@@ -73,6 +76,8 @@ export function ScreenPane(): ReactNode {
   }, [activeId, device?.name, device?.status, gridView, connected.length, frame]);
   const recognizers = graph?.recognizers ?? [];
   const confirmedCount = recognizers.filter((item) => item.state !== 'idle').length;
+  // 画面 / 识别读数 上下可拖：识别器多的时候读数区要能拖高，单看画面时又要能压扁
+  const view = useLayoutGroup(SCREEN_LAYOUT);
 
   return (
     <PanelShell
@@ -173,22 +178,39 @@ export function ScreenPane(): ReactNode {
           </GhostButton>
         </>
       }
-      footer={<RecognizerReadout recognizers={recognizers} onConnect={() => toggleDevicePopover(true)} />}
     >
-      <div className="flex h-full min-h-0 flex-col bg-canvas p-2">
-        {gridView ? (
-          <ScreenGrid />
-        ) : device?.status === 'connected' ? (
-          <SingleScreen
-            deviceId={device.id}
-            deviceName={device.name}
-            resolution={device.resolution}
-            frame={frame}
-          />
-        ) : (
-          <EmptyState onConnect={() => toggleDevicePopover(true)} />
-        )}
-      </div>
+      <Group
+        id={SCREEN_LAYOUT.id}
+        orientation="vertical"
+        defaultLayout={view.defaultLayout}
+        onLayoutChanged={view.onLayoutChanged}
+        groupRef={view.groupRef}
+        className="h-full"
+      >
+        <Panel id="view" defaultSize="70%" minSize="30%" style={{ overflow: 'hidden' }}>
+          <div className="flex h-full min-h-0 flex-col bg-canvas p-2">
+            {gridView ? (
+              <ScreenGrid />
+            ) : device?.status === 'connected' ? (
+              <SingleScreen
+                deviceId={device.id}
+                deviceName={device.name}
+                resolution={device.resolution}
+                frame={frame}
+              />
+            ) : (
+              <EmptyState onConnect={() => toggleDevicePopover(true)} />
+            )}
+          </div>
+        </Panel>
+        <Separator
+          className="h-px bg-line transition-colors hover:bg-brand"
+          title="拖动改高度 · 双击恢复默认"
+        />
+        <Panel id="readout" defaultSize="30%" minSize="12%" style={{ overflow: 'hidden' }}>
+          <RecognizerReadout recognizers={recognizers} onConnect={() => toggleDevicePopover(true)} />
+        </Panel>
+      </Group>
     </PanelShell>
   );
 }
@@ -205,38 +227,42 @@ function EmptyState({ onConnect }: { onConnect: () => void }): ReactNode {
   const discovered = devices.filter((device) => device.status !== 'connected').slice(0, 4);
 
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3">
-      <span className="text-panel text-dim">还没有连接设备</span>
-      <ol className="w-[420px] space-y-1 text-badge text-faint">
-        <li>1. 点下面的「连接设备」，选一台手机（USB 调试已授权）或 Mock 设备</li>
-        <li>2. 连上后点画面栏的「框选」，在画面上拖一个矩形 → 生成识别器</li>
-        <li>3. 录好节点后点顶栏「运行」，状态机就会按你的状态图跑</li>
-      </ol>
-      <button
-        type="button"
-        onClick={onConnect}
-        className="h-7 rounded-sm bg-brand px-4 text-body font-medium text-[#0b0d12] hover:opacity-90"
-      >
-        连接设备
-      </button>
-      <div className="w-80 text-badge text-faint">
-        <div className="mb-1 text-dim">已发现（点「连接设备」刷新/连接）</div>
-        {discovered.map((device) => (
-          <button
-            key={device.id}
-            type="button"
-            onClick={onConnect}
-            className="flex h-[26px] w-full items-center gap-2 px-1 text-left hover:bg-raised"
-          >
-            <StatusDot tone={device.status === 'failed' ? 'failed' : 'idle'} />
-            <span className="min-w-0 flex-1 truncate text-body text-fg">{device.name}</span>
-            <span>{formatResolution(device.resolution)}</span>
-            <span className="text-dim">→</span>
-          </button>
-        ))}
-        {discovered.length === 0 && (
-          <div className="px-1 py-2">还没扫描到设备 · 确认手机已插好并允许 USB 调试</div>
-        )}
+    // 画面区被拖矮时（上下可拖了）空态内容会超出高度：给滚动条，
+    // 用 m-auto 而不是 justify-center —— 居中 + 溢出会把顶部的引导文字裁掉且滚不到
+    <div className="flex h-full flex-col overflow-auto">
+      <div className="m-auto flex flex-col items-center gap-3">
+        <span className="text-panelhead text-dim">还没有连接设备</span>
+        <ol className="w-[420px] space-y-1 text-badge text-faint">
+          <li>1. 点下面的「连接设备」，选一台手机（USB 调试已授权）或 Mock 设备</li>
+          <li>2. 连上后点画面栏的「框选」，在画面上拖一个矩形 → 生成识别器</li>
+          <li>3. 录好节点后点顶栏「运行」，状态机就会按你的状态图跑</li>
+        </ol>
+        <button
+          type="button"
+          onClick={onConnect}
+          className="h-7 rounded-sm bg-brand px-4 text-body font-medium text-[#0b0d12] hover:opacity-90"
+        >
+          连接设备
+        </button>
+        <div className="w-80 text-badge text-faint">
+          <div className="mb-1 text-dim">已发现（点「连接设备」刷新/连接）</div>
+          {discovered.map((device) => (
+            <button
+              key={device.id}
+              type="button"
+              onClick={onConnect}
+              className="flex h-[26px] w-full items-center gap-2 px-1 text-left hover:bg-raised"
+            >
+              <StatusDot tone={device.status === 'failed' ? 'failed' : 'idle'} />
+              <span className="min-w-0 flex-1 truncate text-body text-fg">{device.name}</span>
+              <span>{formatResolution(device.resolution)}</span>
+              <span className="text-dim">→</span>
+            </button>
+          ))}
+          {discovered.length === 0 && (
+            <div className="px-1 py-2">还没扫描到设备 · 确认手机已插好并允许 USB 调试</div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -748,30 +774,33 @@ function RecognizerReadout({
   onConnect: () => void;
 }): ReactNode {
   return (
-    <div className="shrink-0 border-t border-line">
-      <div className="flex h-6 items-center px-2 text-badge text-faint">
+    // 高度由上方分隔线决定；列表自己滚动（识别器可能有几十个，撑开会把画面挤没）
+    <div className="flex h-full min-h-0 flex-col bg-panel">
+      <div className="flex h-6 shrink-0 items-center px-2 text-badge text-faint">
         识别读数
         <span className="flex-1" />
         <button type="button" onClick={onConnect} className="hover:text-fg">
           查看设备
         </button>
       </div>
-      {recognizers.map((item) => (
-        <div key={item.label} className="flex h-[26px] items-center gap-2 px-2 hover:bg-raised">
-          <StatusDot
-            tone={item.state === 'confirmed' ? 'confirmed' : item.state === 'pending' ? 'pending' : 'idle'}
-          />
-          <span className="w-32 truncate text-body">{item.label}</span>
-          <span className="text-body text-dim">{item.score.toFixed(2)}</span>
-          <span className="flex-1" />
-          <span className="text-badge text-faint">
-            {item.state === 'confirmed' ? '稳定' : item.state === 'pending' ? '待确认' : '未命中'}
-          </span>
-        </div>
-      ))}
-      {recognizers.length === 0 && (
-        <div className="px-2 py-3 text-badge text-faint">还没有识别器 · 打开「框选」在画面上拖一个矩形</div>
-      )}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {recognizers.map((item) => (
+          <div key={item.label} className="flex h-[26px] items-center gap-2 px-2 hover:bg-raised">
+            <StatusDot
+              tone={item.state === 'confirmed' ? 'confirmed' : item.state === 'pending' ? 'pending' : 'idle'}
+            />
+            <span className="w-32 truncate text-body">{item.label}</span>
+            <span className="text-body text-dim">{item.score.toFixed(2)}</span>
+            <span className="flex-1" />
+            <span className="text-badge text-faint">
+              {item.state === 'confirmed' ? '稳定' : item.state === 'pending' ? '待确认' : '未命中'}
+            </span>
+          </div>
+        ))}
+        {recognizers.length === 0 && (
+          <div className="px-2 py-3 text-badge text-faint">还没有识别器 · 打开「框选」在画面上拖一个矩形</div>
+        )}
+      </div>
     </div>
   );
 }

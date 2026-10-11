@@ -26,7 +26,7 @@ export function PanelShell({
         min-h-7 保证窄的时候长高，宽的时候还是 28px。
       */}
       <div className="flex min-h-7 shrink-0 flex-wrap items-center gap-x-1 gap-y-0.5 border-b border-line px-2 py-0.5">
-        <span className="shrink-0 text-panel font-medium">{title}</span>
+        <span className="shrink-0 text-panelhead font-medium">{title}</span>
         <div className="min-w-2 flex-1" />
         {actions}
       </div>
@@ -48,24 +48,57 @@ export function GhostButton({
   onClick,
   active,
   title,
+  disabled,
 }: {
   children: ReactNode;
   onClick?: () => void;
   active?: boolean;
   title?: string;
+  disabled?: boolean;
 }): ReactNode {
   return (
     <button
       type="button"
       onClick={onClick}
       title={title}
+      disabled={disabled}
       className={cn(
         'flex h-5 shrink-0 items-center gap-1 rounded-sm px-1.5 text-badge whitespace-nowrap text-dim hover:bg-raised hover:text-fg',
         active && 'bg-active text-fg',
+        disabled && 'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-dim',
       )}
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * 运行/停止按钮：顶栏与状态图头部共用同一个组件 + 同一份 `useRunControl`。
+ *
+ * 为什么允许出现在两处：运行是**设备会话**的开关（不是状态图的一部分，见 lib/useRunControl.ts），
+ * 顶栏那处在任何布局下都在、还能解释"为什么不能跑"；图栏头那处是"就近"——
+ * 图栏被双击弹成独立窗口时（?pane=graph）也能直接跑。
+ * 两处只共用一个开关，不存在第二份状态。
+ */
+export function RunButton({ size = 'normal' }: { size?: 'normal' | 'compact' }): ReactNode {
+  const run = useRunControl();
+  const label = run.running ? '停止' : '运行';
+  const title = run.blocker
+    ? run.blocker
+    : run.running
+      ? `停止运行（${run.deviceName ?? '当前设备'}）`
+      : `让 ${run.deviceName ?? '当前设备'} 按状态图跑（不运行时也在识别，只是不发动作）`;
+
+  return (
+    <GhostButton active={run.running} disabled={Boolean(run.blocker)} onClick={run.toggle} title={title}>
+      {run.running ? (
+        <Square className={size === 'compact' ? 'size-3' : 'size-3.5'} />
+      ) : (
+        <CirclePlay className={size === 'compact' ? 'size-3' : 'size-3.5'} />
+      )}
+      {label}
+    </GhostButton>
   );
 }
 

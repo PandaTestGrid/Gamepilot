@@ -2,6 +2,7 @@ import { Cable, ChevronDown, CirclePlay, LayoutGrid, Redo2, Square, Undo2, Video
 import { type ReactNode } from 'react';
 
 import { ProjectMenu } from '@/layout/ProjectMenu';
+import { LayoutMenu } from '@/layout/LayoutMenu';
 import { ToolbarButton, VDivider } from '@/layout/PanelShell';
 import { formatResolution } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -99,6 +100,9 @@ export function Toolbar({ running, onToggleRun }: { running: boolean; onToggleRu
       <GridToggle />
 
       <div className="flex-1" />
+
+      <LayoutMenu />
+      <VDivider />
 
       <ToolbarButton title={engineInfo} onClick={() => void selfCheck()}>
         <Cable

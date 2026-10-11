@@ -17,15 +17,20 @@ import {
   ReactFlow,
   type Edge,
   type Node,
+  type NodeChange,
   type NodeProps,
   type NodeTypes,
+  type XYPosition,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { type ReactNode, useCallback, useEffect, useMemo } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { EdgeEditor } from '@/features/graph/EdgeEditor';
 import { NodeEditor } from '@/features/graph/NodeEditor';
 
+import { GRAPH_LAYOUT, defaultPanelShare } from '@/layout/layout-specs';
+import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { GhostButton, PanelShell } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
@@ -73,6 +78,11 @@ function StateNode({ data }: NodeProps<StateNodeType>): ReactNode {
 
 const nodeTypes: NodeTypes = { state: StateNode };
 
+/** 编辑坞收起时的高度：收到 0 的话分隔线会压在底栏上，鼠标抓不到（实测踩过） */
+const EDITOR_COLLAPSED_PX = 28;
+/** 编辑坞展开态的最小高度；小于它的尺寸都是"正在往收起过渡"，不记 */
+const EDITOR_MIN_PX = 72;
+
 export function GraphPane(): ReactNode {
   const activeId = useDeviceStore((state) => state.activeId);
   const graph = useGraphStore((state) => state.graphs[activeId]);
@@ -91,12 +101,43 @@ export function GraphPane(): ReactNode {
     .map((node) => `${node.id}:${node.x},${node.y},${node.name},${node.enter.join('|')}`)
     .join(';')
     .concat(`|${graph?.activeNodeId ?? ''}|${graph?.pendingNodeId ?? ''}`);
+
+  /*
+   * 拖动过程中的实时坐标。
+   *
+   * 被控模式（传了 nodes）下 React Flow **不会**自己落位置：内核里
+   * `triggerNodeChanges` 只在非受控时才 `applyNodeChanges`，受控时只是回调 `onNodesChange`
+   * —— 官方示例都接了 `onNodesChange`（useNodesState 那一套），我们没接，
+   * 于是"按住拖动画面不动、松手才跳过去"。
+   *
+   * 这里接住回调，但只把坐标记在本地：状态图 store 仍是唯一真源，落盘依旧走
+   * `onNodeDragStop`（一次写图 + 通知引擎），不会每移动一像素就写一次盘。
+   */
+  const [dragging, setDragging] = useState<Record<string, XYPosition>>({});
+  const onNodesChange = useCallback((changes: NodeChange<StateNodeType>[]) => {
+    setDragging((current) => {
+      let next = current;
+      for (const change of changes) {
+        if (change.type !== 'position') {
+          continue; // 选中/尺寸之类的变化本项目自有一套（store 里的 selectedNodeId），这里不掺和
+        }
+        next = { ...(next === current ? current : next) };
+        if (change.dragging && change.position) {
+          next[change.id] = change.position;
+        } else {
+          delete next[change.id]; // 松手：交回 store 的坐标（onNodeDragStop 已写进去）
+        }
+      }
+      return next;
+    });
+  }, []);
+
   const nodes = useMemo<StateNodeType[]>(
     () =>
       (graph?.nodes ?? []).map((node) => ({
         id: node.id,
         type: 'state' as const,
-        position: { x: node.x, y: node.y },
+        position: dragging[node.id] ?? { x: node.x, y: node.y },
         data: {
           label: node.name,
           sub: node.id,
@@ -106,7 +147,7 @@ export function GraphPane(): ReactNode {
         },
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 用签名代替 graph 整体：实时分数不该触发重建
-    [nodeSignature],
+    [nodeSignature, dragging],
   );
 
   const edges = useMemo<Edge[]>(() => {
@@ -144,6 +185,54 @@ export function GraphPane(): ReactNode {
 
   const selected = (graph?.edges ?? []).find((edge) => edge.id === selectedEdgeId) ?? null;
   const selectedNode = (graph?.nodes ?? []).find((node) => node.id === selectedNodeId) ?? null;
+  // 画布 / 编辑区 上下可拖；没选中节点或边时编辑区自动收起成提示条，画布回到满高（拖那道横线也能拉开）
+  const layout = useLayoutGroup(GRAPH_LAYOUT);
+  const editorRef = usePanelRef();
+  // 展开态的高度：库只在"命令式收起"时记尺寸，用户手动拖到收起不会记 —— 不自己记的话，
+  // 下次选中节点只会展开到 minSize（72px，刚够露出一行）。
+  // 记的时机很关键：拖动过程中会经过一堆小尺寸，只在"尺寸稳定下来"时记一笔。
+  const editorHeight = useRef(0);
+  const heightTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (heightTimer.current !== null) {
+        window.clearTimeout(heightTimer.current);
+      }
+    },
+    [],
+  );
+  const rememberEditorHeight = (pixels: number): void => {
+    if (heightTimer.current !== null) {
+      window.clearTimeout(heightTimer.current);
+      heightTimer.current = null;
+    }
+    if (pixels < EDITOR_MIN_PX) {
+      return; // 收起态 / 正在收起：丢掉待提交值，别把"越收越小"记下来
+    }
+    heightTimer.current = window.setTimeout(() => {
+      editorHeight.current = pixels;
+    }, 150);
+  };
+  // 没记到过高度时（首次启动）用布局记忆 / 默认比例展开
+  const editorOpenPercent = Math.min(
+    60,
+    Math.max(15, layout.defaultLayout?.editor ?? defaultPanelShare(GRAPH_LAYOUT, 'editor')),
+  );
+  const hasEditor = Boolean(selected || selectedNode);
+  useEffect(() => {
+    const panel = editorRef.current;
+    if (!panel) {
+      return;
+    }
+    if (hasEditor) {
+      panel.expand();
+      panel.resize(
+        editorHeight.current >= EDITOR_MIN_PX ? Math.round(editorHeight.current) : `${editorOpenPercent}%`,
+      );
+    } else {
+      panel.collapse();
+    }
+  }, [hasEditor, editorRef, editorOpenPercent]);
   // 没有 from 的边在画布上画不出来（React Flow 需要两端），运行时也不会被触发 —— 让它们可见并可清理
   const orphanEdges = (graph?.edges ?? []).filter((edge) => !edge.from);
   const cleanOrphans = useCallback(async () => {
@@ -194,85 +283,125 @@ export function GraphPane(): ReactNode {
           </GhostButton>
         </>
       }
-      footer={
-        selected ? (
-          <EdgeEditor key={selected.id} deviceId={activeId} edge={selected} graph={graph} />
-        ) : selectedNode ? (
-          <NodeEditor key={selectedNode.id} deviceId={activeId} node={selectedNode} graph={graph} />
-        ) : undefined
-      }
     >
-      <div className="relative h-full bg-canvas">
-        {nodes.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-1 text-badge text-faint">
-            <span>这台设备还没有状态图</span>
-            <span>先连接设备，然后在画面栏点「框选」，在画面上拖一个矩形即生成第一个节点</span>
-          </div>
-        ) : (
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={nodeTypes}
-            onNodeDragStop={onNodeDragStop}
-            onEdgeClick={(_event, edge) => selectEdge(edge.id === selectedEdgeId ? null : edge.id)}
-            onNodeClick={(_event, node) => selectNode(node.id === selectedNodeId ? null : node.id)}
-            onConnect={(connection) => {
-              if (connection.source && connection.target) {
-                void connectNodes(activeId, connection.source, connection.target);
-              }
-            }}
-            onPaneClick={() => {
-              selectEdge(null);
-              selectNode(null);
-            }}
-            fitView
-            fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
-            minZoom={0.3}
-            maxZoom={1.6}
-            nodesDraggable
-            nodesConnectable
-            // 允许从任意一侧的圆点连（Loose）：用户不用记住"左边是入、右边是出"
-            connectionMode={ConnectionMode.Loose}
-            connectionLineStyle={{ stroke: 'var(--brand, #6ea8fe)', strokeWidth: 2 }}
-            proOptions={{ hideAttribution: false }}
-          >
-            <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#262b36" />
-          </ReactFlow>
-        )}
-
-        {/* 图例 + 孤立步骤清理：第一次打开的人要能知道节点/边是干什么的 */}
-        <div className="absolute top-1 left-2 flex max-w-[70%] flex-col items-start gap-0.5 text-badge text-faint">
-          <span className="pointer-events-none">
-            节点 = 一个界面（由识别器判定）· 边 = 一个动作（条件成立才走）
-          </span>
-          <span className="pointer-events-none">
-            拖节点右侧圆点连到另一个节点 = 连一条边；点节点/边可在下方编辑
-          </span>
-          {orphanEdges.length > 0 && (
-            <button
-              type="button"
-              onClick={() => void cleanOrphans()}
-              className="pointer-events-auto rounded-sm border border-failed/60 px-1 text-failed hover:bg-raised"
-              title="这些步骤没有挂在任何界面上：画布上不显示、运行时也不会被触发"
-            >
-              有 {orphanEdges.length} 个未挂界面的录制步骤 · 点这里清理
-            </button>
-          )}
-        </div>
-
-        {recoveries.length > 0 && (
-          <div className="pointer-events-none absolute right-2 bottom-2 flex flex-col items-end gap-1">
-            {recoveries.map((edge) => (
-              <span
-                key={edge.id}
-                className="rounded-sm border border-dashed border-recovery px-1.5 py-0.5 text-badge text-recovery"
+      <Group
+        id={GRAPH_LAYOUT.id}
+        orientation="vertical"
+        defaultLayout={layout.defaultLayout}
+        onLayoutChanged={layout.onLayoutChanged}
+        groupRef={layout.groupRef}
+        className="h-full"
+      >
+        <Panel id="canvas" defaultSize="68%" minSize="30%" style={{ overflow: 'hidden' }}>
+          <div className="relative h-full bg-canvas">
+            {nodes.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center gap-1 text-badge text-faint">
+                <span>这台设备还没有状态图</span>
+                <span>先连接设备，然后在画面栏点「框选」，在画面上拖一个矩形即生成第一个节点</span>
+              </div>
+            ) : (
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                nodeTypes={nodeTypes}
+                onNodesChange={onNodesChange}
+                onNodeDragStop={onNodeDragStop}
+                onEdgeClick={(_event, edge) => selectEdge(edge.id === selectedEdgeId ? null : edge.id)}
+                onNodeClick={(_event, node) => selectNode(node.id === selectedNodeId ? null : node.id)}
+                onConnect={(connection) => {
+                  if (connection.source && connection.target) {
+                    void connectNodes(activeId, connection.source, connection.target);
+                  }
+                }}
+                onPaneClick={() => {
+                  selectEdge(null);
+                  selectNode(null);
+                }}
+                fitView
+                fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
+                minZoom={0.3}
+                maxZoom={1.6}
+                nodesDraggable
+                nodesConnectable
+                // 允许从任意一侧的圆点连（Loose）：用户不用记住"左边是入、右边是出"
+                connectionMode={ConnectionMode.Loose}
+                connectionLineStyle={{ stroke: 'var(--brand, #6ea8fe)', strokeWidth: 2 }}
+                proOptions={{ hideAttribution: false }}
               >
-                ⚡ {edge.id} · {edge.when} · 全局中断
+                <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#262b36" />
+              </ReactFlow>
+            )}
+
+            {/* 图例 + 孤立步骤清理：第一次打开的人要能知道节点/边是干什么的 */}
+            <div className="absolute top-1 left-2 flex max-w-[70%] flex-col items-start gap-0.5 text-badge text-faint">
+              <span className="pointer-events-none">
+                节点 = 一个界面（由识别器判定）· 边 = 一个动作（条件成立才走）
               </span>
-            ))}
+              <span className="pointer-events-none">
+                拖节点右侧圆点连到另一个节点 = 连一条边；点节点/边可在下方编辑
+              </span>
+              {orphanEdges.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void cleanOrphans()}
+                  className="pointer-events-auto rounded-sm border border-failed/60 px-1 text-failed hover:bg-raised"
+                  title="这些步骤没有挂在任何界面上：画布上不显示、运行时也不会被触发"
+                >
+                  有 {orphanEdges.length} 个未挂界面的录制步骤 · 点这里清理
+                </button>
+              )}
+            </div>
+
+            {recoveries.length > 0 && (
+              <div className="pointer-events-none absolute right-2 bottom-2 flex flex-col items-end gap-1">
+                {recoveries.map((edge) => (
+                  <span
+                    key={edge.id}
+                    className="rounded-sm border border-dashed border-recovery px-1.5 py-0.5 text-badge text-recovery"
+                  >
+                    ⚡ {edge.id} · {edge.when} · 全局中断
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </Panel>
+        <Separator
+          className="h-px bg-line transition-colors hover:bg-brand"
+          title="拖动改高度 · 双击恢复默认"
+        />
+        {/*
+          编辑区是一块常驻的"坞"：有选中就展开（回到上次的高度），没选中就收成一条 28px 的提示条。
+          以前它是 footer，高度写死且不能拖 —— 识别器一多，条件按钮就会被挤到看不见。
+          收起来时**不能收到 0**：那样分隔线会正好压在底栏上边，鼠标点不到，
+          想手动拉开反而拉不动（实测踩过），留一条 28px 的提示条既好抓又告诉用户"这里还有个编辑器"。
+        */}
+        <Panel
+          id="editor"
+          defaultSize="32%"
+          minSize={`${EDITOR_MIN_PX}px`}
+          collapsible
+          collapsedSize={`${EDITOR_COLLAPSED_PX}px`}
+          panelRef={editorRef}
+          onResize={(size) => rememberEditorHeight(size.inPixels)}
+          style={{ overflow: 'hidden' }}
+        >
+          <div className="h-full overflow-auto bg-panel">
+            {selected ? (
+              <EdgeEditor key={selected.id} deviceId={activeId} edge={selected} graph={graph} />
+            ) : selectedNode ? (
+              <NodeEditor key={selectedNode.id} deviceId={activeId} node={selectedNode} graph={graph} />
+            ) : (
+              <div
+                className="truncate px-2 py-1 text-badge text-faint"
+                title="点画布上的节点或边，编辑区在这里展开；拖上面那道横线也能拉开/收起"
+              >
+                点画布上的节点或边，编辑区在这里展开（拖上面那道横线也能拉开/收起）
+              </div>
+            )}
+          </div>
+        </Panel>
+      </Group>
     </PanelShell>
   );
 }

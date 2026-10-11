@@ -382,6 +382,20 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
    默认 `auto` 行同样会被绝对定位内容撑成 0 高。→ `gridAutoRows` / `gridTemplateRows`。
 4. 排查这类问题的办法：在组件里打一行 `devLog(... getBoundingClientRect())`，
    直接看"元素有没有真的被渲染出尺寸"，比盯着代码猜快得多。
+5. **可拖拽区域一律登记在 `layout/layout-specs.ts`**，不要在组件里散写 `defaultSize`。
+   主壳三栏是横向 Group（拖宽度），栏内是纵向 Group（拖高度）；`Panel` 的 `id` 必须与
+   `LayoutSpec.panels` 的 key 完全一致 —— 预设走 `setLayout`，它会校验"key 数必须等于面板数"，
+   对不上就抛错（而且只在点预设那一刻炸）。
+6. **收起态的 Panel 不要收到 0**。纵向 Group 里最下面那个面板收成 0 时，它的分隔线会正好压在底栏
+   （StatusBar）上边：指针事件被底栏接走，用户想拖回来反而拖不动。收起态留一条提示条（28px）即可。
+7. **`text-*` 工具类会同时查字号表与颜色表**。本项目有背景色 token `--color-panel`，
+   所以字号 token 不能叫 `--text-panel`：`.text-panel` 生成的是 `color: var(--bg-panel)`，
+   四个面板标题会被涂成面板底色（看起来就是"标题没了"）。字号叫 `--text-panelhead`。
+8. **React Flow 用受控 `nodes` 时，必须自己接 `onNodesChange`，否则节点只在松手后跳过去**。
+   内核里 `triggerNodeChanges` 只在**非受控**模式才 `applyNodeChanges`，受控时仅回调；
+   官方示例都走 `useNodesState` 那一套，我们漏了这一步，表现就是"按住拖动画面不动"。
+   本项目的做法：回调里把拖动中的坐标记进组件本地表（`dragging`），合进 `nodes` 让画面跟手；
+   真源仍是状态图 store，落盘只走 `onNodeDragStop` 一次（不要每移动一像素写一次图表）。
 
 ## 13. 已知环境坑
 
