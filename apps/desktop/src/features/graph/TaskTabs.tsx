@@ -8,7 +8,14 @@
  */
 import { Component, type ReactNode, useEffect, useState } from 'react';
 
-import { devLog, projectCreate, workspaceTree, type TreeProject, type TreeWorkspace } from '@/lib/rpc';
+import {
+  devLog,
+  projectCreate,
+  workspaceCreate,
+  workspaceTree,
+  type TreeProject,
+  type TreeWorkspace,
+} from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useSessionStore } from '@/stores/session.store';
 
@@ -74,8 +81,45 @@ function TaskTabsInner(): ReactNode {
     currentProject?.workspaces.find((ws) => root === ws.root || root.startsWith(`${ws.root}/`)) ??
     currentProject?.workspaces[0];
 
-  if (!root || !currentProject || (currentProject.workspaces ?? []).length === 0) {
-    return null;
+  const createProject = (): void => {
+    const name = window.prompt('新项目名字（最外层，例如「游戏自动化」）');
+    if (!name) {
+      return;
+    }
+    void (async () => {
+      try {
+        await workspaceCreate(name);
+        await load();
+      } catch (reason) {
+        devLog(`新建项目失败: ${String(reason)}`);
+      }
+    })();
+  };
+
+  // 新用户/没有项目：给一条明确的出路，而不是什么都不显示
+  if (!root || projects.length === 0) {
+    return (
+      <button
+        type="button"
+        onClick={createProject}
+        title="还没有项目：点这里建第一个"
+        className="rounded-sm border border-brand px-1.5 py-0.5 text-badge text-brand hover:bg-raised"
+      >
+        ＋ 新建项目
+      </button>
+    );
+  }
+  if (!currentProject || (currentProject.workspaces ?? []).length === 0) {
+    return (
+      <button
+        type="button"
+        onClick={createProject}
+        title="项目里还没有工作区，先建一个项目"
+        className="rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised"
+      >
+        ＋ 新建项目
+      </button>
+    );
   }
 
   const go = (dir: string | undefined): void => {

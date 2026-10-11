@@ -18,12 +18,12 @@ describe('任务标签栏', () => {
     useSessionStore.setState({ project: null });
   });
 
-  it('没有当前脚本时渲染为空（不抛错）', () => {
+  it('没有项目时给"新建项目"入口（新用户第一眼该看到出路，而不是空白）', () => {
     const { container } = render(<TaskTabs />);
-    expect(container.textContent).toBe('');
+    expect(container.textContent).toContain('新建项目');
   });
 
-  it('目录树拉取失败时渲染为空（不把异常抛给上层）', () => {
+  it('目录树拉取失败时不崩（降级成"新建项目"入口，不把异常抛给上层）', () => {
     useSessionStore.setState({
       project: {
         root: '/tmp/x/y',
@@ -35,6 +35,6 @@ describe('任务标签栏', () => {
       },
     });
     const { container } = render(<TaskTabs />);
-    expect(container.textContent).toBe('');
+    expect(container.textContent).toContain('新建项目');
   });
 });
