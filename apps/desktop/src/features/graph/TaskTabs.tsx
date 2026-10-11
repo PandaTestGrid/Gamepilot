@@ -1,74 +1,72 @@
 /**
- * 任务标签栏：一个工作区里可以有多个任务，**一个任务 = 一张状态图**。
+ * 三级切换：**项目 › 工作区 › 任务**（任务 = 一张状态图）。
  *
- * 直接用标签展示/切换/新建，比藏在脚本菜单里直观：
- * - 每个标签 = 一个任务（脚本目录：graph.json + templates/）
- * - 点标签 = 切任务（引擎热重载所有已连接设备的状态图，运行中不丢当前节点）
- * - ＋ = 在当前工作区里新建任务（空图 + 空 templates）
+ * 例子：项目「游戏自动化」> 工作区「阴阳师」> 任务「斗技 / 百鬼」。
+ * 切换项目 → 换工作区列表；切换工作区 → 换任务标签；点任务标签 → 换状态图。
+ *
+ * 目录树由引擎的 workspace.tree 给出（它会兼容"库根下直接是脚本"的老布局）。
  */
 import { type ReactNode, useEffect, useState } from 'react';
 
-import {
-  devLog,
-  projectCreate,
-  projectList,
-  type ProjectSummary,
-  workspaceCreate,
-  workspaceList,
-  type WorkspaceSummary,
-} from '@/lib/rpc';
+import { devLog, projectCreate, workspaceTree, type TreeProject, type TreeWorkspace } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useSessionStore } from '@/stores/session.store';
+
+const SELECT = 'h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg';
 
 export function TaskTabs(): ReactNode {
   const project = useSessionStore((state) => state.project);
   const switchProject = useSessionStore((state) => state.switchProject);
   const refreshProject = useSessionStore((state) => state.refreshProject);
-  const [tasks, setTasks] = useState<ProjectSummary[]>([]);
+  const [projects, setProjects] = useState<TreeProject[]>([]);
   const [busy, setBusy] = useState(false);
-  // 工作区 = 上一级目录：切工作区 = 换一批脚本（状态图）
-  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
-  const [workspace, setWorkspace] = useState<string>('');
 
   const root = project?.root ?? '';
-  const base = root.replace(/\/[^/]+$/, '');
+
+  const load = async (): Promise<void> => {
+    try {
+      setProjects((await workspaceTree()).projects);
+    } catch (error: unknown) {
+      devLog(`目录树失败: ${String(error)}`);
+    }
+  };
 
   useEffect(() => {
-    void workspaceList()
-      .then((result) => {
-        setWorkspaces(result.items);
-        // 当前工作区 = 当前脚本所在的那个库根
-        const matched = result.items.find((item) => item.root === root.replace(/\/[^/]+$/, ''));
-        setWorkspace(matched?.name ?? result.items[0]?.name ?? '');
-      })
-      .catch((error: unknown) => devLog(`工作区列表失败: ${String(error)}`));
-    // 依赖 root：引擎握手完成、或切换脚本后再拉一次（挂载时引擎可能还没起来，踩过）
+    void load();
+    // 依赖 root：引擎握手完成或切换任务后再拉一次
   }, [root]);
 
-  useEffect(() => {
-    if (!base) {
-      return;
-    }
-    void projectList(base)
-      .then((result) => setTasks(result.items))
-      .catch((error: unknown) => devLog(`脚本列表失败: ${String(error)}`));
-  }, [base, root]);
+  /** 当前所在的 项目 / 工作区（由当前任务目录反推，避免另存一份状态）。 */
+  const currentProject =
+    projects.find((item) =>
+      item.workspaces.some((ws) => root === ws.root || root.startsWith(`${ws.root}/`)),
+    ) ?? projects[0];
+  const currentWorkspace =
+    currentProject?.workspaces.find((ws) => root === ws.root || root.startsWith(`${ws.root}/`)) ??
+    currentProject?.workspaces[0];
 
-  if (!root || tasks.length === 0) {
+  if (!root || !currentProject) {
     return null;
   }
 
-  const add = (): void => {
-    const name = window.prompt('新脚本名字（一个脚本 = 一张状态图）');
-    if (!name) {
+  const go = (dir: string | undefined): void => {
+    if (!dir || dir === root) {
+      return;
+    }
+    void switchProject(dir);
+  };
+
+  const addTask = (): void => {
+    const name = window.prompt('新任务名字（一个任务 = 一张状态图）');
+    if (!name || !currentWorkspace) {
       return;
     }
     setBusy(true);
     void (async () => {
       try {
-        await projectCreate(name, base);
+        await projectCreate(name, currentWorkspace.root);
         await refreshProject();
-        setTasks((await projectList(base)).items);
+        await load();
       } catch (reason) {
         devLog(`新建任务失败: ${String(reason)}`);
       } finally {
@@ -78,74 +76,54 @@ export function TaskTabs(): ReactNode {
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-0.5 border-b border-line px-1 py-0.5">
-      {/* 一级：工作区（换工作区 = 换下面这一批脚本/状态图） */}
+    <div className="flex items-center gap-0.5">
+      {/* 一级：项目 */}
       <select
-        value={workspace}
-        title="工作区：一个工作区里放多个脚本（脚本 = 一张状态图）"
+        value={currentProject.name}
+        title="项目：最外层（比如「游戏自动化」）"
         onChange={(event) => {
-          const picked = workspaces.find((item) => item.name === event.target.value);
-          if (!picked) {
-            return;
-          }
-          setWorkspace(picked.name);
-          void (async () => {
-            try {
-              const items = await projectList(picked.root);
-              setTasks(items.items);
-              const first = items.items[0];
-              if (first) {
-                await switchProject(first.root);
-              }
-            } catch (reason) {
-              devLog(`切工作区失败: ${String(reason)}`);
-            }
-          })();
+          const next = projects.find((item) => item.name === event.target.value);
+          go(next?.workspaces[0]?.tasks[0]?.root);
         }}
-        className="h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+        className={SELECT}
       >
-        {workspaces.map((item) => (
+        {projects.map((item) => (
+          <option key={item.name} value={item.name}>
+            项目：{item.name}
+          </option>
+        ))}
+      </select>
+
+      {/* 二级：工作区 */}
+      <select
+        value={currentWorkspace?.name ?? ''}
+        title="工作区：一个游戏/一个空间（比如「阴阳师」「王者荣耀」）"
+        onChange={(event) => {
+          const next: TreeWorkspace | undefined = currentProject.workspaces.find(
+            (item) => item.name === event.target.value,
+          );
+          go(next?.tasks[0]?.root);
+        }}
+        className={SELECT}
+      >
+        {(currentProject.workspaces ?? []).map((item) => (
           <option key={item.name} value={item.name}>
             工作区：{item.name}
           </option>
         ))}
       </select>
-      <button
-        type="button"
-        title="新建工作区（workspaces/<名字>/）"
-        onClick={() => {
-          const name = window.prompt('新工作区名字');
-          if (!name) {
-            return;
-          }
-          void (async () => {
-            try {
-              const result = await workspaceCreate(name);
-              setWorkspaces(result.items);
-              setWorkspace(name);
-            } catch (reason) {
-              devLog(`新建工作区失败: ${String(reason)}`);
-            }
-          })();
-        }}
-        className="rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised hover:text-fg"
-      >
-        ＋工作区
-      </button>
+
       <span className="mx-1 h-3 w-px bg-line" />
 
-      {tasks.map((item) => {
+      {/* 三级：任务 = 状态图（标签） */}
+      {(currentWorkspace?.tasks ?? []).map((item) => {
         const active = item.root === root;
         return (
           <button
             key={item.root}
             type="button"
             title={`${item.root}\n${item.nodes} 界面 · ${item.edges} 步 · ${item.recognizers} 识别器`}
-            onClick={() => {
-              if (!active) {
-                void switchProject(item.root);
-              }
-            }}
+            onClick={() => go(item.root)}
             className={cn(
               'flex items-center gap-1 rounded-t-sm border border-b-0 px-2 py-0.5 text-badge',
               active
@@ -163,11 +141,11 @@ export function TaskTabs(): ReactNode {
       <button
         type="button"
         disabled={busy}
-        onClick={add}
-        title="在这个工作区里新建脚本（一张新的空状态图）"
+        onClick={addTask}
+        title="在当前工作区里新建任务（一张新的空状态图）"
         className="ml-0.5 rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
       >
-        ＋脚本
+        ＋ 任务
       </button>
     </div>
   );

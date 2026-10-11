@@ -123,4 +123,69 @@ describe('画布右键菜单', () => {
     expect(pick).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('二级菜单里的输入行：填两个坐标 → 点「加这一步」提交', async () => {
+    const user = userEvent.setup();
+    const submit = vi.fn();
+    render(
+      <GraphContextMenu
+        anchor={anchor([
+          {
+            label: '点击',
+            submenu: [
+              {
+                label: '坐标（相对）',
+                note: '0~1',
+                input: {
+                  fields: [
+                    { key: 'x', placeholder: 'x' },
+                    { key: 'y', placeholder: 'y' },
+                  ],
+                  submitLabel: '加这一步',
+                  onSubmit: submit,
+                },
+              },
+            ],
+          },
+        ])}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByText('点击'));
+    await user.type(screen.getByLabelText('x'), '0.42');
+    await user.type(screen.getByLabelText('y'), '68%');
+    await user.click(screen.getByText('加这一步'));
+
+    expect(submit).toHaveBeenCalledWith({ x: '0.42', y: '68%' });
+  });
+
+  it('输入行里按 Enter 也能提交', async () => {
+    const user = userEvent.setup();
+    const submit = vi.fn();
+    render(
+      <GraphContextMenu
+        anchor={anchor([
+          {
+            label: '滑动',
+            submenu: [
+              {
+                label: '起止坐标（相对）',
+                input: {
+                  fields: [{ key: 'x', placeholder: 'x' }],
+                  submitLabel: '加这一步',
+                  onSubmit: submit,
+                },
+              },
+            ],
+          },
+        ])}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByText('滑动'));
+    await user.type(screen.getByLabelText('x'), '0.5{Enter}');
+    expect(submit).toHaveBeenCalledWith({ x: '0.5' });
+  });
 });

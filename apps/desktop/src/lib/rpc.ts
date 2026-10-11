@@ -518,6 +518,31 @@ export function workspaceCreate(name: string): Promise<{ items: WorkspaceSummary
   return rpc<{ items: WorkspaceSummary[] }>('workspace.create', { name });
 }
 
+/** 三层目录树：项目 > 工作区 > 任务（任务 = 一张状态图） */
+export interface TreeTask {
+  readonly name: string;
+  readonly root: string;
+  readonly nodes: number;
+  readonly edges: number;
+  readonly recognizers: number;
+}
+
+export interface TreeWorkspace {
+  readonly name: string;
+  readonly root: string;
+  readonly tasks: readonly TreeTask[];
+}
+
+export interface TreeProject {
+  readonly name: string;
+  readonly root: string;
+  readonly workspaces: readonly TreeWorkspace[];
+}
+
+export function workspaceTree(): Promise<{ projects: TreeProject[] }> {
+  return rpc<{ projects: TreeProject[] }>('workspace.tree', {});
+}
+
 export function projectList(base?: string): Promise<{ items: ProjectSummary[] }> {
   return rpc<{ items: ProjectSummary[] }>('project.list', base ? { base } : {});
 }
