@@ -25,7 +25,14 @@ describe('任务标签栏', () => {
 
   it('目录树拉取失败时渲染为空（不把异常抛给上层）', () => {
     useSessionStore.setState({
-      project: { root: '/tmp/x/y', nodes: 0, edges: 0, recognizers: 0 },
+      project: {
+        root: '/tmp/x/y',
+        graphPath: '/tmp/x/y/graph.json',
+        templates: '/tmp/x/y/templates',
+        nodes: 0,
+        edges: 0,
+        recognizers: 0,
+      },
     });
     const { container } = render(<TaskTabs />);
     expect(container.textContent).toBe('');
