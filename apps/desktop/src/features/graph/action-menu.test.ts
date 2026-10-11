@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
-import { buildActionMenu } from '@/features/graph/action-menu';
+import { buildActionMenu, parseRelative } from '@/features/graph/action-menu';
 import type { MenuItem } from '@/features/graph/GraphContextMenu';
 
 function ctx(patch: Partial<Parameters<typeof buildActionMenu>[0]> = {}) {
@@ -99,5 +99,66 @@ describe('＋操作菜单', () => {
     expect(create).toHaveBeenCalledWith({
       action: { type: 'swipe', x: 0.5, y: 0.75, to_x: 0.5, to_y: 0.25 },
     });
+  });
+
+  it('点击 ▸ 坐标（相对）：填 0.42 / 68% 都能建，写超范围的会被忽略', () => {
+    const { context, create } = ctx();
+    const click = item(buildActionMenu(context), '点击');
+    const row = item([...click.submenu!], '坐标（相对）');
+
+    row.input?.onSubmit({ x: '0.42', y: '68%' });
+    expect(create).toHaveBeenCalledWith({ action: { type: 'click', x: 0.42, y: 0.68 } });
+
+    create.mockClear();
+    row.input?.onSubmit({ x: '2', y: '0.5' }); // 2 → 0.02（按百分比算），能接受
+    expect(create).toHaveBeenCalledWith({ action: { type: 'click', x: 0.02, y: 0.5 } });
+
+    create.mockClear();
+    row.input?.onSubmit({ x: 'abc', y: '0.5' }); // 非数字：不建废动作
+    row.input?.onSubmit({ x: '0.5', y: '' });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('滑动 ▸ 起止坐标（相对）：四个值齐全才建', () => {
+    const { context, create } = ctx();
+    const swipe = item(buildActionMenu(context), '滑动');
+    const row = item([...swipe.submenu!], '起止坐标（相对）');
+
+    row.input?.onSubmit({ x: '0.5', y: '0.8', to_x: '0.5', to_y: '0.2' });
+    expect(create).toHaveBeenCalledWith({
+      action: { type: 'swipe', x: 0.5, y: 0.8, to_x: 0.5, to_y: 0.2 },
+    });
+
+    create.mockClear();
+    row.input?.onSubmit({ x: '0.5', y: '0.8', to_x: '0.5', to_y: '' });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('长按 ▸ 坐标 + 时长（相对）：毫秒必须是正数', () => {
+    const { context, create } = ctx();
+    const hold = item(buildActionMenu(context), '长按');
+    const row = item([...hold.submenu!], '坐标 + 时长（相对）');
+
+    row.input?.onSubmit({ x: '50%', y: '0.4', ms: '900' });
+    expect(create).toHaveBeenCalledWith({ action: { type: 'long_press', x: 0.5, y: 0.4, duration_ms: 900 } });
+
+    create.mockClear();
+    row.input?.onSubmit({ x: '0.5', y: '0.4', ms: '0' });
+    expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe('相对坐标解析', () => {
+  it.each([
+    ['0.42', 0.42],
+    ['42%', 0.42],
+    ['42', 0.42],
+    ['1', 1],
+    ['0', 0],
+    ['', null],
+    ['abc', null],
+    ['0.5 ', 0.5],
+  ])('%s → %s', (raw, expected) => {
+    expect(parseRelative(raw)).toBe(expected);
   });
 });

@@ -10,6 +10,31 @@
  */
 import type { MenuItem } from '@/features/graph/GraphContextMenu';
 
+/**
+ * 解析用户填的**相对坐标**：
+ *   - `0.42` → 0.42（0~1 归一化，引擎要的就是这个）
+ *   - `42%` / `42` → 0.42（顺手支持百分比与"直接写 0~100"，免得用户猜口径）
+ *   - 空 / 非数字 / 越界 → null（调用方跳过，不建这一步）
+ */
+export function parseRelative(raw: string | undefined): number | null {
+  if (!raw) {
+    return null;
+  }
+  const text = raw.trim().replace('%', '');
+  if (text === '') {
+    return null;
+  }
+  const value = Number(text);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const ratio = Math.abs(value) > 1 ? value / 100 : value;
+  if (ratio < 0 || ratio > 1) {
+    return null;
+  }
+  return Math.round(ratio * 1000) / 1000;
+}
+
 export interface ActionMenuContext {
   /** 有截图的模板（点击/滑动的目标） */
   readonly templates: readonly string[];
@@ -40,6 +65,8 @@ const SWIPES: ReadonlyArray<{ label: string; x1: number; y1: number; x2: number;
   { label: '左滑', x1: 0.8, y1: 0.5, x2: 0.2, y2: 0.5 },
   { label: '右滑', x1: 0.2, y1: 0.5, x2: 0.8, y2: 0.5 },
 ];
+
+const COORD_NOTE = '相对坐标 0~1（也可以写 50% 或 50）';
 
 /** 建完这一步后统一在详情里选中它（"自定义…"的落点） */
 function custom(context: ActionMenuContext, type: string): MenuItem {
@@ -77,6 +104,25 @@ export function buildActionMenu(context: ActionMenuContext): MenuItem[] {
           hint: '0.5, 0.5',
           onSelect: () => context.create({ action: { type: 'click', x: 0.5, y: 0.5 } }),
         },
+        {
+          label: '坐标（相对）',
+          note: COORD_NOTE,
+          input: {
+            fields: [
+              { key: 'x', placeholder: 'x' },
+              { key: 'y', placeholder: 'y' },
+            ],
+            submitLabel: '加这一步',
+            onSubmit: (values) => {
+              const x = parseRelative(values.x);
+              const y = parseRelative(values.y);
+              if (x === null || y === null) {
+                return; // 填得不完整就不建，避免建出一个点 (0,0) 的废动作
+              }
+              context.create({ action: { type: 'click', x, y } });
+            },
+          },
+        },
         custom(context, 'click'),
       ],
     },
@@ -96,6 +142,27 @@ export function buildActionMenu(context: ActionMenuContext): MenuItem[] {
           label: '2 秒',
           onSelect: () => context.create({ action: { type: 'long_press', duration_ms: 2000 } }),
         },
+        {
+          label: '坐标 + 时长（相对）',
+          note: COORD_NOTE,
+          input: {
+            fields: [
+              { key: 'x', placeholder: 'x' },
+              { key: 'y', placeholder: 'y' },
+              { key: 'ms', placeholder: '毫秒', defaultValue: '600' },
+            ],
+            submitLabel: '加这一步',
+            onSubmit: (values) => {
+              const x = parseRelative(values.x);
+              const y = parseRelative(values.y);
+              const ms = Number(values.ms);
+              if (x === null || y === null || !Number.isFinite(ms) || ms <= 0) {
+                return; // 坐标或时长不合法就不建，免得留下一个点 (0,0) 的废动作
+              }
+              context.create({ action: { type: 'long_press', x, y, duration_ms: Math.round(ms) } });
+            },
+          },
+        },
         custom(context, 'long_press'),
       ],
     },
@@ -111,6 +178,29 @@ export function buildActionMenu(context: ActionMenuContext): MenuItem[] {
               action: { type: 'swipe', x: swipe.x1, y: swipe.y1, to_x: swipe.x2, to_y: swipe.y2 },
             }),
         })),
+        {
+          label: '起止坐标（相对）',
+          note: COORD_NOTE,
+          input: {
+            fields: [
+              { key: 'x', placeholder: 'x1' },
+              { key: 'y', placeholder: 'y1' },
+              { key: 'to_x', placeholder: 'x2' },
+              { key: 'to_y', placeholder: 'y2' },
+            ],
+            submitLabel: '加这一步',
+            onSubmit: (values) => {
+              const from = [parseRelative(values.x), parseRelative(values.y)] as const;
+              const to = [parseRelative(values.to_x), parseRelative(values.to_y)] as const;
+              if (from[0] === null || from[1] === null || to[0] === null || to[1] === null) {
+                return;
+              }
+              context.create({
+                action: { type: 'swipe', x: from[0], y: from[1], to_x: to[0], to_y: to[1] },
+              });
+            },
+          },
+        },
         custom(context, 'swipe'),
       ],
     },

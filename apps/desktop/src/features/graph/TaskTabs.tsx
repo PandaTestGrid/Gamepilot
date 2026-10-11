@@ -8,7 +8,15 @@
  */
 import { type ReactNode, useEffect, useState } from 'react';
 
-import { devLog, projectCreate, projectList, type ProjectSummary } from '@/lib/rpc';
+import {
+  devLog,
+  projectCreate,
+  projectList,
+  type ProjectSummary,
+  workspaceCreate,
+  workspaceList,
+  type WorkspaceSummary,
+} from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 import { useSessionStore } from '@/stores/session.store';
 
@@ -18,9 +26,24 @@ export function TaskTabs(): ReactNode {
   const refreshProject = useSessionStore((state) => state.refreshProject);
   const [tasks, setTasks] = useState<ProjectSummary[]>([]);
   const [busy, setBusy] = useState(false);
+  // 工作区 = 上一级目录：切工作区 = 换一批脚本（状态图）
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [workspace, setWorkspace] = useState<string>('');
 
   const root = project?.root ?? '';
   const base = root.replace(/\/[^/]+$/, '');
+
+  useEffect(() => {
+    void workspaceList()
+      .then((result) => {
+        setWorkspaces(result.items);
+        // 当前工作区 = 当前脚本所在的那个库根
+        const matched = result.items.find((item) => item.root === root.replace(/\/[^/]+$/, ''));
+        setWorkspace(matched?.name ?? result.items[0]?.name ?? '');
+      })
+      .catch((error: unknown) => devLog(`工作区列表失败: ${String(error)}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在挂载时拉一次，之后按当前目录的父目录判断
+  }, []);
 
   useEffect(() => {
     if (!base) {
@@ -28,7 +51,7 @@ export function TaskTabs(): ReactNode {
     }
     void projectList(base)
       .then((result) => setTasks(result.items))
-      .catch((error: unknown) => devLog(`任务列表失败: ${String(error)}`));
+      .catch((error: unknown) => devLog(`脚本列表失败: ${String(error)}`));
   }, [base, root]);
 
   if (!root || tasks.length === 0) {
@@ -36,7 +59,7 @@ export function TaskTabs(): ReactNode {
   }
 
   const add = (): void => {
-    const name = window.prompt('新任务名字（一个任务 = 一张状态图）');
+    const name = window.prompt('新脚本名字（一个脚本 = 一张状态图）');
     if (!name) {
       return;
     }
@@ -56,6 +79,61 @@ export function TaskTabs(): ReactNode {
 
   return (
     <div className="flex flex-wrap items-center gap-0.5 border-b border-line px-1 py-0.5">
+      {/* 一级：工作区（换工作区 = 换下面这一批脚本/状态图） */}
+      <select
+        value={workspace}
+        title="工作区：一个工作区里放多个脚本（脚本 = 一张状态图）"
+        onChange={(event) => {
+          const picked = workspaces.find((item) => item.name === event.target.value);
+          if (!picked) {
+            return;
+          }
+          setWorkspace(picked.name);
+          void (async () => {
+            try {
+              const items = await projectList(picked.root);
+              setTasks(items.items);
+              const first = items.items[0];
+              if (first) {
+                await switchProject(first.root);
+              }
+            } catch (reason) {
+              devLog(`切工作区失败: ${String(reason)}`);
+            }
+          })();
+        }}
+        className="h-5 rounded-sm border border-line bg-canvas px-1 text-badge text-fg"
+      >
+        {workspaces.map((item) => (
+          <option key={item.name} value={item.name}>
+            工作区：{item.name}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        title="新建工作区（workspaces/<名字>/）"
+        onClick={() => {
+          const name = window.prompt('新工作区名字');
+          if (!name) {
+            return;
+          }
+          void (async () => {
+            try {
+              const result = await workspaceCreate(name);
+              setWorkspaces(result.items);
+              setWorkspace(name);
+            } catch (reason) {
+              devLog(`新建工作区失败: ${String(reason)}`);
+            }
+          })();
+        }}
+        className="rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised hover:text-fg"
+      >
+        ＋工作区
+      </button>
+      <span className="mx-1 h-3 w-px bg-line" />
+
       {tasks.map((item) => {
         const active = item.root === root;
         return (
@@ -86,10 +164,10 @@ export function TaskTabs(): ReactNode {
         type="button"
         disabled={busy}
         onClick={add}
-        title="在这个工作区里新建任务（一张新的空状态图）"
+        title="在这个工作区里新建脚本（一张新的空状态图）"
         className="ml-0.5 rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
       >
-        ＋ 任务
+        ＋脚本
       </button>
     </div>
   );

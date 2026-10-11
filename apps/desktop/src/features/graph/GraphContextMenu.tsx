@@ -19,9 +19,31 @@ import { createPortal } from 'react-dom';
 
 import { cn } from '@/lib/utils';
 
+export interface MenuField {
+  readonly key: string;
+  readonly placeholder: string;
+  readonly defaultValue?: string;
+}
+
+/**
+ * 菜单里的**内联输入行**：二级菜单不只有预设，还得能填具体值。
+ *
+ * 典型场景："点击坐标 (0.42, 0.68)" —— 相对坐标是最常用的参数，
+ * 让用户为了填两个数字跑去下方详情面板太绕（用户反馈"二级菜单里应该能输入相对坐标"）。
+ */
+export interface MenuInput {
+  readonly fields: readonly MenuField[];
+  readonly submitLabel: string;
+  readonly onSubmit: (values: Record<string, string>) => void;
+}
+
 export interface MenuItem {
   readonly label: string;
   readonly hint?: string;
+  /** 内联输入行（有它时这一项不是按钮，而是一行小表单） */
+  readonly input?: MenuInput;
+  /** 输入行的说明（比如"相对坐标 0~1，也可以写 50%"） */
+  readonly note?: string;
   /** 有子菜单时可以不传（点了只展开子菜单） */
   readonly onSelect?: () => void;
   readonly danger?: boolean;
@@ -50,6 +72,51 @@ function menuHeight(items: readonly MenuItem[]): number {
   return HEADER_HEIGHT + items.length * ITEM_HEIGHT + 10;
 }
 
+/** 菜单里的一行小表单：字段 + 提交（Enter 也能提交） */
+function MenuInputRow({ item }: { item: MenuItem }): ReactNode {
+  const input = item.input;
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries((input?.fields ?? []).map((field) => [field.key, field.defaultValue ?? ''])),
+  );
+  if (!input) {
+    return null;
+  }
+  const submit = (): void => {
+    input.onSubmit(values);
+  };
+  return (
+    <div className="px-2 py-1" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="mb-1 text-badge text-faint">{item.label}</div>
+      <div className="flex items-center gap-1">
+        {input.fields.map((field) => (
+          <input
+            key={field.key}
+            value={values[field.key] ?? ''}
+            placeholder={field.placeholder}
+            aria-label={field.placeholder}
+            onChange={(event) => setValues((current) => ({ ...current, [field.key]: event.target.value }))}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === 'Enter') {
+                submit();
+              }
+            }}
+            className="h-6 w-12 rounded-sm border border-line bg-canvas px-1 text-center text-badge text-fg"
+          />
+        ))}
+        <button
+          type="button"
+          onClick={submit}
+          className="h-6 rounded-sm border border-brand px-1.5 text-badge text-brand hover:bg-raised"
+        >
+          {input.submitLabel}
+        </button>
+      </div>
+      {item.note && <div className="mt-0.5 text-badge text-faint">{item.note}</div>}
+    </div>
+  );
+}
+
 /** 菜单列表（一级和二级共用同样的行高与样式） */
 function MenuList({
   items,
@@ -73,20 +140,24 @@ function MenuList({
       {items.map((item, index) => (
         <div key={`${item.label}-${index}`} onMouseEnter={() => onHoverItem?.(index)}>
           {item.divider && <div className="my-1 h-px bg-line" />}
-          <button
-            type="button"
-            data-has-submenu={item.submenu ? 'true' : undefined}
-            onClick={() => onPick(item)}
-            className={cn(
-              'flex w-full items-center gap-2 px-2 py-1 text-left text-body hover:bg-raised',
-              item.danger ? 'text-failed' : 'text-fg',
-              openIndex === index && item.submenu && 'bg-raised',
-            )}
-          >
-            <span className="flex-1 truncate">{item.label}</span>
-            {item.hint && <span className="shrink-0 text-badge text-faint">{item.hint}</span>}
-            {item.submenu && <span className="shrink-0 text-badge text-faint">›</span>}
-          </button>
+          {item.input ? (
+            <MenuInputRow item={item} />
+          ) : (
+            <button
+              type="button"
+              data-has-submenu={item.submenu ? 'true' : undefined}
+              onClick={() => onPick(item)}
+              className={cn(
+                'flex w-full items-center gap-2 px-2 py-1 text-left text-body hover:bg-raised',
+                item.danger ? 'text-failed' : 'text-fg',
+                openIndex === index && item.submenu && 'bg-raised',
+              )}
+            >
+              <span className="flex-1 truncate">{item.label}</span>
+              {item.hint && <span className="shrink-0 text-badge text-faint">{item.hint}</span>}
+              {item.submenu && <span className="shrink-0 text-badge text-faint">›</span>}
+            </button>
+          )}
         </div>
       ))}
     </div>
@@ -138,6 +209,9 @@ export function GraphContextMenu({
   );
 
   const pick = (item: MenuItem): void => {
+    if (item.input) {
+      return; // 输入行自己有提交按钮
+    }
     if (item.submenu) {
       // 一级项点了只展开二级（触屏没有 hover，点开更稳）
       setOpenIndex(anchor.items.indexOf(item));

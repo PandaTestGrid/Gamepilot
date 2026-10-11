@@ -36,6 +36,7 @@ const probe = vi.hoisted(() => ({
     onSelectionChange?: (params: { nodes: ProbeNode[] }) => void;
     onNodesDelete?: (nodes: ProbeNode[]) => void;
     onEdgesDelete?: (edges: Array<{ id: string }>) => void;
+    onPaneContextMenu?: (event: unknown) => void;
   },
 }));
 
@@ -113,24 +114,31 @@ describe('画布手势：左键框选，不是拖动平移', () => {
     probe.props = null;
   });
 
-  it('左键拖空白 = 框选（selectionOnDrag），平移给中键 + 滚动', () => {
+  it('左键拖空白 = 框选（selectionOnDrag），平移给中键 + 右键 + 滚动', () => {
     setup();
 
     expect(probe.props?.selectionOnDrag).toBe(true);
-    // 关键：panOnDrag 不含 0（左键）—— 含 0 时 xyflow 会给画布加 cursor: grab，就是那个"小手"
-    expect(probe.props?.panOnDrag).toEqual([1]);
+    // 关键：panOnDrag 不含 0（左键）—— 左键要留给框选
+    expect(probe.props?.panOnDrag).toEqual([1, 2]);
     expect(probe.props?.multiSelectionKeyCode).toEqual(['Shift', 'Meta', 'Control']);
     // 滚动/双指滑动 = 平移，⌘+滚动 = 缩放（Mac 触控板没有中键）
     expect(probe.props?.panOnScroll).toBe(true);
     expect(probe.props?.zoomOnScroll).toBe(false);
   });
 
-  it('**不用右键平移**：xyflow 只要看到 panOnDrag 含 2 就会吞掉右键菜单', () => {
+  /**
+   * 右键有两层含义，xyflow 原生分得开（源码 `createPanZoomEndHandler`）：
+   *   - 右键**拖动** → 平移（光标是小手，很多平台都这么做）
+   *   - 右键**只点不拖** → 弹菜单
+   * 之前以为"panOnDrag 含 2 就会吞掉右键菜单"，其实它只在"这次右键拖过"时才不弹。
+   */
+  it('右键拖动 = 平移（小手），右键只点 = 弹菜单；两者可以共存', () => {
     setup();
 
     const panOnDrag = probe.props?.panOnDrag;
-    const buttons = Array.isArray(panOnDrag) ? panOnDrag : [];
-    expect(buttons).not.toContain(2);
+    expect(Array.isArray(panOnDrag) ? panOnDrag : []).toContain(2);
+    // 菜单入口仍在（真的吞掉的话，这个 prop 就没意义了）
+    expect(typeof probe.props?.onPaneContextMenu).toBe('function');
   });
 
   it('Delete 和 Backspace 都能删（macOS 键盘上 Delete 要按 Fn+Backspace）', () => {

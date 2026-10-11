@@ -768,18 +768,19 @@ export function GraphPane(): ReactNode {
                   flowRef.current = instance;
                 }}
                 /*
-                 * 画布手势（用户反馈"鼠标一放上去就是小手，而且没法框选多个"）：
+                 * 画布手势：
                  *   - `selectionOnDrag`：**左键拖空白 = 框选**多个界面；
-                 *   - `panOnDrag={[1]}`：平移给**中键**（外加 xyflow 默认的"空格+拖动"）。
-                 *     `[1]` 是 DOM 的 `MouseEvent.button`：**1 = 中键、2 = 右键**。
-                 *     **不能用右键平移**：xyflow 的实现里，只要 panOnDrag 含 2，
-                 *     它就把 `contextmenu` 事件 preventDefault 掉并 return —— 右键菜单会被整个吞掉；
+                 *   - `panOnDrag={[1, 2]}`：平移给**中键 + 右键**（外加"空格+拖动"）。
+                 *     `[1]`/`[2]` 是 DOM 的 `MouseEvent.button`：1 = 中键、2 = 右键。
+                 *     右键**拖动** = 平移（光标是"小手"，Figma / Unity 都是这个手感，用户点名要），
+                 *     右键**只点不拖** = 弹菜单 —— xyflow 原生分得开（`createPanZoomEndHandler`：
+                 *     这次右键被用来平移过，就不触发 onPaneContextMenu），所以两者可以共存。
                  *   - `panOnScroll` + `zoomOnScroll={false}`：**滚动/双指滑动 = 平移**，
                  *     ⌘+滚动 = 缩放（Mac 上 zoomActivationKeyCode 默认就是 Meta），捏合仍然缩放。
                  *     Mac 触控板没有中键，原来"滚动=缩放"意味着不按空格就没法平移。
                  */
                 selectionOnDrag
-                panOnDrag={[1]}
+                panOnDrag={[1, 2]}
                 panOnScroll
                 zoomOnScroll={false}
                 multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
