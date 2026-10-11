@@ -81,7 +81,10 @@ export function WorkspaceTree(): ReactNode {
 
       {groups.map((workspace) => (
         <div key={workspace.name}>
-          <div className="mt-1 px-2 text-faint">{workspace.name}</div>
+          <div className="mt-1 flex items-center gap-1 px-2 text-faint">
+            <span>▾</span>
+            <span className="truncate">{workspace.name}</span>
+          </div>
           {(workspace.workspaces ?? []).map((project) => {
             const folded = collapsed[project.root] === true;
             return (
@@ -95,6 +98,7 @@ export function WorkspaceTree(): ReactNode {
                   >
                     {folded ? '▸' : '▾'}
                   </button>
+                  <span className="shrink-0 text-faint">🗂</span>
                   <span className="min-w-0 flex-1 truncate text-fg">{project.name}</span>
                   <span className="shrink-0 text-faint">{(project.tasks ?? []).length} 张状态图</span>
                   <button
@@ -119,39 +123,42 @@ export function WorkspaceTree(): ReactNode {
                   </button>
                 </div>
 
-                {!folded &&
-                  (project.tasks ?? []).map((task) => {
-                    const asScript: ProjectSummary = {
-                      name: task.name,
-                      root: task.root,
-                      nodes: task.nodes,
-                      edges: task.edges,
-                      recognizers: task.recognizers,
-                      templates: 0,
-                    };
-                    return (
-                      <ScriptRow
-                        key={task.root}
-                        item={asScript}
-                        current={task.root === currentRoot}
-                        busy={busy}
-                        onSwitch={() => void switchProject(task.root)}
-                        onDuplicate={() => {
-                          const name = window.prompt('复制成什么名字');
-                          if (name) {
-                            void duplicate(task.root, name).then(load);
-                          }
-                        }}
-                        onRename={() => {
-                          const name = window.prompt('改成什么名字', task.name);
-                          if (name) {
-                            void rename(task.root, name).then(load);
-                          }
-                        }}
-                        onRemove={() => void remove(task.root).then(load)}
-                      />
-                    );
-                  })}
+                {!folded && (project.tasks ?? []).length > 0 && (
+                  <div className="ml-3 border-l border-line pl-1">
+                    {(project.tasks ?? []).map((task) => {
+                      const asScript: ProjectSummary = {
+                        name: task.name,
+                        root: task.root,
+                        nodes: task.nodes,
+                        edges: task.edges,
+                        recognizers: task.recognizers,
+                        templates: 0,
+                      };
+                      return (
+                        <ScriptRow
+                          key={task.root}
+                          item={asScript}
+                          current={task.root === currentRoot}
+                          busy={busy}
+                          onSwitch={() => void switchProject(task.root)}
+                          onDuplicate={() => {
+                            const name = window.prompt('复制成什么名字');
+                            if (name) {
+                              void duplicate(task.root, name).then(load);
+                            }
+                          }}
+                          onRename={() => {
+                            const name = window.prompt('改成什么名字', task.name);
+                            if (name) {
+                              void rename(task.root, name).then(load);
+                            }
+                          }}
+                          onRemove={() => void remove(task.root).then(load)}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             );
           })}
