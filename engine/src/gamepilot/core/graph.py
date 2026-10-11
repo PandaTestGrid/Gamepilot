@@ -56,6 +56,8 @@ def _action_is_deferred(spec: object) -> bool:
         return True
     if VariableRefs.collect(spec).vars:
         return True
+    if VariableRefs.collect_scores(spec):
+        return True
     return any(key in spec for key in ("$expr",))
 
 
@@ -248,6 +250,9 @@ class Graph:
             for name in VariableRefs.collect(edge.action).vars:
                 if name not in self.variables:
                     raise ValueError(f"边 {edge.id} 的动作引用了未定义的变量: {name}")
+            for label in VariableRefs.collect_scores(edge.action):
+                if label not in self.recognizers:
+                    raise ValueError(f"边 {edge.id} 的动作引用了未定义的识别器（$score）: {label}")
             if str(edge.action.get("type")) == SET_ACTION:
                 target_name = str(edge.action.get("name") or "").strip()
                 if not target_name:

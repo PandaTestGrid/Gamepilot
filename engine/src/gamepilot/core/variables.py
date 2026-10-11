@@ -153,9 +153,16 @@ def evaluate_expr(text: str, store: VariableStore) -> VarValue:
     return str(result)
 
 
-def resolve_value(value: object, store: VariableStore) -> object:
-    """把一个参数值求出来：`{"$var": …}` / `{"$expr": …}` / 字面量原样返回。"""
+def resolve_value(value: object, store: VariableStore, scores: dict[str, float] | None = None) -> object:
+    """把一个参数值求出来：`$var` / `$expr` / `$score` / 字面量原样返回。
+
+    `$score` 是"数据源"：把某个识别器**当前这一帧的相似度**当参数用
+    （例：把识别得分接到条件阈值上做调试）。
+    """
     if isinstance(value, dict):
+        if "$score" in value:
+            label = str(value["$score"])
+            return float((scores or {}).get(label, 0.0))
         if "$var" in value:
             name = str(value["$var"])
             found = store.get(name)
@@ -168,9 +175,9 @@ def resolve_value(value: object, store: VariableStore) -> object:
     return value
 
 
-def resolve_spec(spec: dict[str, Any], store: VariableStore) -> dict[str, Any]:
+def resolve_spec(spec: dict[str, Any], store: VariableStore, scores: dict[str, float] | None = None) -> dict[str, Any]:
     """动作参数整体求值（把里面的引用换成当前值）。"""
-    return {key: resolve_value(value, store) for key, value in spec.items()}
+    return {key: resolve_value(value, store, scores) for key, value in spec.items()}
 
 
 @dataclass
@@ -184,6 +191,24 @@ class VariableRefs:
         refs = cls()
         refs._walk(value)
         return refs
+
+    @staticmethod
+    def collect_scores(value: object) -> set[str]:
+        """收集动作里 `$score` 引用到的识别器标签。"""
+        found: set[str] = set()
+
+        def walk(node: object) -> None:
+            if isinstance(node, dict):
+                if "$score" in node:
+                    found.add(str(node["$score"]))
+                for item in node.values():
+                    walk(item)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(value)
+        return found
 
     def _walk(self, value: object) -> None:
         if isinstance(value, dict):

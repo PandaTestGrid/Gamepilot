@@ -293,6 +293,20 @@ export function graphGet(deviceId: string): Promise<GraphPayload> {
   return rpc<GraphPayload>('graph.get', { deviceId });
 }
 
+/** 调试：给一条边设/清断点（走到这里暂停） */
+export function setBreakpoint(
+  deviceId: string,
+  edgeId: string,
+  enabled: boolean,
+): Promise<{ breakpoints: string[] }> {
+  return rpc<{ breakpoints: string[] }>('run.breakpoint', { deviceId, edgeId, enabled });
+}
+
+/** 断点暂停后继续 */
+export function runResume(deviceId: string): Promise<{ ok: boolean }> {
+  return rpc<{ ok: boolean }>('run.resume', { deviceId });
+}
+
 /** 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置 */
 export function actionRun(
   deviceId: string,

@@ -27,6 +27,7 @@ from ..devices.mock import MOCK_DEVICE_ID
 from ..project import Project, resolve_project
 from ..protocol import (
     METHOD_ACTION_RUN,
+    METHOD_BREAKPOINT,
     METHOD_DEVICE_CONNECT,
     METHOD_DEVICE_DISCONNECT,
     METHOD_DEVICE_KEY,
@@ -45,6 +46,7 @@ from ..protocol import (
     METHOD_RECOGNIZER_THRESHOLD,
     METHOD_RECORD_ACTION,
     METHOD_RECORD_TEMPLATE,
+    METHOD_RUN_RESUME,
     METHOD_RUN_START,
     METHOD_RUN_STOP,
     METHOD_TEMPLATE_IMAGE,
@@ -478,6 +480,26 @@ def register(server: RpcServer) -> SessionManager:
         session = manager.get(_require_str(params, "deviceId"))
         session.start_run()
         return {"ok": True, "running": True}
+
+    @server.method(METHOD_RUN_RESUME)
+    def _run_resume(params: dict[str, Any]) -> dict[str, Any]:
+        """断点暂停后继续跑。"""
+        session = manager.get(_require_str(params, "deviceId"))
+        session.engine.resume()
+        session.emit("run.resumed", {"deviceId": session.device_id})
+        return {"ok": True, "paused": session.engine.paused}
+
+    @server.method(METHOD_BREAKPOINT)
+    def _breakpoint(params: dict[str, Any]) -> dict[str, Any]:
+        """给一条边设/清断点（调试用：走到这里暂停）。"""
+        session = manager.get(_require_str(params, "deviceId"))
+        edge_id = _require_str(params, "edgeId")
+        enabled = bool(params.get("enabled", True))
+        if enabled:
+            session.engine.breakpoints.add(edge_id)
+        else:
+            session.engine.breakpoints.discard(edge_id)
+        return {"edgeId": edge_id, "enabled": enabled, "breakpoints": sorted(session.engine.breakpoints)}
 
     @server.method(METHOD_RUN_STOP)
     def _run_stop(params: dict[str, Any]) -> dict[str, Any]:

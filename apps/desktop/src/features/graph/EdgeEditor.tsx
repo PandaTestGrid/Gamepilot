@@ -12,7 +12,7 @@ import { type ReactNode, useState } from 'react';
 
 import { toActionPayload, toConditionPayload } from '@/lib/graph-adapter';
 import { type DetectionLike, evaluateEdge } from '@/lib/edge-status';
-import { devLog, actionRun } from '@/lib/rpc';
+import { actionRun, devLog, setBreakpoint } from '@/lib/rpc';
 import { describeEdgeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
 import { useGraphStore } from '@/stores/graph.store';
@@ -357,6 +357,24 @@ export function EdgeEditor({
           className="h-5 rounded-sm border border-line px-2 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
         >
           立即执行这一步
+        </button>
+        <button
+          type="button"
+          disabled={!deviceReady}
+          title="走到这条边时暂停（调试用；运行中的设备才有效）"
+          onClick={() => {
+            void (async () => {
+              try {
+                await setBreakpoint(deviceId, edge.id, true);
+                devLog(`已在这条边上设断点：${edge.id}`);
+              } catch (reason) {
+                setError(reason instanceof Error ? reason.message : String(reason));
+              }
+            })();
+          }}
+          className="h-5 rounded-sm border border-line px-2 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
+        >
+          ⏸ 断点
         </button>
         <button
           type="button"

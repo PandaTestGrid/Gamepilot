@@ -68,6 +68,11 @@ class Engine:
         self.detections: dict[str, Detection] = {}
         # 变量（"黑板"）：动作参数里的 {"$var": …} 在执行那一刻求值
         self.variables = VariableStore()
+        # 断点（边的 id）：命中时暂停，等 run.resume —— 配合"单独执行这一步"逐段调试
+        self.breakpoints: set[str] = set()
+        self.paused_at: str | None = None
+        # 本次访问在这个界面上已经停过的断点（避免恢复后又停在同一处）
+        self._breakpoint_passed: set[str] = set()
         self.stats = {"ticks": 0, "actions": 0, "transitions": 0, "failed": 0, "recoveries": 0}
         self._timeout_reported: set[str] = set()
         # 本次"进入节点"期间已经触发过的边（dst 为空的边默认只触发一次，
@@ -90,6 +95,14 @@ class Engine:
     # 一次 tick
     # ------------------------------------------------------------------ #
 
+    def resume(self) -> None:
+        """恢复运行：清掉当前断点命中，下一拍继续（再走到同一个断点还会停）。"""
+        self.paused_at = None
+
+    @property
+    def paused(self) -> bool:
+        return self.paused_at is not None
+
     def tick(self, frame: Frame) -> list[TraceEvent]:
         self._outbox = []
         detections = self.perceive(frame)
@@ -104,6 +117,8 @@ class Engine:
         # 1) recovery 边优先于一切普通边
         for edge in self._recoveries():
             if self._guard_ok(edge):
+                if self._hit_breakpoint(edge):
+                    return self._outbox
                 self.stats["recoveries"] += 1
                 self._emit("recovery_matched", node=self.current, edge=edge, message=f"中断: {edge.when}")
                 self._execute(edge)
@@ -128,6 +143,8 @@ class Engine:
         # 3) 选优先级最高的可执行边
         for edge in self._outgoing(self.current):
             if self._guard_ok(edge):
+                if self._hit_breakpoint(edge):
+                    return self._outbox
                 self._emit("edge_matched", node=self.current, edge=edge, message=f"{edge.when} → {edge.dst or '原地'}")
                 self._execute(edge)
                 self._last_fire[edge.id] = time.time()
@@ -310,6 +327,23 @@ class Engine:
         self._emit("action_manual", node=self.current, edge=edge, message=f"单独执行：{parsed.describe()}")
         return parsed.describe()
 
+    def _hit_breakpoint(self, edge: Edge) -> bool:
+        """这条边是不是断点：是就暂停并返回 True（这一拍不执行动作）。"""
+        if edge.id not in self.breakpoints or edge.id in self._breakpoint_passed:
+            return False
+        # 用单独的一个集合记"这次访问已经停过了"：绝不能动 _fired_in_node，
+        # 否则恢复后这条边会被当成"已执行"而永远不再执行（踩过）
+        self._breakpoint_passed.add(edge.id)
+        self.paused_at = edge.id
+        self._emit(
+            "breakpoint_hit",
+            node=self.current,
+            edge=edge,
+            message=f"断点：在『{self.graph.nodes[self.current].name if self.current in self.graph.nodes else self.current}』"
+            f"命中 {edge.id}（已暂停，恢复后继续）",
+        )
+        return True
+
     def _execute(self, edge: Edge) -> None:
         """执行一条边上的动作。
 
@@ -318,7 +352,7 @@ class Engine:
         """
         # 变量在这里求值：参数写 {"$var": "点击X"} 就会换成当前值
         try:
-            spec = resolve_spec(dict(edge.action), self.variables)
+            spec = resolve_spec(dict(edge.action), self.variables, self._scores())
         except ValueError as exc:
             self.stats["failed"] += 1
             self._emit("action_failed", node=self.current, edge=edge, message=str(exc))
@@ -452,6 +486,10 @@ class Engine:
             controller.touch("up", x, y)
         else:
             controller.click(x, y)
+
+    def _scores(self) -> dict[str, float]:
+        """当前这一帧各识别器的相似度（给 $score 数据源用）。"""
+        return {label: float(item.score) for label, item in self.detections.items()}
 
     def reset_variables(self) -> None:
         """把运行期变量恢复成脚本里的默认值（每次 run.start／换图时调一次）。

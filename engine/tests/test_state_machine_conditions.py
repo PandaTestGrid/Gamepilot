@@ -18,6 +18,7 @@ from test_state_machine import (
     POPUP_BUTTON,
     ScriptedController,
     _canvas,
+    _crop,
     _frame,
     _patterned,
 )
@@ -331,3 +332,69 @@ def test_variable_reference_missing_at_runtime_is_reported() -> None:
     engine._execute(graph.edges[0])
     assert not controller.clicks, "引用不到的变量不该瞎点"
     assert engine.stats["failed"] >= 1
+
+
+def test_breakpoint_pauses_then_resumes(tmp_path: Path) -> None:
+    """断点：走到指定边时暂停（不执行动作），恢复后继续且不会卡在同一处。"""
+    import os
+
+    import cv2
+
+    controller = RecordingController()
+    frame_img = _canvas()
+    _patterned(frame_img, MAIN_BUTTON, 4, 40, 220)
+    os.makedirs(tmp_path / "templates", exist_ok=True)
+    cv2.imwrite(str(tmp_path / "templates" / "home.png"), _crop(frame_img, MAIN_BUTTON))
+
+    graph = Graph.from_dict(
+        {
+            "nodes": [{"id": "main", "name": "主界面", "enter": ["home"]}],
+            "recognizers": {"home": {"type": "template", "template": "templates/home.png", "threshold": 0.7}},
+            "edges": [
+                {"id": "e_click", "when": "home", "from": "main", "action": {"type": "click", "x": 0.5, "y": 0.5}}
+            ],
+        },
+        base_dir=str(tmp_path),
+    )
+    graph.validate()
+    engine = Engine(graph, controller)
+    engine.breakpoints.add("e_click")
+
+    for index in range(1, 20):
+        engine.tick(_frame(frame_img, index))
+        if engine.paused:
+            break
+    assert engine.paused and engine.paused_at == "e_click", "断点应该命中"
+    assert not controller.clicks, "断点命中时不该执行动作"
+
+    engine.resume()
+    for index in range(20, 34):
+        engine.tick(_frame(frame_img, index))
+        if controller.clicks:
+            break
+    assert not engine.paused, "恢复后不该又停在同一处"
+    assert controller.clicks, "恢复后应该真的执行"
+
+
+def test_score_data_source_resolves_live_score() -> None:
+    """$score：把识别器当前得分当参数用（数据源）。"""
+    from gamepilot.core.variables import VariableStore, resolve_spec
+
+    resolved = resolve_spec(
+        {"type": "click", "x": {"$score": "icon"}, "y": 0.5},
+        VariableStore({}),
+        {"icon": 0.937},
+    )
+    assert resolved["x"] == pytest.approx(0.937)
+    # 没识别到就是 0（不是崩）
+    assert resolve_spec({"x": {"$score": "nope"}}, VariableStore({}), {})["x"] == 0.0
+
+
+def test_graph_validates_score_references() -> None:
+    """$score 引用的识别器也必须在保存时校验。"""
+    from gamepilot.core.graph import Edge, Graph
+
+    graph = Graph()
+    graph.add_edge(Edge.from_dict({"id": "e1", "action": {"type": "click", "x": {"$score": "没这个"}, "y": 0.5}}))
+    with pytest.raises(ValueError, match="未定义的识别器"):
+        graph.validate()

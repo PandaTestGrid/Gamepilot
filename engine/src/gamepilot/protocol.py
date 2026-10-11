@@ -82,6 +82,8 @@ METHOD_RECOGNIZER_THRESHOLD = "recognizer.threshold"
 METHOD_VARIABLE_SET = "variable.set"
 # 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置
 METHOD_ACTION_RUN = "action.run"
+METHOD_RUN_RESUME = "run.resume"  # 断点暂停后继续
+METHOD_BREAKPOINT = "run.breakpoint"  # 设/清断点（edgeId）
 METHOD_RUN_START = "run.start"
 METHOD_RUN_STOP = "run.stop"
 METHOD_TIMELINE = "timeline.get"
