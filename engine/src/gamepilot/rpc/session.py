@@ -43,6 +43,7 @@ from ..protocol import (
     METHOD_GRAPH_NODE_UPDATE,
     METHOD_GRAPH_SAVE,
     METHOD_MAC_WINDOWS,
+    METHOD_RECOGNIZER_REMOVE,
     METHOD_RECOGNIZER_THRESHOLD,
     METHOD_RECORD_ACTION,
     METHOD_RECORD_TEMPLATE,
@@ -451,6 +452,13 @@ def register(server: RpcServer) -> SessionManager:
         value = params.get("value")
         session.engine.variables.set(name, value if isinstance(value, (int, float, str, bool)) else str(value))
         return {"name": name, "value": session.engine.variables.get(name)}
+
+    @server.method(METHOD_RECOGNIZER_REMOVE)
+    def _recognizer_remove(params: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = manager.get(_require_str(params, "deviceId")).remove_recognizer(
+            _require_str(params, "label")
+        )
+        return result
 
     @server.method(METHOD_GRAPH_GET)
     def _graph_get(params: dict[str, Any]) -> dict[str, Any]:

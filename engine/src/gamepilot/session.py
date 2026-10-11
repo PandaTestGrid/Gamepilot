@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -622,6 +624,37 @@ class DeviceSession:
                 "rect": rect.clamp().to_list(),
                 "graph": self.graph.to_dict(),
             }
+
+    def remove_recognizer(self, label: str) -> dict[str, Any]:
+        """删掉一个模板/识别器。
+
+        被别处引用时**拒绝删除**并说清被谁用了 —— 直接删会让脚本变成"引用了不存在的东西"，
+        跑起来才发现（比删不掉更糟）。
+        """
+        with self.lock:
+            if label not in self.graph.recognizers:
+                raise ValueError(f"没有这个识别器: {label}")
+            users: list[str] = []
+            for node in self.graph.nodes.values():
+                if label in node.enter:
+                    users.append(f"界面『{node.name}』的进入条件")
+            for edge in self.graph.edges:
+                if label in edge.condition.labels or label == edge.when:
+                    users.append(f"边 {edge.id} 的判断条件")
+                if label in (edge.action.get("target"), edge.action.get("to_target")):
+                    users.append(f"边 {edge.id} 的动作目标")
+            if users:
+                raise RuntimeError(f"『{label}』还在被使用，先改掉再删：{'；'.join(sorted(set(users))[:4])}")
+            spec = dict(self.graph.specs.get(label) or {})
+            self.graph.specs.pop(label, None)
+            self.graph.recognizers.pop(label, None)
+            template = str(spec.get("template") or "")
+            if template:
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(self.project.root, template))
+            self.graph.save()
+            self.reload_graph()
+            return {"removed": label, "graph": self.graph.to_dict()}
 
     def set_threshold(self, label: str, threshold: float) -> dict[str, Any]:
         with self.lock:

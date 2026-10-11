@@ -315,6 +315,11 @@ export function actionRun(
   return rpc<{ ok: boolean; described: string }>('action.run', { deviceId, action });
 }
 
+/** 删除一个模板/识别器（被界面或边引用时引擎会拒绝并说明被谁用了） */
+export function removeRecognizer(deviceId: string, label: string): Promise<{ removed: string }> {
+  return rpc<{ removed: string }>('recognizer.remove', { deviceId, label });
+}
+
 /** macOS 本机窗口列表（界面上的窗口选择器；也可手动输句柄） */
 export interface MacWindowInfo {
   readonly handle: number;

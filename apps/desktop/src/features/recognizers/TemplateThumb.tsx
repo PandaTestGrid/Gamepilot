@@ -11,7 +11,7 @@ import { type ReactNode, useEffect, useState } from 'react';
 import { templateImage } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
 
-export function TemplateThumb({ label, size = 40 }: { label: string; size?: number }): ReactNode {
+export function TemplateThumb({ label, size = 26 }: { label: string; size?: number }): ReactNode {
   const [grayscale, setGrayscale] = useState(false);
   const [cache, setCache] = useState<Record<string, string>>({});
   const [failed, setFailed] = useState(false);
