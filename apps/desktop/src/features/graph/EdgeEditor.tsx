@@ -12,6 +12,7 @@ import { type ReactNode, useState } from 'react';
 
 import { toActionPayload, toConditionPayload } from '@/lib/graph-adapter';
 import { type DetectionLike, evaluateEdge } from '@/lib/edge-status';
+import { extractParamsToVariables } from '@/lib/param-vars';
 import { actionRun, devLog, setBreakpoint } from '@/lib/rpc';
 import { describeEdgeLogic } from '@/lib/graph-logic';
 import { cn } from '@/lib/utils';
@@ -40,6 +41,7 @@ export function EdgeEditor({
   graph: GraphData | undefined;
 }): ReactNode {
   const saveEdge = useGraphStore((state) => state.saveEdge);
+  const setVariables = useGraphStore((state) => state.setVariables);
   const removeEdge = useGraphStore((state) => state.removeEdge);
   const [condition, setCondition] = useState<EdgeCondition>(edge.condition);
   const [action, setAction] = useState<EdgeAction>(edge.actionSpec);
@@ -84,13 +86,13 @@ export function EdgeEditor({
     });
   };
 
-  const save = async (): Promise<void> => {
+  const save = async (override?: { action: EdgeAction }): Promise<void> => {
     setBusy(true);
     setError(null);
     try {
       await saveEdge(deviceId, edge.id, {
         condition: toConditionPayload(condition, primary) ?? null,
-        action: toActionPayload(action),
+        action: toActionPayload(override?.action ?? action),
         priority,
         cooldown_ms: cooldownMs,
       });
@@ -357,6 +359,47 @@ export function EdgeEditor({
           className="h-5 rounded-sm border border-line px-2 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
         >
           立即执行这一步
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          title="把这一步里的坐标/时长抽成变量，动作改成引用（之后改变量即可全脚本生效）"
+          onClick={() => {
+            void (async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                const taken = new Set((graph?.variables ?? []).map((item) => item.name));
+                const { variables, action: nextAction } = extractParamsToVariables(
+                  edge.actionSpec,
+                  `步骤${edge.id.replace(/\D/g, '') || '1'}`,
+                  taken,
+                );
+                if (Object.keys(variables).length === 0) {
+                  devLog('这一步没有可抽成变量的数字参数');
+                  return;
+                }
+                await setVariables(deviceId, {
+                  ...Object.fromEntries(
+                    (graph?.variables ?? []).map((item) => [
+                      item.name,
+                      { type: item.type, value: item.value },
+                    ]),
+                  ),
+                  ...variables,
+                });
+                await save({ action: nextAction });
+                devLog(`已抽成变量：${Object.keys(variables).join('、')}`);
+              } catch (reason) {
+                setError(reason instanceof Error ? reason.message : String(reason));
+              } finally {
+                setBusy(false);
+              }
+            })();
+          }}
+          className="h-5 rounded-sm border border-line px-2 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-40"
+        >
+          ⇢ 存成变量
         </button>
         <button
           type="button"
