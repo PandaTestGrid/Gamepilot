@@ -284,22 +284,33 @@ function SingleScreen({
   const dragStart = useRef<[number, number] | null>(null);
   const [pointer, setPointer] = useState<[number, number] | null>(null);
 
-  const toNormalized = useCallback((event: React.MouseEvent<HTMLDivElement>): [number, number] => {
-    const rect = viewport.current?.getBoundingClientRect();
-    if (!rect) {
-      return [0, 0];
-    }
-    return [
-      Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
-      Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
-    ];
-  }, []);
+  /**
+   * 录制坐标：**相对画面区域**（不是容器）。
+   *
+   * 原来按容器算，有黑边时框选能把黑边框进来 —— 录出来的模板会带一圈黑边，
+   * 匹配自然不准。现在统一用 imageBox 换算，并且钳在画面内（框不出画面）。
+   */
+  const toNormalized = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>): [number, number] | null => {
+      const container = viewport.current;
+      if (!container || !imageBox) {
+        return null;
+      }
+      const rect = container.getBoundingClientRect();
+      return pointToCanvas(imageBox, { x: event.clientX - rect.left, y: event.clientY - rect.top }, true);
+    },
+    [imageBox],
+  );
 
   const onMouseDown = (event: React.MouseEvent<HTMLDivElement>): void => {
     if (recordMode === 'off' || draft) {
       return;
     }
-    dragStart.current = toNormalized(event);
+    const start = toNormalized(event);
+    if (!start) {
+      return; // 画面还没量出来（或没有帧）时先不录
+    }
+    dragStart.current = start;
     setSelection(null);
   };
 
@@ -307,6 +318,9 @@ function SingleScreen({
     const current = toNormalized(event);
     setPointer(recordMode === 'marquee' ? current : null);
     const start = dragStart.current;
+    if (!current) {
+      return;
+    }
     if (!start || recordMode !== 'marquee') {
       return;
     }
@@ -534,12 +548,28 @@ function SingleScreen({
       {recordMode !== 'off' && pointer && (
         <>
           <div
-            className="pointer-events-none absolute inset-y-0 w-px bg-brand/30"
-            style={{ left: `${pointer[0] * 100}%` }}
+            className="pointer-events-none absolute w-px bg-brand/30"
+            style={
+              imageBox
+                ? {
+                    left: imageBox.left + pointer[0] * imageBox.width,
+                    top: imageBox.top,
+                    height: imageBox.height,
+                  }
+                : { left: 0, top: 0, height: 0 }
+            }
           />
           <div
-            className="pointer-events-none absolute inset-x-0 h-px bg-brand/30"
-            style={{ top: `${pointer[1] * 100}%` }}
+            className="pointer-events-none absolute h-px bg-brand/30"
+            style={
+              imageBox
+                ? {
+                    left: imageBox.left,
+                    top: imageBox.top + pointer[1] * imageBox.height,
+                    width: imageBox.width,
+                  }
+                : { left: 0, top: 0, width: 0 }
+            }
           />
           <div className="pointer-events-none absolute top-1 left-1 rounded-sm bg-canvas/80 px-1.5 py-0.5 text-badge text-brand">
             ({pointer[0].toFixed(3)}, {pointer[1].toFixed(3)})
@@ -551,12 +581,16 @@ function SingleScreen({
       {selection && (
         <div
           className="pointer-events-none absolute border border-dashed border-brand bg-brand/10"
-          style={{
-            left: `${selection[0] * 100}%`,
-            top: `${selection[1] * 100}%`,
-            width: `${selection[2] * 100}%`,
-            height: `${selection[3] * 100}%`,
-          }}
+          style={
+            imageBox
+              ? {
+                  left: imageBox.left + selection[0] * imageBox.width,
+                  top: imageBox.top + selection[1] * imageBox.height,
+                  width: selection[2] * imageBox.width,
+                  height: selection[3] * imageBox.height,
+                }
+              : { left: 0, top: 0, width: 0, height: 0 }
+          }
         >
           <span className="absolute -bottom-4 left-0 text-badge text-brand">
             {selection[2].toFixed(3)} × {selection[3].toFixed(3)}

@@ -35,7 +35,10 @@ export function Toolbar(): ReactNode {
   const toggleRecording = useUiStore((state) => state.toggleRecording);
   const engineStatus = useEngineStore((state) => state.status);
   const engineInfo = useEngineStore((state) => state.info);
+  const missingMethods = useEngineStore((state) => state.missingMethods);
   const selfCheck = useEngineStore((state) => state.selfCheck);
+  const restartEngine = useEngineStore((state) => state.restart);
+  const staleEngine = missingMethods.length > 0;
 
   const device = activeDevice(devices, activeId);
 
@@ -88,23 +91,30 @@ export function Toolbar(): ReactNode {
       <LayoutMenu />
       <VDivider />
 
-      <ToolbarButton title={engineInfo} onClick={() => void selfCheck()}>
+      <ToolbarButton
+        title={
+          staleEngine
+            ? `引擎是旧进程（缺 ${missingMethods.length} 个方法）：点这里重启引擎`
+            : `${engineInfo} · 点这里重新自检/启动`
+        }
+        onClick={() => void (staleEngine ? restartEngine() : selfCheck())}
+      >
         <Cable
           className={cn(
             'size-3.5',
-            engineStatus === 'ready' && 'text-confirmed',
-            engineStatus === 'error' && 'text-failed',
+            engineStatus === 'ready' && !staleEngine && 'text-confirmed',
+            (engineStatus === 'error' || staleEngine) && 'text-failed',
             engineStatus === 'connecting' && 'text-pending',
           )}
         />
         <span
           className={cn(
-            engineStatus === 'error' && 'text-failed',
-            engineStatus === 'ready' && 'text-confirmed',
+            (engineStatus === 'error' || staleEngine) && 'text-failed',
+            engineStatus === 'ready' && !staleEngine && 'text-confirmed',
             engineStatus === 'idle' && 'text-dim',
           )}
         >
-          {engineLabel(engineStatus)}
+          {staleEngine ? '引擎旧进程 · 重启' : engineLabel(engineStatus)}
         </span>
       </ToolbarButton>
       <VDivider />

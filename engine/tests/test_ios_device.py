@@ -270,3 +270,55 @@ def test_macos_controller_rejects_unknown_handle() -> None:
     controller = macos.MacWindowController(window="999999999")
     with pytest.raises(RuntimeError, match="没找到目标窗口"):
         controller.connect()
+
+
+# ---------------------------------------------------------------- 横屏（旋转）
+
+
+class _RecordingControl:
+    """假的 scrcpy 控制通道：把发出去的字节记下来。"""
+
+    def __init__(self) -> None:
+        self.packets: list[bytes] = []
+
+    def sendall(self, payload: bytes) -> None:
+        self.packets.append(payload)
+
+
+def _channel_with_canvas(size: tuple[int, int]) -> tuple[object, _RecordingControl]:
+    from gamepilot.devices.scrcpy import ScrcpyChannel
+
+    channel = ScrcpyChannel.__new__(ScrcpyChannel)  # 不跑 __init__：不需要真设备
+    channel.video_size = size
+    control = _RecordingControl()
+    # 这里放的是假 socket：绕开真实类型标注
+    object.__setattr__(channel, "_control", control)
+    return channel, control
+
+
+def test_touch_uses_current_canvas_size_after_rotation() -> None:
+    """手机旋转后触摸必须按新画布换算 —— 用旧尺寸缩放就是"横屏点不准"的根因。"""
+    import struct
+
+    def decode(packet: bytes) -> tuple[int, int, int, int]:
+        _, _, _, x, y, width, height, *_ = struct.unpack(">BBQIIHHHII", packet)
+        return x, y, width, height
+
+    # 竖屏 608x1280：归一化 (0.5, 0.5) → (303, 639)
+    channel, control = _channel_with_canvas((608, 1280))
+    channel.touch("down", 0.5, 0.5)  # type: ignore[attr-defined]
+    x, y, width, height = decode(control.packets[-1])
+    assert (width, height) == (608, 1280)
+    assert (x, y) == (304, 640), "0.5*607=303.5、0.5*1279=639.5，Python round 取偶"
+
+    # 旋转成横屏 1280x608 后，同样的归一化坐标要按新画布算
+    channel.video_size = (1280, 608)  # type: ignore[attr-defined]
+    channel.touch("down", 0.5, 0.5)  # type: ignore[attr-defined]
+    x, y, width, height = decode(control.packets[-1])
+    assert (width, height) == (1280, 608), "报文里的屏幕尺寸必须是当前画布"
+    assert (x, y) == (640, 304), f"横屏换算错了: {(x, y)}"
+
+    # 边界也要按当前画布钳制
+    channel.touch("up", 1.0, 1.0)  # type: ignore[attr-defined]
+    x, y, _, _ = decode(control.packets[-1])
+    assert (x, y) == (1279, 607)

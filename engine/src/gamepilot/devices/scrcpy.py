@@ -304,6 +304,12 @@ class ScrcpyChannel:
                     for packet in self._codec.parse(payload):
                         for frame in self._codec.decode(packet):
                             image = frame.to_ndarray(format="bgr24")
+                            # 手机旋转后画布会变成横的：触摸报文里的屏幕尺寸必须跟着变，
+                            # 否则按旧的竖屏尺寸缩放 → 点击位置整体偏移（横屏点不准就是这个原因）
+                            size = (int(image.shape[1]), int(image.shape[0]))
+                            if size != self.video_size:
+                                logger.info("视频尺寸变化（旋转）: %sx%s → %sx%s", *self.video_size, *size)
+                                self.video_size = size
                             with self._frame_lock:
                                 self._frame = image
                                 self._frame_id += 1

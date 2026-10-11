@@ -15,6 +15,7 @@ import { ScriptNameForm } from '@/features/library/ScriptNameForm';
 import { ScriptRow } from '@/features/library/ScriptRow';
 import { GhostButton } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
+import { isUnknownMethodError } from '@/lib/engine-methods';
 import { useEngineStore } from '@/stores/engine.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
@@ -37,6 +38,10 @@ export function ScriptLibraryPane(): ReactNode {
   const currentRoot = useSessionStore((state) => state.project?.root ?? '');
   const switchProject = useSessionStore((state) => state.switchProject);
   const engineStatus = useEngineStore((state) => state.status);
+  const missingMethods = useEngineStore((state) => state.missingMethods);
+  const restartEngine = useEngineStore((state) => state.restart);
+  // 引擎是旧进程：错误里会出现 -32601 / 未知方法，或缺方法表校验没通过
+  const staleEngine = missingMethods.length > 0 || isUnknownMethodError(error);
 
   const [form, setForm] = useState<FormState>({ kind: 'closed' });
   const [busy, setBusy] = useState(false);
@@ -106,6 +111,17 @@ export function ScriptLibraryPane(): ReactNode {
           <button type="button" className="ml-2 text-dim hover:text-fg" onClick={() => void refresh()}>
             重试
           </button>
+          {/* 最常见的原因：引擎是应用启动时拉起的旧进程（不认识 project.create）→ 一键重启 */}
+          {staleEngine && (
+            <button
+              type="button"
+              className="ml-2 text-failed hover:text-fg"
+              title="停掉正在跑的引擎进程、拉起新的（会断开当前设备连接，重连即可）"
+              onClick={() => void restartEngine()}
+            >
+              重启引擎
+            </button>
+          )}
         </div>
       )}
 

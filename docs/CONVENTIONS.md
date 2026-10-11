@@ -338,6 +338,12 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 
 ### 11.3 加一个 RPC 方法
 
+> 补两条真踩过的：
+> 1. **界面依赖的方法名要登记**到 `apps/desktop/src/lib/engine-methods.ts` 的清单里 ——
+>    引擎是独立进程，用户的应用里很可能还跑着旧进程；有这张表才能在顶栏提示「引擎旧进程 · 重启」，
+>    而不是丢一个 `-32601 未知方法` 给用户。
+> 2. 方法实现放在**按域拆分的模块**里（`rpc/devices.py`、`rpc/projects.py`…），不要再往 `rpc/session.py` 里堆。
+
 1. `engine/src/gamepilot/rpc/` 注册 handler（`RpcServer.method` 装饰器）。
 2. 常量加到 `protocol.py`（方法名、通知名）。
 3. 更新 `docs/rpc.md`（方法表 + 变更记录）。

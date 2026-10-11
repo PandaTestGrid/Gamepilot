@@ -270,6 +270,11 @@ URI 里用 `udid`（`pymobiledevice3 usbmux list` 的 `Identifier`）。
 - `graph.edge.add { from?, to?, when?, action? }` → `{ edgeId, graph }`；
   不传 `when` 时默认用源节点的第一个进入识别器（没有就退化成无条件边）
 
+> **改了引擎方法要重启引擎**：引擎是壳在应用启动时拉起的独立进程，会一直活着；
+> 代码更新后正在跑的那个仍是旧的，界面上会报 `-32601 未知方法`。
+> 界面在 `engine.ready` / `engine.info` 里拿到方法表做能力校验（`apps/desktop/src/lib/engine-methods.ts`），
+> 缺方法就把顶栏标成「引擎旧进程 · 重启」并给出一键重启 —— **新增前端会调用的方法时，把那行加进那张清单**。
+
 ### `project.get` / `project.set` / `project.list`（脚本目录）
 
 一个目录 = 一个脚本：`graph.json`（状态图真源）+ `templates/`（录制的模板截图）。
