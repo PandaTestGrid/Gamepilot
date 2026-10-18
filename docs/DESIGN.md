@@ -644,8 +644,9 @@ discovered ──连接──▶ connecting ──成功──▶ connected
 
 ```
 ~/Desktop/gamepilot/                 # git 仓库根（pnpm workspace）
-├── README.md                        # 环境要求 / 快速开始 / 常用命令
+├── README.md                        # 产品介绍 / 功能 / 文档入口
 ├── docs/
+│   ├── USAGE.md                     # 环境要求 / 快速开始 / 使用说明
 │   ├── DESIGN.md                    # 本文档
 │   ├── CONVENTIONS.md               # 项目规范（依赖方向、命名、坐标铁律、DoD）
 │   ├── rpc.md                       # 前端 ⇄ 引擎 RPC 契约
