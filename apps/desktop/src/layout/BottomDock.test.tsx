@@ -1,7 +1,7 @@
 /**
  * 底部调试抽屉：Tab 切换、点同一个 Tab 收起、状态行与内容区一起在。
  *
- * 这是"调试信息集中到下面一处"的落地：事件流 / 日志 / 控制台 / 时间轴四个 Tab，
+ * 这是"调试信息集中到下面一处"的落地：事件流 / 日志 / 控制台 / 运行记录四个 Tab，
  * 收起时只占 28px（状态行），点开才拉开。
  */
 import { render, screen } from '@testing-library/react';
@@ -68,7 +68,7 @@ describe('底部调试抽屉', () => {
     expect(summary.className).toMatch(/@max-\[\d+px\]:hidden/);
 
     // 右侧 Tab / 抽屉按钮整组不压缩：中文标签被挤成竖排文字就点不了了
-    for (const label of ['事件流', '日志', '控制台', '时间轴', '抽屉']) {
+    for (const label of ['事件流', '日志', '控制台', '运行记录', '抽屉']) {
       const button = screen.getByText(label).closest('button');
       expect(button?.className, `${label} 按钮应当不压缩`).toContain('shrink-0');
       expect(button?.className, `${label} 按钮应当不换行`).toContain('whitespace-nowrap');
@@ -79,7 +79,7 @@ describe('底部调试抽屉', () => {
     const { ref, calls } = fakePanelRef();
     render(<BottomDock panelRef={ref} />);
 
-    for (const label of ['事件流', '日志', '控制台', '时间轴']) {
+    for (const label of ['事件流', '日志', '控制台', '运行记录']) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
     expect(calls).toContain('collapse');
@@ -123,33 +123,16 @@ describe('底部调试抽屉', () => {
     expect(screen.getByText('engine.ping')).toBeInTheDocument();
   });
 
-  it('时间轴 Tab：显示当前帧信息（占位实现也要能看出"现在是哪一帧"）', async () => {
+  it('运行记录 Tab：没跑过时给空状态，不是空白面板', async () => {
     const user = userEvent.setup();
     const { ref } = fakePanelRef();
-    useSessionStore.setState({
-      frames: {
-        'dev-1': {
-          imageUrl: 'blob:x',
-          index: 42,
-          resolution: [720, 1280],
-          node: 'main',
-          pending: null,
-          tick: 42,
-          fps: 9.5,
-          captureMs: 12,
-          detections: [],
-          ts: Date.now(),
-        },
-      },
-    });
+    useSessionStore.setState({ frames: {} });
     useDeviceStore.setState({ activeId: 'dev-1' });
     render(<BottomDock panelRef={ref} />);
 
-    await user.click(screen.getByText('时间轴'));
+    await user.click(screen.getByText('运行记录'));
 
-    expect(screen.getByText('#42')).toBeInTheDocument();
-    // 节点名同时出现在状态行里，所以这里断言"时间轴那一格里也有"
-    expect(screen.getAllByText('main').length).toBeGreaterThan(0);
-    expect(screen.getByText(/还没接真实的帧环形缓冲/)).toBeInTheDocument();
+    expect(await screen.findByText(/还没有运行记录/)).toBeInTheDocument();
+    expect(screen.getByText('刷新')).toBeInTheDocument();
   });
 });

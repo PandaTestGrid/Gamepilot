@@ -1,6 +1,6 @@
 """契约 §4.4 的端到端验收：**真实引擎子进程** + 临时目录（工作区与配置都隔离）。
 
-这一份是可重复跑的"手动端到端"：空配置 → add → 幂等 → 项目/脚本全流程 → 删工作区进全局回收站
+这一份是可重复跑的"手动端到端"：空配置 → add → 幂等 → 项目/脚本全流程 → 删工作区（真删除）
 → **重启引擎进程**后列表与当前仍然记得。
 
 和 `test_workspace_rpc.py`（进程内 RpcServer）互补：这里走真正的 `python -m gamepilot.rpc`，
@@ -110,7 +110,7 @@ def test_v4_end_to_end_with_restart(tmp_path: Path) -> None:
         listing = engine.call("workspace.list")
         assert listing["active"] is None
         assert listing["items"] == []
-        assert listing["trashRoot"] == os.path.join(str(cfg_dir), ".trash")
+
         assert Path(listing["recommended"]).name == "默认"
 
         # ② add 一个**空临时目录** + 显示名 → 磁盘上一个文件都没有
@@ -156,7 +156,8 @@ def test_v4_end_to_end_with_restart(tmp_path: Path) -> None:
         assert Path(copy["created"]).is_dir()
         assert engine.call("project.get")["root"] == copy["created"], "复制完切到副本"
         deleted = engine.call("workflow.delete", {"dir": copy["created"]})
-        assert Path(deleted["trashed"]).parent == alpha / ".trash"
+        assert Path(str(deleted["removed"])).name == "斗技改-副本", "返回被真删掉的目录"
+        assert not (alpha / ".trash").exists(), "不再有回收站"
         assert engine.call("project.get")["root"] != "", "删当前 → 切到剩下的"
         tree = engine.call("workspace.tree")
         assert _workflow_names(tree) == ["御魂", "斗技改"], "按 name 排序"
@@ -168,12 +169,12 @@ def test_v4_end_to_end_with_restart(tmp_path: Path) -> None:
         assert _workflow_names(engine.call("workspace.tree")) == []
         assert engine.call("project.get")["root"] == ""
 
-        # ⑦ remove deleteFiles=true → 目录进全局回收站，当前切回 A
+        # ⑦ remove deleteFiles=true → 目录**真删除**，当前切回 A
         removed = engine.call("workspace.remove", {"dir": str(beta), "deleteFiles": True})
-        assert not beta.exists()
-        assert removed["trashed"] and Path(removed["trashed"]).parent == cfg_dir / ".trash"
+        assert not beta.exists(), "目录真的删掉了"
+        assert Path(str(removed["removed"])).name == "工作区B"
+        assert not (cfg_dir / ".trash").exists(), "不再有全局回收站"
         assert removed["active"] == str(alpha), "当前工作区切回上一个"
-        assert removed["trashRoot"] == os.path.join(str(cfg_dir), ".trash")
     finally:
         engine.close()
 

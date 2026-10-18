@@ -1,4 +1,4 @@
-export type DeviceKind = 'android' | 'ios' | 'emulator' | 'windows' | 'mock' | 'remote';
+export type DeviceKind = 'android' | 'ios' | 'emulator' | 'windows' | 'remote';
 
 export type DeviceStatus = 'idle' | 'discovered' | 'connecting' | 'connected' | 'failed';
 
@@ -22,6 +22,8 @@ export interface GraphNodeView {
   readonly id: string;
   readonly name: string;
   readonly enter: readonly string[];
+  /** 事件计划时刻 HH:mm（工作流节点，非界面 enter） */
+  readonly at?: string;
   readonly x: number;
   readonly y: number;
   readonly visits: number;
@@ -56,7 +58,7 @@ export interface GraphVariable {
 export type ParamValue = number | string;
 
 export interface EdgeAction {
-  readonly type: 'click' | 'long_press' | 'swipe' | 'wait' | 'key' | 'text' | 'set' | 'call';
+  readonly type: 'click' | 'double_click' | 'long_press' | 'swipe' | 'wait' | 'key' | 'text' | 'set' | 'call';
   readonly target?: string;
   readonly toTarget?: string;
   /** 数字或 "$变量名"（引用变量） */
@@ -97,13 +99,27 @@ export interface RecognizerView {
   readonly type: RecognizerType;
   /** 模板文件名（template 识别器才有），界面用它去取模板截图 */
   readonly template?: string;
+  /** OCR 识别器要认的文字（type === 'ocr' 才有） */
+  readonly text?: string;
+  /** 录制时的帧像素尺寸（template 才有）：引擎按它和当前帧的比例自动缩放模板 */
+  readonly recordedSize?: readonly [number, number];
   readonly score: number;
   readonly threshold: number;
-  /** 归一化 ROI [x, y, w, h] */
+  /** 归一化 ROI [x, y, w, h]；`search === 'full'` 时它只是录制时的原区域 */
   readonly roi: readonly [number, number, number, number];
+  /** 搜索范围：region = 只在 roi 里找；full = 整帧找（目标可能出现在任意位置） */
+  readonly search: 'region' | 'full';
   readonly samples: number;
   /** 已确认（投票通过）/ 待确认（单帧命中）/ 未命中 */
   readonly state: 'confirmed' | 'pending' | 'idle';
+}
+
+/** 工作流步骤链中的一步（`graph.json` → `flow.steps[]`，与引擎 flow_model 对齐） */
+export interface FlowStep {
+  readonly id: string;
+  readonly type: string;
+  readonly params?: Readonly<Record<string, unknown>>;
+  readonly disabled?: boolean;
 }
 
 export interface GraphData {
@@ -114,23 +130,50 @@ export interface GraphData {
   readonly variables: readonly GraphVariable[];
   readonly activeNodeId: string | null;
   readonly pendingNodeId: string | null;
+  /** 有该字段 = 走步骤链编辑器（Automa 逻辑）；`steps` 可为空数组 */
+  readonly flow?: { readonly steps: readonly FlowStep[] };
 }
 
+/**
+ * `engine.event` 通知里的 `type`：与引擎的 `_emit(...)` 调用一一对应
+ * （`engine/src/gamepilot/core/flow_engine.py` + `core/state_machine.py`），
+ * 后半段是前端自己合成的事件（引擎不发，见 `stores/session.store.ts` 的 `append(...)`）。
+ */
 export type TraceEventType =
+  // 老状态机（v3 图）
   | 'node_entered'
   | 'edge_matched'
-  | 'action_executed'
+  | 'edge_timeout'
   | 'recovery_matched'
   | 'recovery_done'
   | 'transition_failed'
+  // 流程引擎（v4 步骤链）
+  | 'flow_started'
+  | 'flow_finished'
+  | 'breakpoint_hit'
+  | 'action_executed'
+  | 'action_failed'
+  | 'action_manual'
+  | 'cond_true_done'
+  | 'cond_false'
+  | 'loop_break'
+  | 'loop_repeat'
+  | 'step_started'
+  | 'step_finished'
+  | 'step_skipped'
+  | 'step_failed'
+  | 'step_retry'
+  | 'step_error_continue'
+  | 'step_error_fallback'
+  | 'step_error_insert'
+  | 'subflow_waiting'
+  | 'subflow_resumed'
+  // 前端合成（引擎不发）
   | 'device_lost'
   | 'device_reconnected'
-  | 'device_scan'
   | 'recognizer_added'
   | 'recognizer_renamed'
   | 'recognizer_removed'
-  | 'node_added'
-  | 'edge_added'
   | 'error';
 
 export interface TraceEventView {
@@ -141,6 +184,8 @@ export interface TraceEventView {
   readonly node: string | null;
   readonly edge: string | null;
   readonly message: string;
+  /** 引擎上报的调试字段（步骤序号 / 参数 / 耗时 / 识别分数…）；界面自己造的事件没有 */
+  readonly extra?: Readonly<Record<string, unknown>>;
 }
 
 /** 录制中：一次框选/点选产生的待确认草稿（DESIGN.md §4.4） */
@@ -148,11 +193,15 @@ export interface RecordDraft {
   /**
    * 这一笔录制属于哪台设备（`beginDraft` 时按下哪一格就记哪一台）。
    *
-   * 为什么必须记：确认时如果现取 `activeId`，多开网格里"在 A 上框完、又点了 B 那格看
-   * 一眼、再点确定"就会把 A 的选区写进 B 的状态图（真踩过）。草稿跟着设备走，
-   * 界面切到哪台都不影响它落盘到哪张图。
+   * 确认时按草稿里的 deviceId 落盘，避免多设备网格里 activeId 与录制设备不一致。
    */
   readonly deviceId?: string;
+  /** 录制来源：框选（marquee）或点选（pick） */
+  readonly mode?: 'marquee' | 'pick';
+  /** 点选时的落点中心归一化坐标 [x, y]（调整点选范围时围绕该中心重算 rect） */
+  readonly pickCenter?: readonly [number, number];
+  /** 点选草稿对应的设备像素分辨率：用它把「点选 120px」换算成归一化 w/h（保持像素正方形） */
+  readonly resolution?: readonly [number, number];
   /** 归一化选区 [x, y, w, h] */
   readonly rect: readonly [number, number, number, number];
   readonly label: string;
@@ -161,6 +210,17 @@ export interface RecordDraft {
   readonly score: number;
   readonly asEnter: boolean;
   readonly asActionTarget: boolean;
+  /** 搜索范围：默认 region（只认框选区域）；full = 目标可能出现在屏幕任意位置 */
+  readonly search: 'region' | 'full';
+  /**
+   * 这类识别器怎么认：`template`（图像匹配，默认）/ `ocr`（框选区域里读文字）。
+   * OCR 不需要模板图，但要填 `text`（要认的字）—— 见 `record.ocr`。
+   */
+  readonly kind?: 'template' | 'ocr';
+  /** kind=ocr 时要识别的文字 */
+  readonly text?: string;
+  /** kind=ocr 的匹配方式：包含 / 完全相等（正则留给脚本手改） */
+  readonly ocrMode?: 'contains' | 'equals';
   readonly targetMode: 'existing' | 'new';
   readonly targetNodeId: string | null;
   readonly newNodeName: string;
@@ -174,7 +234,7 @@ export interface RecordDraft {
 
 export type RecordMode = 'off' | 'marquee' | 'pick';
 
-/** 右栏 Tab：脚本库（多张状态图）/ 识别器（阈值现场调参） */
+/** 右栏 Tab（现仅工作区；`identifiers` 保留给类型兼容） */
 export type RightTab = 'library' | 'identifiers';
 
 /** 底部调试抽屉的 Tab：事件流 / 日志 / 控制台 / 时间轴 */

@@ -10,7 +10,7 @@
 import { render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ScriptLibraryPane } from '@/features/library/ScriptLibraryPane';
+import { WorkspaceLibraryPane } from '@/features/library/WorkspaceLibraryPane';
 import { useEngineStore } from '@/stores/engine.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
@@ -38,7 +38,6 @@ vi.mock('@/lib/rpc', async () => {
       Promise.resolve({
         active: TREE.root,
         recommended: '/repo/workspaces/默认',
-        trashRoot: '/config/gamepilot/.trash',
         items: WORKSPACES,
       }),
     ),
@@ -55,16 +54,15 @@ describe('工作区区域（右栏 Tab 内容）', () => {
       workflows: TREE.workflows,
       workspaces: WORKSPACES,
       recommendedWorkspace: '/repo/workspaces/默认',
-      trashRoot: '/config/gamepilot/.trash',
       error: null,
     });
-    useSessionStore.setState({ project: { root: CURRENT } as never, error: null });
+    useSessionStore.setState({ currentWorkflow: { root: CURRENT } as never, error: null });
     useEngineStore.setState({ status: 'ready', missingMethods: [] });
   });
 
   it('引擎读不到时给出可重试的错误行，而不是空白区域', () => {
     useLibraryStore.setState({ workflows: [], error: '引擎未启动' });
-    render(<ScriptLibraryPane />);
+    render(<WorkspaceLibraryPane />);
 
     expect(screen.getByText(/读不到工作区：引擎未启动/)).toBeInTheDocument();
     expect(screen.getByText('重试')).toBeInTheDocument();
@@ -73,13 +71,13 @@ describe('工作区区域（右栏 Tab 内容）', () => {
   it('引擎是旧进程（方法表缺新方法）时，错误行给出「重启引擎」这条出路', () => {
     useLibraryStore.setState({ workflows: [], error: '引擎返回错误: 未知方法: workflow.create' });
     useEngineStore.setState({ status: 'ready', missingMethods: ['workflow.create'] });
-    render(<ScriptLibraryPane />);
+    render(<WorkspaceLibraryPane />);
 
     expect(screen.getByText('重启引擎')).toBeInTheDocument();
   });
 
   it('只有一套列表：同一个工作流只出现一次，且区域就是 Tab 的本体（不是浮层）', async () => {
-    render(<ScriptLibraryPane />);
+    render(<WorkspaceLibraryPane />);
 
     // 区域常驻：没有 role=dialog、没有遮罩
     expect(await screen.findByTestId('workspace-region')).toBeInTheDocument();
@@ -93,7 +91,7 @@ describe('工作区区域（右栏 Tab 内容）', () => {
     expect(screen.getAllByTestId('workspace-workflow-row')).toHaveLength(TREE.workflows.length);
 
     // 外壳只剩：错误行 + 区域 + 底部"当前：…"（原来那排"刷新/几个工作流"按钮已经删掉）
-    expect(screen.getByText('当前：')).toBeInTheDocument();
+    expect(screen.getByText(/当前工作流：/)).toBeInTheDocument();
     expect(screen.getByText(CURRENT)).toBeInTheDocument();
     expect(screen.queryByText('刷新')).not.toBeInTheDocument();
   });

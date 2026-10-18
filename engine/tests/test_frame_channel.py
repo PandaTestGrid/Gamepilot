@@ -18,9 +18,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 MODULE = "gamepilot.rpc"
-DEVICE_URI = "Mock:///?width=320&height=180"
-DEVICE_ID = "mock:mock-1"
+DEVICE_URI = "Synthetic:///?serial=test-1&width=320&height=180"
+DEVICE_ID = "synthetic:test-1"
 
 
 def _read_exactly(sock: socket.socket, size: int) -> bytes:
@@ -34,9 +36,14 @@ def _read_exactly(sock: socket.socket, size: int) -> bytes:
 
 
 def test_frames_use_unix_socket_not_stdout(tmp_path: Path) -> None:
+    # unix 走 AF_UNIX；Windows 走 TCP（见 test_frames_use_tcp_socket_not_stdout）。
+    af_unix = getattr(socket, "AF_UNIX", None)
+    if af_unix is None:
+        pytest.skip("这个平台没有 AF_UNIX，unix 帧通道测不了")
+
     # 短路径：AF_UNIX 地址长度有限（macOS ~104 字节），pytest 的 tmp_path 会超限
     socket_path = Path(f"/tmp/gp-frames-test-{os.getpid()}.sock")
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener = socket.socket(af_unix, socket.SOCK_STREAM)
     listener.bind(str(socket_path))
     listener.listen(1)
     listener.settimeout(15)
@@ -49,6 +56,7 @@ def test_frames_use_unix_socket_not_stdout(tmp_path: Path) -> None:
         # 工作区也指到临时目录：子进程绝不能碰仓库里的 workspaces/
         "GAMEPILOT_WORKSPACE_DIR": str(tmp_path / "workspaces" / "默认"),
         "GAMEPILOT_CONFIG_DIR": str(tmp_path / "config"),
+        "GAMEPILOT_TEST_SYNTHETIC": "1",
         "GAMEPILOT_FRAME_SOCKET": str(socket_path),
     }
     proc = subprocess.Popen(
@@ -121,6 +129,126 @@ def test_frames_use_unix_socket_not_stdout(tmp_path: Path) -> None:
             if stream is not None:
                 with contextlib.suppress(Exception):
                     stream.close()
+
+
+def test_frames_use_tcp_socket_not_stdout(tmp_path: Path) -> None:
+    """Windows 宿主用 tcp:127.0.0.1:port；协议与 unix 通道相同，stdout 上不能再塞 JPEG。"""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    listener.settimeout(15)
+    port = int(listener.getsockname()[1])
+
+    project = tmp_path / "project"
+    env = {
+        **os.environ,
+        "GAMEPILOT_LOG_LEVEL": "ERROR",
+        "GAMEPILOT_PROJECT_DIR": str(project),
+        "GAMEPILOT_WORKSPACE_DIR": str(tmp_path / "workspaces" / "默认"),
+        "GAMEPILOT_CONFIG_DIR": str(tmp_path / "config"),
+        "GAMEPILOT_TEST_SYNTHETIC": "1",
+        "GAMEPILOT_FRAME_SOCKET": f"tcp:127.0.0.1:{port}",
+    }
+    proc = subprocess.Popen(
+        [sys.executable, "-m", MODULE],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    next_id = 0
+
+    def call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal next_id
+        next_id += 1
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": next_id, "method": method, "params": params or {}}) + "\n")
+        proc.stdin.flush()
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            message = json.loads(proc.stdout.readline())
+            if message.get("id") == next_id:
+                assert "error" not in message, message
+                return dict(message["result"])
+        raise AssertionError(f"{method} 超时")
+
+    connection: socket.socket | None = None
+    try:
+        assert proc.stdout is not None
+        assert json.loads(proc.stdout.readline())["method"] == "engine.ready"
+
+        call("device.connect", {"uri": DEVICE_URI})
+        call("device.stream", {"deviceId": DEVICE_ID, "fps": 20})
+
+        connection, _ = listener.accept()
+        connection.settimeout(10)
+
+        id_len = _read_exactly(connection, 1)[0]
+        device_id = _read_exactly(connection, id_len).decode("utf-8")
+        (size,) = struct.unpack(">I", _read_exactly(connection, 4))
+        jpeg = _read_exactly(connection, size)
+
+        assert device_id == DEVICE_ID
+        assert jpeg[:2] == b"\xff\xd8", "帧通道里必须是真正的 JPEG（原始字节，不是 base64）"
+        assert len(jpeg) > 500
+
+        meta = _wait_for_frame_meta(proc)
+        assert "jpeg" not in meta, "走帧通道时，通知里不该再塞 base64 JPEG"
+        assert meta["deviceId"] == DEVICE_ID
+        assert meta["resolution"] == [320, 180]
+    finally:
+        if proc.stdin is not None:
+            with contextlib.suppress(Exception):
+                call("engine.shutdown")
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        if connection is not None:
+            with contextlib.suppress(OSError):
+                connection.close()
+        with contextlib.suppress(OSError):
+            listener.close()
+        for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
+
+
+def test_frame_sink_tcp_roundtrip() -> None:
+    from gamepilot.frames import FrameSink
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(5)
+    port = int(listener.getsockname()[1])
+    sink = FrameSink(f"tcp:127.0.0.1:{port}")
+    sink.start()
+    connection: socket.socket | None = None
+    try:
+        connection, _ = listener.accept()
+        deadline = time.time() + 2
+        while time.time() < deadline and not sink.connected:
+            time.sleep(0.02)
+        assert sink.connected
+        jpeg = b"\xff\xd8" + b"\x00" * 64 + b"\xff\xd9"
+        sink.submit("android:demo", jpeg)
+        connection.settimeout(2)
+        id_len = _read_exactly(connection, 1)[0]
+        assert _read_exactly(connection, id_len) == b"android:demo"
+        (size,) = struct.unpack(">I", _read_exactly(connection, 4))
+        assert _read_exactly(connection, size) == jpeg
+    finally:
+        sink.close()
+        if connection is not None:
+            with contextlib.suppress(OSError):
+                connection.close()
+        with contextlib.suppress(OSError):
+            listener.close()
 
 
 def _wait_for_frame_meta(proc: subprocess.Popen[str]) -> dict[str, Any]:

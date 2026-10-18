@@ -33,6 +33,15 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 
 const DEVICE_A = 'mock:1';
 const DEVICE_B = 'mock:2';
+/** 录制要落盘进当前工作流。 */
+const WORKFLOW_PROJECT = {
+  root: '/p/甲/斗技',
+  graphPath: '/p/甲/斗技/graph.json',
+  nodes: 0,
+  edges: 0,
+  recognizers: 0,
+  templates: 0,
+};
 const NAME_A = 'Mock 竖屏';
 const NAME_B = 'Mock 横屏';
 
@@ -91,14 +100,14 @@ function frameAt(index: number, resolution: Size): FrameState {
 }
 
 /** 按真实签名打桩（`session.store.touch`）：断言里才不用碰 any。 */
-type TouchMock = (deviceId: string, phase: 'down' | 'move' | 'up', x: number, y: number) => void;
+type TouchMock = (deviceId: string, phase: 'down' | 'move' | 'up', x: number, y: number) => Promise<boolean>;
 
 function renderGrid(
   options: { controlMode?: boolean; recordMode?: 'off' | 'marquee' | 'pick'; gridView?: boolean } = {},
 ): {
   touch: ReturnType<typeof vi.fn<TouchMock>>;
 } {
-  const touch = vi.fn<TouchMock>(() => undefined);
+  const touch = vi.fn<TouchMock>(() => Promise.resolve(true));
   useSessionStore.setState({
     ready: { [DEVICE_A]: true, [DEVICE_B]: true },
     frames: {
@@ -117,7 +126,7 @@ function renderGrid(
       id: tile.id,
       name: tile.name,
       uri: tile.id,
-      kind: 'mock' as const,
+      kind: 'android' as const,
       status: 'connected' as const,
       resolution: [tile.image.width, tile.image.height],
       fps: 12,
@@ -128,8 +137,8 @@ function renderGrid(
     recordMode: options.recordMode ?? 'off',
     recordActionMode: false,
     draft: null,
-    readoutOpen: true,
-    readoutFilter: 'all',
+    materialOpen: true,
+    materialFilter: 'all',
   });
 
   render(<ScreenPane />);
@@ -401,18 +410,48 @@ describe('多开网格：录制模式（框选 / 点选）', () => {
     expect(useUiStore.getState().draft?.rect).toEqual([0.25, 0.25, 0.5, 0.5]);
   });
 
-  it('点选：瓦片画面上单击 → draft 是落点周围 3% 的邻域', () => {
+  it('草稿打开时点另一处：直接按新落点重开（自动切换）', () => {
+    renderGrid({ recordMode: 'pick' });
+    const first = pointIn(BOX_A, 0.25, 0.5);
+    fireEvent.mouseDown(screenOf(DEVICE_A), { clientX: first.x, clientY: first.y });
+    fireEvent.mouseUp(screenOf(DEVICE_A), { clientX: first.x, clientY: first.y });
+    expect(useUiStore.getState().draft).not.toBeNull();
+
+    const second = pointIn(BOX_A, 0.75, 0.5);
+    fireEvent.mouseDown(screenOf(DEVICE_A), { clientX: second.x, clientY: second.y });
+    fireEvent.mouseUp(screenOf(DEVICE_A), { clientX: second.x, clientY: second.y });
+
+    const rect = useUiStore.getState().draft?.rect;
+    expect(rect?.[0]).toBeCloseTo(0.75 - 60 / 720, 6);
+    expect(rect?.[1]).toBeCloseTo(0.5 - 60 / 1280, 6);
+  });
+
+  it('点瓦片黑边不起选区（黑边不算画面）', () => {
+    renderGrid({ recordMode: 'pick' });
+
+    // A 是竖屏：x=5 落在左侧黑边；B 是横屏：y=20 落在上方黑边
+    fireEvent.mouseDown(screenOf(DEVICE_A), { clientX: 5, clientY: 320 });
+    fireEvent.mouseUp(screenOf(DEVICE_A), { clientX: 5, clientY: 320 });
+    expect(useUiStore.getState().draft).toBeNull();
+
+    fireEvent.mouseDown(screenOf(DEVICE_B), { clientX: 200, clientY: 20 });
+    fireEvent.mouseUp(screenOf(DEVICE_B), { clientX: 200, clientY: 20 });
+    expect(useUiStore.getState().draft).toBeNull();
+  });
+
+  it('点选：瓦片画面上单击 → draft 是落点周围 120px 的像素正方形', () => {
     renderGrid({ recordMode: 'pick' });
     const spot = pointIn(BOX_A, 0.25, 0.5);
 
     fireEvent.mouseDown(screenOf(DEVICE_A), { clientX: spot.x, clientY: spot.y });
     fireEvent.mouseUp(screenOf(DEVICE_A), { clientX: spot.x, clientY: spot.y });
 
+    // 画面 720×1280：120px 正方形 = 归一化 120/720 × 120/1280
     const rect = useUiStore.getState().draft?.rect;
-    expect(rect?.[0]).toBeCloseTo(0.235, 6);
-    expect(rect?.[1]).toBeCloseTo(0.485, 6);
-    expect(rect?.[2]).toBeCloseTo(0.03, 6);
-    expect(rect?.[3]).toBeCloseTo(0.03, 6);
+    expect(rect?.[0]).toBeCloseTo(0.25 - 60 / 720, 6);
+    expect(rect?.[1]).toBeCloseTo(0.5 - 60 / 1280, 6);
+    expect(rect?.[2]).toBeCloseTo(120 / 720, 6);
+    expect(rect?.[3]).toBeCloseTo(120 / 1280, 6);
   });
 });
 
@@ -478,7 +517,7 @@ describe('多开网格：当前设备不在网格里（掉线）时，第一下�
 
 /**
  * 草稿跟着**设备**走：多开里"在 A 上框完、点 B 那格看一眼、再点确定"是常规操作，
- * 如果确认时现取 activeId，A 的选区就会被写进 B 的状态图（独立验证实测到的缺陷）。
+ * 确认须用草稿 deviceId，不能现取 activeId。
  */
 describe('多开网格：录制草稿归属设备（切设备不能改掉落盘目标）', () => {
   beforeEach(resetStores);
@@ -499,8 +538,8 @@ describe('多开网格：录制草稿归属设备（切设备不能改掉落盘�
     expect(useDeviceStore.getState().activeId).toBe(DEVICE_B);
 
     // 表单只画在 A 那一格，且确认后落盘目标是 A
-    expect(screen.getAllByText('确定并写入状态图')).toHaveLength(1);
-    fireEvent.click(screen.getByText('确定并写入状态图'));
+    expect(screen.getAllByText('保存')).toHaveLength(1);
+    fireEvent.click(screen.getByText('保存'));
 
     expect(record).toHaveBeenCalledTimes(1);
     expect(record.mock.calls[0]?.[0]).toBe(DEVICE_A);
@@ -520,7 +559,7 @@ describe('多开网格：录制草稿归属设备（切设备不能改掉落盘�
             id: DEVICE_B,
             name: NAME_B,
             uri: DEVICE_B,
-            kind: 'mock' as const,
+            kind: 'android' as const,
             status: 'connected' as const,
             resolution: [IMAGE_B.width, IMAGE_B.height] as [number, number],
             fps: 12,
@@ -530,7 +569,7 @@ describe('多开网格：录制草稿归属设备（切设备不能改掉落盘�
     });
 
     // 兜底浮层挂在面板上：看得见、点得到（否则草稿会卡在 store 里，Esc/确定都摸不到）
-    expect(screen.getAllByText('确定并写入状态图')).toHaveLength(1);
+    expect(screen.getAllByText('保存')).toHaveLength(1);
   });
 });
 
@@ -607,6 +646,14 @@ describe('多开网格：设备按键跟着当前设备那一格（不再挂在�
 /** 每条用例都从「控制开着、没在录制、两张画布都干净」开始。 */
 function resetStores(): void {
   frameSeq = 1;
-  useSessionStore.setState({ ready: {}, frames: {}, touch: vi.fn(), recordStep: vi.fn(), error: null });
+  useSessionStore.setState({
+    ready: {},
+    frames: {},
+    touch: vi.fn(),
+    recordStep: vi.fn(),
+    error: null,
+    // 录制要落盘进当前工作流
+    currentWorkflow: WORKFLOW_PROJECT,
+  });
   useUiStore.setState({ draft: null, recordMode: 'off', controlMode: true, recordActionMode: false });
 }

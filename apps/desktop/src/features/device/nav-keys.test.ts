@@ -21,13 +21,12 @@ describe('投屏下面那条：导航键（按平台）', () => {
     expect(navKeysFor('windows')).toEqual([]);
   });
 
-  it('mock / 未知来源：三大金刚都给（报错文案是明确的，别悄悄藏按钮）', () => {
-    expect(navKeysFor('mock').map((item) => item.id)).toEqual(['back', 'home', 'recents']);
+  it('remote 等未知来源：三大金刚都给', () => {
     expect(navKeysFor('remote').map((item) => item.id)).toEqual(['back', 'home', 'recents']);
   });
 
   it('每个键都有 label 和 hint（按钮不能只有图标）', () => {
-    for (const kind of ['android', 'ios', 'mock'] as const) {
+    for (const kind of ['android', 'ios', 'remote'] as const) {
       for (const item of navKeysFor(kind)) {
         expect(item.label.length).toBeGreaterThan(0);
         expect(item.hint.length).toBeGreaterThan(0);
@@ -37,10 +36,10 @@ describe('投屏下面那条：导航键（按平台）', () => {
 });
 
 describe('面板头那颗电源键', () => {
-  it('Android / iOS / mock 都有，只是文案不同（iOS 是侧边按钮）', () => {
+  it('Android / iOS / remote 都有电源键，只是文案不同（iOS 是侧边按钮）', () => {
     expect(powerKeyFor('android')?.id).toBe('power');
     expect(powerKeyFor('ios')?.hint).toContain('侧边按钮');
-    expect(powerKeyFor('mock')?.label).toBe('电源');
+    expect(powerKeyFor('remote')?.label).toBe('电源');
   });
 
   it('macOS 本机窗口没有：MAC_KEYS 里没有 power', () => {

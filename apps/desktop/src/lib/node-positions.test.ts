@@ -14,7 +14,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyPositions,
   clearStoredPositions,
+  clearStoredPositionsForRoot,
+  clearStoredPositionsUnder,
+  copyStoredPositions,
   loadStoredPositions,
+  migrateStoredPositions,
   positionsOf,
   preservePositions,
   setPositionScope,
@@ -146,5 +150,27 @@ describe('节点坐标记忆', () => {
     });
     expect(() => storePositions(graph([{ id: 'n1', x: 1, y: 1 }]))).not.toThrow();
     setItem.mockRestore();
+  });
+
+  it('工作流改名与复制时迁移/拷贝坐标，删除工作流或工作区时清掉对应键', () => {
+    storePositions(graph([{ id: 'n1', x: 180, y: 260 }]));
+
+    copyStoredPositions('/repo/workspaces/默认/斗技', '/repo/workspaces/默认/斗技-副本');
+    setPositionScope('/repo/workspaces/默认/斗技-副本');
+    expect(loadStoredPositions()).toEqual({ n1: { x: 180, y: 260 } });
+
+    migrateStoredPositions('/repo/workspaces/默认/斗技', '/repo/workspaces/默认/道馆');
+    setPositionScope('/repo/workspaces/默认/斗技');
+    expect(loadStoredPositions()).toEqual({});
+    setPositionScope('/repo/workspaces/默认/道馆');
+    expect(loadStoredPositions()).toEqual({ n1: { x: 180, y: 260 } });
+
+    clearStoredPositionsForRoot('/repo/workspaces/默认/斗技-副本');
+    setPositionScope('/repo/workspaces/默认/斗技-副本');
+    expect(loadStoredPositions()).toEqual({});
+
+    clearStoredPositionsUnder('/repo/workspaces/默认');
+    setPositionScope('/repo/workspaces/默认/道馆');
+    expect(loadStoredPositions()).toEqual({});
   });
 });

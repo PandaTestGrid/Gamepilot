@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -62,10 +63,6 @@ class RpcServer:
         # 显式传入 manager 而不是全局
         workflow_methods.register(self, self.sessions)
 
-    # ------------------------------------------------------------------ #
-    # 注册与分发
-    # ------------------------------------------------------------------ #
-
     def method(self, name: str) -> Callable[[Handler], Handler]:
         """装饰器：注册一个 RPC 方法。"""
 
@@ -101,10 +98,6 @@ class RpcServer:
             _ = params
             self._stopping = True
             return {"ok": True}
-
-    # ------------------------------------------------------------------ #
-    # 收发
-    # ------------------------------------------------------------------ #
 
     def _write(self, payload: dict[str, Any]) -> None:
         line = json.dumps(payload, ensure_ascii=False) + "\n"
@@ -160,10 +153,6 @@ class RpcServer:
             return
         self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
 
-    # ------------------------------------------------------------------ #
-    # 主循环
-    # ------------------------------------------------------------------ #
-
     def serve_forever(self) -> int:
         self.notify(
             NOTIFY_READY,
@@ -183,6 +172,10 @@ class RpcServer:
                     break
         # shutdown 后主线程原本还阻塞在 stdin 的 readline 上（客户端不再发消息就永远不退出，
         # 留下孤儿进程）。这里给响应留出 flush 时间后强制退出。
+        # 退出前收掉设备会话：`os._exit` 不会跑任何清理，scrcpy 子进程会变成孤儿进程
+        # （客户端窗口被杀、stdin 直接断开时也会走到这里）。
+        with contextlib.suppress(Exception):
+            self.sessions.stop_all()
         if self._stopping:
             time.sleep(0.2)
             logger.info("引擎退出（shutdown）")
@@ -210,6 +203,9 @@ def _install_stack_dump() -> None:
 
 def main() -> int:
     """stdio 入口：stdout 归协议，所有日志进 stderr。"""
+    from gamepilot.runtime_paths import configure_frozen_environment
+
+    configure_frozen_environment()
     logging.basicConfig(
         level=os.environ.get("GAMEPILOT_LOG_LEVEL", "INFO").upper(),
         stream=sys.stderr,

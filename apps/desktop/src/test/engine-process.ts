@@ -10,8 +10,21 @@
  *   GAMEPILOT_PROJECT_DIR   → 当前脚本目录
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+
+/** 仓库内 venv 的解释器（和 Rust 桥 `resolve_engine_command` 同一套规则）。 */
+export function enginePython(engineDir: string): string {
+  const candidate =
+    process.platform === 'win32'
+      ? path.join(engineDir, '.venv', 'Scripts', 'python.exe')
+      : path.join(engineDir, '.venv', 'bin', 'python');
+  if (!existsSync(candidate)) {
+    throw new Error(`找不到引擎解释器（先 cd engine && uv sync）: ${candidate}`);
+  }
+  return candidate;
+}
 
 export interface EngineOptions {
   /** 配置目录（必填：测试里一律指向临时目录） */
@@ -44,7 +57,7 @@ export class EngineProcess {
       env.GAMEPILOT_PROJECT_DIR = options.projectDir;
     }
 
-    this.child = spawn(path.join(engineDir, '.venv', 'bin', 'python'), ['-m', 'gamepilot.rpc'], {
+    this.child = spawn(enginePython(engineDir), ['-m', 'gamepilot.rpc'], {
       cwd: engineDir,
       env,
     });

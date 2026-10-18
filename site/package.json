@@ -1,0 +1,23 @@
+{
+  "name": "gamepilot-site",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "GamePilot 官方网站 — 独立于桌面端的 React 营销站点",
+  "scripts": {
+    "dev": "vite --port 4173",
+    "build": "vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "dependencies": {
+    "lenis": "^1.3.27",
+    "motion": "^12.43.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.2",
+    "vite": "^8.3.4"
+  }
+}

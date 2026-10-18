@@ -27,10 +27,10 @@ export const TEST_DEVICES: readonly DeviceRuntime[] = [
     fps: 9,
   },
   {
-    id: 'mock:mock-1',
-    name: 'Mock 合成设备',
-    uri: 'Mock:///?width=1280&height=720',
-    kind: 'mock',
+    id: 'emulator:5554',
+    name: '模拟器',
+    uri: 'Android:///?serial=emulator-5554',
+    kind: 'emulator',
     status: 'discovered',
     resolution: [1280, 720],
     fps: 0,
@@ -52,13 +52,13 @@ describe('多设备 store', () => {
   });
 
   it('connect 只切到 connecting；真实连接结果由引擎回填', () => {
-    useDeviceStore.getState().connect('mock:mock-1');
-    expect(useDeviceStore.getState().devices.find((item) => item.id === 'mock:mock-1')?.status).toBe(
+    useDeviceStore.getState().connect('emulator:5554');
+    expect(useDeviceStore.getState().devices.find((item) => item.id === 'emulator:5554')?.status).toBe(
       'connecting',
     );
 
-    useDeviceStore.getState().markConnectedWith('mock:mock-1', [1280, 720]);
-    const device = useDeviceStore.getState().devices.find((item) => item.id === 'mock:mock-1');
+    useDeviceStore.getState().markConnectedWith('emulator:5554', [1280, 720]);
+    const device = useDeviceStore.getState().devices.find((item) => item.id === 'emulator:5554');
     expect(device?.status).toBe('connected');
     expect(device?.resolution).toEqual([1280, 720]);
     expect(device?.error).toBeUndefined();
@@ -98,9 +98,9 @@ describe('多设备 store', () => {
   });
 
   it('失败态会带上错误原因与修复建议', () => {
-    useDeviceStore.getState().failConnect('mock:mock-1', '端口被占用');
+    useDeviceStore.getState().failConnect('emulator:5554', '端口被占用');
 
-    const device = useDeviceStore.getState().devices.find((item) => item.id === 'mock:mock-1');
+    const device = useDeviceStore.getState().devices.find((item) => item.id === 'emulator:5554');
     expect(device?.status).toBe('failed');
     expect(device?.error).toBe('端口被占用');
     expect(device?.suggestedFix).toBeTruthy();
@@ -123,7 +123,7 @@ describe('引擎 payload → 界面模型', () => {
   };
 
   it('每种来源都认得出来（ios 曾经被漏掉，iPhone 全被降级成"远程"→ 分类里看不见）', () => {
-    for (const kind of ['android', 'emulator', 'ios', 'windows', 'mock']) {
+    for (const kind of ['android', 'emulator', 'ios', 'windows']) {
       expect(toRuntimeDevice({ ...base, kind }).kind).toBe(kind);
     }
   });

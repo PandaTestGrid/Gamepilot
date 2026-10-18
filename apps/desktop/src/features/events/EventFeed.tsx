@@ -25,8 +25,15 @@ const TONE: Partial<Record<TraceEventType, DotTone>> = {
   recognizer_added: 'confirmed',
   recognizer_renamed: 'confirmed',
   recognizer_removed: 'idle',
-  node_added: 'confirmed',
-  edge_added: 'confirmed',
+  step_started: 'idle',
+  step_finished: 'idle',
+  step_skipped: 'idle',
+  step_failed: 'failed',
+  step_retry: 'pending',
+  breakpoint_hit: 'pending',
+  flow_started: 'confirmed',
+  flow_finished: 'confirmed',
+  action_failed: 'failed',
 };
 
 const FILTERS: Array<{ id: EventFilter; label: string }> = [

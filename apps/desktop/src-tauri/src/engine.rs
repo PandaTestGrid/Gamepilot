@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
@@ -24,6 +26,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 const EVENT_ENGINE: &str = "engine://event";
 /// 单次 RPC 的等待上限；超时说明引擎卡死或崩溃
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+/// 连接会等到首帧，ADB 降级可能先等待 scrcpy 再等一次完整截图。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
+const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 struct EngineProcess {
     child: Child,
@@ -36,9 +43,7 @@ pub struct Bridge {
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     /// 每台设备的最新一帧 JPEG。
     ///
-    /// 为什么不直接把这帧塞进事件发给前端：一帧 base64 有 80KB+，14fps 就是 1MB/s 的
-    /// WebView IPC 流量，实测前端收不到画面。改成"事件只发元数据（识别框/节点/序号），
-    /// 帧由前端按需用 `engine_frame` 拉原始字节"。
+    /// 帧不随事件推送；前端用 `engine_frame` 按需拉取，事件只带元数据。
     frames: Mutex<HashMap<String, Vec<u8>>>,
     next_id: AtomicU64,
 }
@@ -93,14 +98,35 @@ pub fn engine_start(app: AppHandle, bridge: State<'_, Bridge>) -> Result<String,
         .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // 引擎日志走 stderr，直接继承到应用日志，不污染协议流
-        .stderr(Stdio::inherit());
-    let frame_socket = bind_frame_socket();
-    if let Some((path, listener)) = frame_socket {
-        command.env("GAMEPILOT_FRAME_SOCKET", &path);
-        let app_for_frames = app.clone();
-        std::thread::spawn(move || read_frames(app_for_frames, listener));
-        log::info!("帧通道: {}", path.display());
+        // 引擎日志留在应用日志目录，不继承控制台，也不污染协议 stdout。
+        .stderr(Stdio::piped());
+    // 开发 venv 有时只 sync 了第三方依赖、没 editable 安装本包；桌面壳也不会继承终端里的 PYTHONPATH。
+    let engine_src = cwd.join("src");
+    if engine_src.join("gamepilot").is_dir() {
+        command.env("PYTHONPATH", engine_src);
+    }
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    // 帧走独立通道，不和 JSON-RPC 挤同一根 stdout。
+    // unix：AF_UNIX socket；Windows：本机 TCP（标准库没有 AF_UNIX，不能走 unix socket）。
+    #[cfg(unix)]
+    {
+        let frame_socket = bind_frame_socket();
+        if let Some((path, listener)) = frame_socket {
+            command.env("GAMEPILOT_FRAME_SOCKET", &path);
+            let app_for_frames = app.clone();
+            std::thread::spawn(move || read_frames(app_for_frames, listener));
+            log::info!("帧通道: {}", path.display());
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some((endpoint, listener)) = bind_frame_tcp() {
+            command.env("GAMEPILOT_FRAME_SOCKET", &endpoint);
+            let app_for_frames = app.clone();
+            std::thread::spawn(move || read_frames_tcp(app_for_frames, listener));
+            log::info!("帧通道: {endpoint}");
+        }
     }
 
     let mut child = command
@@ -109,17 +135,27 @@ pub fn engine_start(app: AppHandle, bridge: State<'_, Bridge>) -> Result<String,
 
     let stdin = child.stdin.take().ok_or("无法获取引擎 stdin")?;
     let stdout = child.stdout.take().ok_or("无法获取引擎 stdout")?;
+    let stderr = child.stderr.take().ok_or("无法获取引擎 stderr")?;
 
     let app_handle = app.clone();
     std::thread::spawn(move || read_loop(app_handle, stdout));
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            log::info!(target: "gamepilot.engine", "{line}");
+        }
+    });
+
+    if let Ok(Some(status)) = child.try_wait() {
+        return Err(format!(
+            "引擎进程启动后立刻退出 ({status})，原因见日志 gamepilot.engine（stderr）"
+        ));
+    }
 
     *guard = Some(EngineProcess { child, stdin });
     Ok(format!("started: {}", program.display()))
 }
 
-/// 绑定帧通道的 unix socket。
-///
-/// 返回 `None` 时引擎会退回"base64 塞在通知里"的老路（单测/非 unix 平台用得上）。
+/// 绑定帧通道的 unix socket（仅 unix 编译）。
 #[cfg(unix)]
 fn bind_frame_socket() -> Option<(std::path::PathBuf, std::os::unix::net::UnixListener)> {
     // 必须用短路径：macOS 的 AF_UNIX 地址上限约 104 字节，
@@ -136,9 +172,22 @@ fn bind_frame_socket() -> Option<(std::path::PathBuf, std::os::unix::net::UnixLi
     }
 }
 
-#[cfg(not(unix))]
-fn bind_frame_socket() -> Option<(std::path::PathBuf, ())> {
-    None
+/// Windows 没有 AF_UNIX：本机 TCP 同样把 JPEG 原始字节从 stdout 里拆出去。
+#[cfg(windows)]
+fn bind_frame_tcp() -> Option<(String, std::net::TcpListener)> {
+    match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => match listener.local_addr() {
+            Ok(addr) => Some((format!("tcp:{addr}"), listener)),
+            Err(error) => {
+                log::warn!("帧通道 TCP 地址读取失败（回退 base64 通道）: {error}");
+                None
+            }
+        },
+        Err(error) => {
+            log::warn!("帧通道 TCP 创建失败（回退 base64 通道）: {error}");
+            None
+        }
+    }
 }
 
 /// 读帧通道：`[idLen u8][deviceId][jpegLen u32 BE][jpeg bytes]`，循环下去。
@@ -160,8 +209,24 @@ fn read_frames(app: AppHandle, listener: std::os::unix::net::UnixListener) {
     }
 }
 
-#[cfg(unix)]
-fn read_one_frame_stream(app: AppHandle, stream: std::os::unix::net::UnixStream) {
+#[cfg(windows)]
+fn read_frames_tcp(app: AppHandle, listener: std::net::TcpListener) {
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(stream) => {
+                let _ = stream.set_nodelay(true);
+                let app = app.clone();
+                std::thread::spawn(move || read_one_frame_stream(app, stream));
+            }
+            Err(error) => {
+                log::warn!("帧通道连接失败: {error}");
+                break;
+            }
+        }
+    }
+}
+
+fn read_one_frame_stream(app: AppHandle, stream: impl std::io::Read) {
     use std::io::{BufReader, Read};
 
     let mut reader = BufReader::new(stream);
@@ -202,6 +267,14 @@ pub async fn engine_rpc(
     method: String,
     params: Option<Value>,
 ) -> Result<Value, String> {
+    let timeout = match method.as_str() {
+        "device.connect" => CONNECT_TIMEOUT,
+        "device.list" => SCAN_TIMEOUT,
+        // OCR 识别在引擎内异步执行，RPC 只负责提交任务
+        "ocr.recognize" | "ocr.cancel" | "ocr.load" | "ocr.status" => Duration::from_secs(30),
+        "device.touch" => Duration::from_secs(20),
+        _ => RPC_TIMEOUT,
+    };
     let id = bridge.next_id.fetch_add(1, Ordering::SeqCst) + 1;
     let request = json!({
         "jsonrpc": "2.0",
@@ -220,15 +293,25 @@ pub async fn engine_rpc(
     {
         let mut guard = bridge.process.lock().map_err(|e| e.to_string())?;
         let process = guard.as_mut().ok_or("引擎未启动，请先调用 engine_start")?;
-        writeln!(process.stdin, "{request}").map_err(|e| format!("写入引擎失败: {e}"))?;
-        process.stdin.flush().map_err(|e| e.to_string())?;
+        if let Err(error) = writeln!(process.stdin, "{request}") {
+            *guard = None;
+            return Err(format!(
+                "写入引擎失败: {error}（引擎可能已退出，请点「重启引擎」或重试）"
+            ));
+        }
+        if let Err(error) = process.stdin.flush() {
+            *guard = None;
+            return Err(format!(
+                "写入引擎失败: {error}（引擎可能已退出，请点「重启引擎」或重试）"
+            ));
+        }
     }
 
     // 关键：**不能**在主线程上等。
     // Tauri 的同步命令跑在主线程，而读线程收到通知后会调 `app.emit`（需要主线程）。
     // 主线程等 RPC 响应 + 读线程等主线程 = 死锁：界面卡在 connecting、一帧都收不到。
     // 所以把等待丢进阻塞线程池（`engine_rpc` 声明为 async，命令本身跑在异步运行时上）。
-    let waiting = tauri::async_runtime::spawn_blocking(move || receiver.recv_timeout(RPC_TIMEOUT));
+    let waiting = tauri::async_runtime::spawn_blocking(move || receiver.recv_timeout(timeout));
     let received = waiting.await.map_err(|e| e.to_string())?;
 
     match received {
@@ -250,7 +333,7 @@ pub async fn engine_rpc(
         }
         Err(_) => {
             let _ = bridge.pending.lock().map(|mut map| map.remove(&id));
-            Err(format!("引擎响应超时（>{RPC_TIMEOUT:?}）"))
+            Err(format!("引擎响应超时（>{timeout:?}）"))
         }
     }
 }
@@ -354,9 +437,53 @@ fn read_loop(app: AppHandle, stdout: impl std::io::Read) {
     log::info!("引擎 stdout 已关闭（进程退出？）");
 }
 
+/// 安装包 / `tauri build` 产出目录里的 PyInstaller sidecar（与主程序同目录）。
+fn resolve_packaged_sidecar() -> Option<(PathBuf, PathBuf)> {
+    let me = std::env::current_exe().ok()?;
+    let dir = me.parent()?;
+    let mut candidates = vec![env!("GAMEPILOT_SIDECAR_NAME")];
+    #[cfg(windows)]
+    candidates.push("gamepilot-engine.exe");
+    #[cfg(not(windows))]
+    candidates.push("gamepilot-engine");
+    for name in candidates {
+        let path = dir.join(name);
+        if path.is_file() {
+            return Some((path, dir.to_path_buf()));
+        }
+    }
+    None
+}
+
+/// 仓库内 `engine/.venv` 解释器（`tauri dev` / 本地改引擎代码时用）。
+fn resolve_repo_venv_engine() -> Option<(PathBuf, Vec<String>, PathBuf)> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())?;
+    let engine_dir = repo_root.join("engine");
+    let venv_python = if cfg!(windows) {
+        engine_dir.join(".venv").join("Scripts").join("python.exe")
+    } else {
+        engine_dir.join(".venv").join("bin").join("python")
+    };
+    if !venv_python.is_file() {
+        return None;
+    }
+    Some((
+        venv_python,
+        vec!["-m".to_string(), "gamepilot.rpc".to_string()],
+        engine_dir,
+    ))
+}
+
 /// 解析如何启动引擎：
-/// 1. `GAMEPILOT_ENGINE_BIN` —— 打包后指向 PyInstaller 单文件 sidecar；
-/// 2. 开发态 —— 仓库 `engine/.venv` 里的解释器（M5 再做 PyInstaller 打包）。
+/// 1. `GAMEPILOT_ENGINE_BIN` —— 手动覆盖；
+/// 2. **Debug 构建** —— 优先 `engine/.venv`（避免 debug 目录里旧 sidecar 盖住新依赖）；
+/// 3. 与主程序同目录的 `gamepilot-engine-*` sidecar（Release 安装包）；
+/// 4. 仓库 `engine/.venv`；
+/// 5. 系统 `python3`。
 fn resolve_engine_command() -> Result<(PathBuf, Vec<String>, PathBuf), String> {
     if let Ok(raw) = std::env::var("GAMEPILOT_ENGINE_BIN") {
         let program = PathBuf::from(raw);
@@ -364,32 +491,34 @@ fn resolve_engine_command() -> Result<(PathBuf, Vec<String>, PathBuf), String> {
         return Ok((program, vec!["--stdio".to_string()], cwd));
     }
 
-    // CARGO_MANIFEST_DIR = <repo>/apps/desktop/src-tauri
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .ok_or("无法定位仓库根目录")?
-        .to_path_buf();
-    let engine_dir = repo_root.join("engine");
+    // `tauri dev` 会把 binaries/ 里的 sidecar 拷到 gamepilot.exe 旁边；那份往往是上次 build 的快照，
+    // 不会跟着 `uv sync` 变。Debug 默认走 venv；要测 sidecar 可设 GAMEPILOT_USE_SIDECAR=1。
+    if cfg!(debug_assertions) && std::env::var("GAMEPILOT_USE_SIDECAR").is_err() {
+        if let Some((program, args, cwd)) = resolve_repo_venv_engine() {
+            log::info!("开发模式使用 engine/.venv: {}", program.display());
+            return Ok((program, args, cwd));
+        }
+    }
 
-    let venv_python = if cfg!(windows) {
-        engine_dir.join(".venv").join("Scripts").join("python.exe")
-    } else {
-        engine_dir.join(".venv").join("bin").join("python")
-    };
-    let program = if venv_python.exists() {
-        venv_python
-    } else {
-        log::warn!("未找到 engine/.venv，回退到系统 python3（先跑 `cd engine && uv sync`）");
-        PathBuf::from("python3")
-    };
+    if let Some((program, cwd)) = resolve_packaged_sidecar() {
+        log::info!("使用内置引擎 sidecar: {}", program.display());
+        return Ok((program, vec!["--stdio".to_string()], cwd));
+    }
 
+    if let Some((program, args, cwd)) = resolve_repo_venv_engine() {
+        return Ok((program, args, cwd));
+    }
+
+    log::warn!("未找到 engine/.venv，回退到系统 python3（先跑 `cd engine && uv sync`）");
     Ok((
-        program,
+        PathBuf::from("python3"),
         vec!["-m".to_string(), "gamepilot.rpc".to_string()],
-        engine_dir,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|p| p.join("engine"))
+            .unwrap_or_else(|| PathBuf::from("engine")),
     ))
 }
 
@@ -439,7 +568,7 @@ mod tests {
         let response: Value = serde_json::from_str(line.trim()).expect("响应是合法 JSON");
         assert_eq!(response["id"], 1);
         assert_eq!(response["result"]["pong"], true);
-        assert_eq!(response["result"]["protocol"], 1);
+        assert_eq!(response["result"]["protocol"], 2);
 
         let _ = child.kill();
         let _ = child.wait();
@@ -448,6 +577,9 @@ mod tests {
     /// 开发态必须解析到仓库内的 venv 解释器（否则说明目录结构或 uv sync 有问题）。
     #[test]
     fn resolves_engine_interpreter_in_repo() {
+        if std::env::var("GAMEPILOT_ENGINE_BIN").is_ok() {
+            return;
+        }
         let (program, args, cwd) = resolve_engine_command().expect("解析引擎启动命令");
         assert!(
             cwd.ends_with("engine"),
@@ -455,7 +587,15 @@ mod tests {
             cwd.display()
         );
         assert_eq!(args, vec!["-m".to_string(), "gamepilot.rpc".to_string()]);
-        if std::env::var("GAMEPILOT_ENGINE_BIN").is_err() && !cfg!(windows) {
+        if cfg!(debug_assertions) && std::env::var("GAMEPILOT_USE_SIDECAR").is_err() {
+            let path = program.to_string_lossy();
+            assert!(
+                path.contains(".venv"),
+                "Debug 应优先 venv，而不是 debug 目录里的 sidecar: {}",
+                program.display()
+            );
+        }
+        if resolve_repo_venv_engine().is_some() {
             assert!(
                 program.exists(),
                 "找不到 engine/.venv 解释器（先执行 cd engine && uv sync）: {}",

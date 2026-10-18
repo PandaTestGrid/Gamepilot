@@ -37,7 +37,7 @@ function device(patch: Partial<DeviceRuntime> & Pick<DeviceRuntime, 'id' | 'kind
 }
 
 const ANDROID = device({ id: 'android:1', kind: 'android', name: 'OPPO A57', status: 'connected' });
-const MOCK = device({ id: 'mock:1', kind: 'mock', name: 'Mock 合成设备', status: 'discovered' });
+const SPARE = device({ id: 'android:2', kind: 'android', name: 'Pixel 7', status: 'discovered' });
 const MAC_PICKER = device({ id: 'macos:picker', kind: 'windows', name: '本机窗口（macOS）· 2 个可选窗口' });
 const MAC_WINDOW = device({ id: 'macos:89', kind: 'windows', name: 'Safari', status: 'connected' });
 
@@ -47,6 +47,15 @@ function open(devices: DeviceRuntime[], activeId = ANDROID.id): void {
 }
 
 describe('设备弹层', () => {
+  it('行右侧留边距：`连接` 不贴弹层边框（用户反馈"太贴边了"）', () => {
+    open([SPARE]);
+    render(<DevicePopover />);
+
+    const connect = screen.getByRole('button', { name: '连接' });
+    // 按钮所在的那一行要有右内边距，否则文字会顶到面板边框上
+    expect(connect.parentElement).toHaveClass('pr-2');
+  });
+
   beforeEach(() => {
     vi.mocked(macWindows).mockResolvedValue({
       platform: 'darwin',
@@ -86,14 +95,14 @@ describe('设备弹层', () => {
   });
 
   it('只显示有内容的分类，并带数量（空分类不再占位）', () => {
-    open([ANDROID, MOCK, MAC_PICKER, MAC_WINDOW]);
+    open([ANDROID, SPARE, MAC_PICKER, MAC_WINDOW]);
     render(<DevicePopover />);
 
-    const tabs = within(screen.getByTitle('全部（4）').parentElement as HTMLElement);
-    expect(screen.getByTitle('全部（4）')).toBeInTheDocument();
-    expect(screen.getByTitle('安卓（1）')).toBeInTheDocument();
+    const tabs = within(screen.getByTitle('全部（3）').parentElement as HTMLElement);
+    expect(screen.getByTitle('全部（3）')).toBeInTheDocument();
+    expect(screen.getByTitle('安卓（2）')).toBeInTheDocument();
     expect(screen.getByTitle('本机窗口（2）')).toBeInTheDocument();
-    expect(screen.getByTitle('Mock（1）')).toBeInTheDocument();
+    expect(screen.queryByTitle(/^Mock（/)).not.toBeInTheDocument();
     expect(screen.queryByTitle(/^iOS（/)).not.toBeInTheDocument();
     expect(tabs).toBeTruthy();
   });
@@ -110,7 +119,7 @@ describe('设备弹层', () => {
   it('点已连接的设备 = 切换当前设备（不再重连），并收起弹层', async () => {
     const user = userEvent.setup();
     const setActive = vi.fn();
-    open([MOCK, ANDROID], MOCK.id);
+    open([SPARE, ANDROID], SPARE.id);
     useDeviceStore.setState({ setActive });
     render(<DevicePopover />);
 
@@ -124,19 +133,47 @@ describe('设备弹层', () => {
     const user = userEvent.setup();
     const connect = vi.fn(() => Promise.resolve(true));
     useSessionStore.setState({ connect });
-    open([ANDROID, MOCK], ANDROID.id);
+    open([ANDROID, SPARE], ANDROID.id);
     render(<DevicePopover />);
 
-    await user.click(screen.getByText('Mock 合成设备').closest('button') as HTMLButtonElement);
+    await user.click(screen.getByText('Pixel 7').closest('button') as HTMLButtonElement);
 
-    expect(connect).toHaveBeenCalledWith(MOCK.id, MOCK.uri);
+    expect(connect).toHaveBeenCalledWith(SPARE.id, SPARE.uri);
+  });
+
+  it('模拟器已打开的应用窗口会单独成行，可直接连接', () => {
+    const connect = vi.fn(() => Promise.resolve(true));
+    useSessionStore.setState({ connect });
+    const EMULATOR = device({
+      id: 'android:emulator-5554',
+      kind: 'emulator',
+      name: 'MuMu 12',
+      status: 'connected',
+    });
+    // 引擎扫描出来的多屏行：id 带屏号、名字带屏号与顶层应用包名、URI 带 display
+    const SCREEN_4 = device({
+      id: 'android:emulator-5554:42',
+      kind: 'emulator',
+      name: 'MuMu 12 · 屏4 · com.netease.onmyoji.wyzymnqsd_cps',
+      uri: 'Android:///?serial=emulator-5554&display=4&physical=42',
+      resolution: [900, 1600],
+    });
+    open([EMULATOR, SCREEN_4, SPARE], EMULATOR.id);
+    render(<DevicePopover />);
+
+    expect(screen.getByTitle('模拟器（2）')).toBeInTheDocument();
+    expect(screen.getByTitle('安卓（1）')).toBeInTheDocument();
+    expect(screen.getByText('MuMu 12')).toBeInTheDocument();
+    expect(screen.getByText(/屏4/)).toBeInTheDocument();
+    expect(screen.getByText(/已打开的应用窗口会单独成行/)).toBeInTheDocument();
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it('当前设备标出「当前」，行内「断开」仍然可用', async () => {
     const user = userEvent.setup();
     const disconnect = vi.fn(() => Promise.resolve());
     useSessionStore.setState({ disconnect });
-    open([ANDROID, MOCK], ANDROID.id);
+    open([ANDROID, SPARE], ANDROID.id);
     render(<DevicePopover />);
 
     expect(screen.getByText('当前')).toBeInTheDocument();

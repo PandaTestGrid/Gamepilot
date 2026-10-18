@@ -10,9 +10,7 @@
  * "加一步操作"这种"先选类型、再选参数"的流程，一级菜单塞不下也不该塞：
  * 一级是"要做什么"，二级是"具体怎么做"（哪个模板 / 等多久 / 按哪个键 / 给哪个变量赋值）。
  *
- * ⚠️ 必须 **portal 到 body**：菜单也会从节点卡片里弹出（"＋操作"），而卡片处在 React Flow
- * 的 `scale()/translate()` 变换里 —— `position: fixed` 会被这个变换劫持（坐标被缩放/平移），
- * 菜单会飞到视口外，点上去什么都不会发生（实测踩过：菜单落在 y=1307）。二级菜单同样在 portal 里。
+ * 菜单 portal 到 `body`：节点在 React Flow 变换内时，`fixed` 定位会错位。
  */
 import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -28,8 +26,7 @@ export interface MenuField {
 /**
  * 菜单里的**内联输入行**：二级菜单不只有预设，还得能填具体值。
  *
- * 典型场景："点击坐标 (0.42, 0.68)" —— 相对坐标是最常用的参数，
- * 让用户为了填两个数字跑去下方详情面板太绕（用户反馈"二级菜单里应该能输入相对坐标"）。
+ * 二级菜单内可填相对坐标等参数，不必跳转详情面板。
  */
 export interface MenuInput {
   readonly fields: readonly MenuField[];
@@ -40,6 +37,8 @@ export interface MenuInput {
 export interface MenuItem {
   readonly label: string;
   readonly hint?: string;
+  /** 菜单项左侧图标 */
+  readonly icon?: ReactNode;
   /** 内联输入行（有它时这一项不是按钮，而是一行小表单） */
   readonly input?: MenuInput;
   /** 输入行的说明（比如"相对坐标 0~1，也可以写 50%"） */
@@ -64,8 +63,8 @@ export interface MenuAnchor {
   readonly items: readonly MenuItem[];
 }
 
-const ITEM_HEIGHT = 26;
-const MENU_WIDTH = 216;
+const ITEM_HEIGHT = 28;
+const MENU_WIDTH = 248;
 const HEADER_HEIGHT = 26;
 
 function menuHeight(items: readonly MenuItem[]): number {
@@ -135,7 +134,7 @@ function MenuList({
     <div
       data-testid="graph-context-menu-list"
       style={style}
-      className="w-54 rounded-sm border border-line bg-panel py-1 shadow-lg"
+      className="w-[248px] rounded-sm border border-line bg-panel py-1 shadow-lg"
     >
       {items.map((item, index) => (
         <div key={`${item.label}-${index}`} onMouseEnter={() => onHoverItem?.(index)}>
@@ -147,15 +146,28 @@ function MenuList({
               type="button"
               data-has-submenu={item.submenu ? 'true' : undefined}
               onClick={() => onPick(item)}
+              title={item.hint ? `${item.label} · ${item.hint}` : item.label}
               className={cn(
-                'flex w-full items-center gap-2 px-2 py-1 text-left text-body hover:bg-raised',
-                item.danger ? 'text-failed' : 'text-fg',
+                'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-body transition-colors hover:bg-raised',
+                item.danger ? 'text-failed hover:bg-failed/10' : 'text-fg',
                 openIndex === index && item.submenu && 'bg-raised',
               )}
             >
-              <span className="flex-1 truncate">{item.label}</span>
-              {item.hint && <span className="shrink-0 text-badge text-faint">{item.hint}</span>}
-              {item.submenu && <span className="shrink-0 text-badge text-faint">›</span>}
+              {item.icon ? (
+                <span
+                  className={cn(
+                    'flex size-3.5 shrink-0 items-center justify-center',
+                    item.danger ? 'text-failed' : 'text-dim',
+                  )}
+                >
+                  {item.icon}
+                </span>
+              ) : null}
+              <span className="shrink-0 whitespace-nowrap font-medium">{item.label}</span>
+              {item.hint && (
+                <span className="ml-auto min-w-0 truncate pl-2 text-badge text-faint">{item.hint}</span>
+              )}
+              {item.submenu && <span className="ml-auto shrink-0 text-badge text-faint">›</span>}
             </button>
           )}
         </div>
@@ -231,7 +243,9 @@ export function GraphContextMenu({
     >
       <div className="flex flex-col gap-1">
         <div>
-          <div className="px-2 py-0.5 text-badge text-faint">{anchor.title}</div>
+          {anchor.title ? (
+            <div className="mb-0.5 truncate px-2 py-0.5 text-badge text-faint">{anchor.title}</div>
+          ) : null}
           <MenuList
             items={anchor.items}
             onPick={pick}

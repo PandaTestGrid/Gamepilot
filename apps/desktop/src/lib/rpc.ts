@@ -10,34 +10,20 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 
-import type { DeviceKind } from '@/types';
+import type { DeviceKind, TraceEventType } from '@/types';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { pushUiLog } from '@/lib/log-bus';
 
 /** 与 engine/src/gamepilot/protocol.py 的 PROTOCOL_VERSION 必须一致。 */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2; // 2：删除不再走回收站（trashed → removed，去掉 trashRoot）
 
 export interface EngineNotification {
   readonly method: string;
   readonly params: Record<string, unknown>;
 }
 
-/**
- * 把"引擎/Rust 桥抛上来的错误"整成一句能直接显示给人看的话。
- *
- * 踩过的坑：JSON-RPC 的错误信封是 `{code, message}`，Rust 桥整块 format 进字符串，
- * 于是错误条上显示的是
- * `引擎返回错误: {"code":-32603,"message":"RuntimeError: 『相机』还在被使用，先改掉再删：…"}`
- * —— 用户看不到重点（被谁引用了），只看到一坨 JSON。
- *
- * 处理三件事：
- * 1. **拆信封**：只留 `message`（"引擎返回错误: "这类前缀保留，它说明哪一层报的）；
- * 2. 去掉 Python 异常类名前缀（`RuntimeError: ` / `ValueError: ` …）：对用户没有意义；
- * 3. `KeyError` 的 `str()` 会带一层单引号（`'识别器不存在: x'`），也去掉。
- *
- * 不是 JSON 信封的（Rust 自己的"引擎响应超时"之类）原样返回。
- */
+/** 解析 JSON-RPC 错误信封，去掉异常类名前缀，供界面直接展示 message。 */
 export function cleanErrorText(raw: string): string {
   const text = (raw ?? '').trim();
   const brace = text.indexOf('{');
@@ -56,6 +42,10 @@ export function cleanErrorText(raw: string): string {
 }
 
 function stripPythonPrefix(message: string): string {
+  const prefixMatch = /^(引擎返回错误:\s*)(.*)$/.exec(message);
+  if (prefixMatch) {
+    return `${prefixMatch[1]}${stripPythonPrefix(prefixMatch[2]!)}`.trim();
+  }
   let text = message.replace(/^[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning):\s*/, '').trim();
   if (text.length >= 2 && text.startsWith("'") && text.endsWith("'")) {
     text = text.slice(1, -1).trim();
@@ -137,7 +127,7 @@ export interface DeviceListResult {
   readonly errors: readonly DeviceScanError[];
 }
 
-/** 扫描可用设备（adb 真机/模拟器 + Mock）。scan=false 时只返回 Mock，用于快速首屏。 */
+/** 扫描可用设备（adb 真机/模拟器 + iOS + macOS 窗口）。scan=false 时不扫描，直接返回空列表。 */
 export function listDevices(scan = true): Promise<DeviceListResult> {
   return rpc<DeviceListResult>('device.list', { scan });
 }
@@ -147,34 +137,32 @@ export function listDevices(scan = true): Promise<DeviceListResult> {
  * 契约见 docs/rpc.md
  * ------------------------------------------------------------------ */
 
-export interface GraphEdgePayload {
-  id: string;
-  when?: string;
-  from?: string | null;
-  to?: string | null;
-  kind?: string;
-  priority?: number;
-  min_score?: number;
-  cooldown_ms?: number;
-  retries?: number;
-  condition?: Record<string, unknown> | null;
-  action?: Record<string, unknown> | null;
-}
-
 export interface GraphPayload {
   readonly version: number;
   readonly defaults: Record<string, unknown>;
   readonly recognizers: Record<string, Record<string, unknown>>;
-  readonly nodes: ReadonlyArray<{ id: string; name?: string; enter?: string[]; timeout_ms?: number }>;
+  readonly nodes: ReadonlyArray<{
+    id: string;
+    name?: string;
+    /** 引擎里的节点备注（`graph.json` 的 `note`）；和限时等待的 `timeout_ms` 不是一回事 */
+    note?: string;
+    enter?: string[];
+    timeout_ms?: number;
+    at?: string;
+  }>;
   readonly edges: ReadonlyArray<Record<string, unknown>>;
   /** 变量（"黑板"）：动作参数可以引用它们 */
   readonly variables?: Record<string, { type?: string; value?: number | string | boolean }>;
+  /** 步骤链（Automa 式）：第一步必须是触发器，顺序即执行顺序 */
+  readonly flow?: {
+    readonly steps: ReadonlyArray<Record<string, unknown>>;
+  };
 }
 
 export interface ConnectResult {
   readonly deviceId: string;
   readonly resolution: readonly [number, number];
-  /** scrcpy（H.264，流畅）| screencap（adb 截图，约 1.8fps）| dvt（iOS）| quartz（macOS 窗口） */
+  /** Android：scrcpy（H.264）| dvt（iOS）| quartz（macOS 窗口） */
   readonly channel: string;
   readonly linkNote: string;
   readonly graph: GraphPayload;
@@ -186,7 +174,9 @@ export interface ConnectResult {
 
 export interface RecordResult {
   readonly label: string;
-  readonly mode: 'template' | 'color';
+  readonly mode: 'template' | 'color' | 'ocr';
+  /** 实际生效的搜索范围（纯色区域降级成颜色识别器时永远是 region） */
+  readonly search: 'region' | 'full';
   readonly template: string;
   readonly rect: readonly [number, number, number, number];
   /** 这次模板挂在哪个界面上：`allocateNodeId` 时是**引擎分配**的 id，不一定是传下去的那个 */
@@ -211,6 +201,8 @@ export interface FramePayload {
     score: number;
     source: string;
     state: 'confirmed' | 'pending' | 'idle';
+    /** 有多个同分且位置不同的候选（全屏搜索）：界面提示，点击会拒绝猜 */
+    ambiguous?: boolean;
   }>;
   /** 只有老引擎会塞在事件里；新引擎的帧走 `fetchFrame`（原始字节） */
   readonly jpeg?: string;
@@ -221,15 +213,28 @@ export interface EngineEventPayload {
   readonly deviceId: string;
   readonly seq: number;
   readonly ts: number;
-  readonly type: string;
+  readonly type: TraceEventType;
   readonly node: string | null;
   readonly edge: string | null;
   readonly message: string;
+  readonly extra?: {
+    readonly loops?: ReadonlyArray<{
+      readonly stepId: string;
+      readonly current: number;
+      readonly total: number;
+    }>;
+    /** 其余是引擎上报的调试字段：index / kind / params / durationMs / score / matchedRect / retry … */
+    readonly [key: string]: unknown;
+  };
+  /** 这份事件属于哪条工作流（多 Tab 同时跑时用来过滤高亮） */
+  readonly workflowRoot?: string;
 }
 
 export interface DeviceNotificationPayload {
   readonly deviceId: string;
   readonly uri?: string;
+  readonly name?: string;
+  readonly kind?: DeviceKind;
   readonly phase?: string;
   readonly resolution?: readonly [number, number];
   readonly channel?: string;
@@ -241,8 +246,7 @@ export interface DeviceNotificationPayload {
 /**
  * 拉取某台设备的最新一帧 JPEG（原始字节）。
  *
- * 画面**不走事件**：一帧 base64 有 80KB+，14fps 就是 1MB/s 的 WebView IPC 流量，
- * 实测前端收不到画面。改成事件只发元数据（识别框/节点/序号），帧按需拉。
+ * 帧走按需拉取；事件只带元数据，避免大体积 base64 挤满 IPC。
  */
 export async function fetchFrame(deviceId: string): Promise<ArrayBuffer | null> {
   // 首选：原始字节（Tauri binary IPC → ArrayBuffer）
@@ -304,12 +308,12 @@ export function deviceTouch(
   x: number,
   y: number,
 ): Promise<unknown> {
-  return invoke('engine_rpc', { method: 'device.touch', params: { deviceId, phase, x, y } });
+  return rpc('device.touch', { deviceId, phase, x, y });
 }
 
-/** 手动控制：归一化坐标轻触（走 scrcpy 控制通道，实测 0.1ms） */
+/** 手动控制：归一化坐标轻触 */
 export function deviceTap(deviceId: string, x: number, y: number): Promise<unknown> {
-  return invoke('engine_rpc', { method: 'device.tap', params: { deviceId, x, y } });
+  return rpc('device.tap', { deviceId, x, y });
 }
 
 /** 手动控制：归一化坐标滑动 */
@@ -321,19 +325,16 @@ export function deviceSwipe(
   y2: number,
   durationMs: number,
 ): Promise<unknown> {
-  return invoke('engine_rpc', {
-    method: 'device.swipe',
-    params: { deviceId, x1, y1, x2, y2, durationMs },
-  });
+  return rpc('device.swipe', { deviceId, x1, y1, x2, y2, durationMs });
 }
 
 /** 手动控制：功能键（back / home / recents / power / volume_up / volume_down） */
 export function deviceKey(deviceId: string, key: string): Promise<unknown> {
-  return invoke('engine_rpc', { method: 'device.key', params: { deviceId, key } });
+  return rpc('device.key', { deviceId, key });
 }
 
 export function setStreamFps(deviceId: string, fps: number): Promise<unknown> {
-  return invoke('engine_rpc', { method: 'device.stream', params: { deviceId, fps } });
+  return rpc('device.stream', { deviceId, fps });
 }
 
 export function connectDevice(uri: string): Promise<ConnectResult> {
@@ -369,14 +370,12 @@ export function runResume(deviceId: string): Promise<{ ok: boolean }> {
   return rpc<{ ok: boolean }>('run.resume', { deviceId });
 }
 
-/** 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置 */
-export function actionRun(
-  deviceId: string,
-  action: Record<string, unknown>,
-): Promise<{ ok: boolean; described: string }> {
-  return rpc<{ ok: boolean; described: string }>('action.run', { deviceId, action });
+/** 单步：执行完当前这一步，进入下一步之前再暂停 */
+export function runStep(deviceId: string): Promise<{ ok: boolean; paused: boolean }> {
+  return rpc<{ ok: boolean; paused: boolean }>('run.step', { deviceId });
 }
 
+/** 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置 */
 /** 删除一个模板/识别器（被界面或边引用时引擎会拒绝并说明被谁用了） */
 export function removeRecognizer(
   deviceId: string,
@@ -429,52 +428,11 @@ export function recordAction(
   deviceId: string,
   action: Record<string, unknown>,
   to?: string,
-): Promise<{ edgeId: string; graph: GraphPayload }> {
-  return rpc<{ edgeId: string; graph: GraphPayload }>('record.action', { deviceId, action, to });
-}
-
-export function graphNodeAdd(
-  params: { nodeId?: string; name?: string; enter?: string[] } = {},
-  deviceId?: string,
-): Promise<{ nodeId: string; graph: GraphPayload }> {
-  return rpc<{ nodeId: string; graph: GraphPayload }>('graph.node.add', {
-    ...(deviceId ? { deviceId } : {}),
-    ...params,
-  });
-}
-
-export function graphNodeUpdate(
-  nodeId: string,
-  patch: { name?: string; enter?: string[]; timeout_ms?: number },
-  deviceId?: string,
-): Promise<{ nodeId: string; graph: GraphPayload }> {
-  return rpc<{ nodeId: string; graph: GraphPayload }>('graph.node.update', {
-    ...(deviceId ? { deviceId } : {}),
-    nodeId,
-    patch,
-  });
-}
-
-export function graphNodeRemove(nodeId: string, deviceId?: string): Promise<{ graph: GraphPayload }> {
-  return rpc<{ graph: GraphPayload }>('graph.node.remove', {
-    ...(deviceId ? { deviceId } : {}),
-    nodeId,
-  });
-}
-
-export function graphEdgeAdd(
-  params: {
-    from?: string | null;
-    to?: string | null;
-    when?: string;
-    action?: Record<string, unknown>;
-    condition?: Record<string, unknown>;
-  },
-  deviceId?: string,
-): Promise<{ edgeId: string; graph: GraphPayload }> {
-  return rpc<{ edgeId: string; graph: GraphPayload }>('graph.edge.add', {
-    ...(deviceId ? { deviceId } : {}),
-    ...params,
+): Promise<{ edgeId: string; stepId?: string; graph: GraphPayload }> {
+  return rpc<{ edgeId: string; stepId?: string; graph: GraphPayload }>('record.action', {
+    deviceId,
+    action,
+    to,
   });
 }
 
@@ -521,6 +479,12 @@ export interface WorkspaceSummary {
   readonly exists: boolean;
 }
 
+/** 工作流第一步的触发条件（调用节点用它显示“目标工作流什么时候触发”）。 */
+export interface WorkflowTrigger {
+  readonly type: string;
+  readonly params: Readonly<Record<string, unknown>>;
+}
+
 /** 工作流摘要（树、面板、「跳到工作流」都用它）。 */
 export interface WorkflowSummary {
   readonly name: string;
@@ -531,6 +495,13 @@ export interface WorkflowSummary {
   readonly templates: number;
   /** 最新一次改动时间（epoch 秒，0 = 不知道）—— 面板里显示「10 分钟」用它 */
   readonly modified: number;
+  /** 第一步的触发条件；老引擎没有这个字段，读不回来的图是 null。 */
+  readonly trigger?: WorkflowTrigger | null;
+  /**
+   * 这份工作流的 graph.json 读不回来时的原因（有值 = 计数都是 0）。
+   * 引擎不会因为一份坏图就不给列表了，界面要把它标出来，别静默当空图。
+   */
+  readonly error?: string;
 }
 
 /** 整棵树：工作区根（标题行显示它的 basename）+ 这个工作区里的所有工作流。 */
@@ -549,21 +520,19 @@ export function projectGet(): Promise<ProjectInfo> {
   return rpc<ProjectInfo>('project.get', {});
 }
 
-export function projectSet(dir: string): Promise<ProjectInfo> {
-  return rpc<ProjectInfo>('project.set', { dir });
+export function projectSet(dir: string, create = false): Promise<ProjectInfo> {
+  return rpc<ProjectInfo>('project.set', { dir, create });
 }
 
 /* ---------------------- 工作区层：workspace.* ---------------------- */
 
-/** `workspace.list`：当前工作区 + 最近使用过的列表 + 系统推荐目录 + 全局回收站。 */
+/** `workspace.list`：当前工作区 + 最近使用过的列表 + 系统推荐目录。 */
 export interface WorkspaceListResult {
   /** 当前工作区 root；`null` = 还没选过任何一个 */
   readonly active: string | null;
   /** 系统推荐目录（面板底部「默认工作区」用它） */
   readonly recommended: string;
   readonly items: readonly WorkspaceSummary[];
-  /** 全局回收站绝对路径（`<配置目录>/.trash`）—— 移除工作区时界面要显示它 */
-  readonly trashRoot: string;
 }
 
 /** 前端只靠这一个方法就能画出整棵树（`workflows[]` 就是每一行要的数）。 */
@@ -581,8 +550,6 @@ export interface WorkspaceMutation {
   readonly items: readonly WorkspaceSummary[];
   readonly tree: WorkspaceTreePayload;
   readonly current: string;
-  /** 全局回收站绝对路径（引擎给了就显示绝对路径，拿不到时界面降级说明） */
-  readonly trashRoot: string;
 }
 
 export interface WorkspaceAdded extends WorkspaceMutation {
@@ -594,8 +561,8 @@ export interface WorkspaceAdded extends WorkspaceMutation {
 export interface WorkspaceRemoved extends WorkspaceMutation {
   /** 移掉的是当前工作区时这里是新的当前工作区；列表空了就是 null */
   readonly active: string | null;
-  /** 真删的情况下 = 它被移到的回收站路径（`deleteFiles:false` 时为空） */
-  readonly trashed: string;
+  /** 真删的情况下 = 被删掉的目录路径（`deleteFiles:false` 时为空串） */
+  readonly removed: string;
 }
 
 /**
@@ -617,8 +584,8 @@ export function workspaceAdd(dir: string, name?: string, create = true): Promise
 /**
  * 移除一个工作区。
  *
- * `deleteFiles: true`（默认）= 把整个目录**移到全局回收站**（可恢复，不是 rm -rf）；
- * `deleteFiles: false` = 只从列表移除，磁盘一个字节不动。界面必须把这两种差别说清楚。
+ * `deleteFiles: true`（默认）= 把整个目录**真删除**（`shutil.rmtree`，不可恢复，
+ * 所以界面必须先二次确认）；`deleteFiles: false` = 只从列表移除，磁盘一个字节不动。
  */
 export function workspaceRemove(dir: string, deleteFiles: boolean): Promise<WorkspaceRemoved> {
   return rpc<WorkspaceRemoved>('workspace.remove', { dir, deleteFiles });
@@ -650,9 +617,9 @@ export function workflowDuplicate(
   });
 }
 
-/** 工作流目录移进当前工作区的 `.trash/`（可恢复）。 */
-export function workflowDelete(dir: string): Promise<WorkflowLibrary & { trashed: string }> {
-  return rpc<WorkflowLibrary & { trashed: string }>('workflow.delete', { dir });
+/** **真删除**一个工作流目录（不可恢复：界面必须先二次确认）。 */
+export function workflowDelete(dir: string): Promise<WorkflowLibrary & { removed: string }> {
+  return rpc<WorkflowLibrary & { removed: string }>('workflow.delete', { dir });
 }
 
 /** 保存当前脚本的图；不带 deviceId = 直接落项目里的 `graph.json`（引擎会让所有会话热重载）。 */
@@ -671,24 +638,167 @@ export function recordTemplate(params: {
   allocateNodeId?: boolean;
   asEnter?: boolean;
   asActionTarget?: boolean;
+  /** 搜索范围：region（默认，只在框选区域找）/ full（整帧找，目标位置不固定时用） */
+  search?: 'region' | 'full';
 }): Promise<RecordResult> {
   return rpc<RecordResult>('record.template', { ...params });
+}
+
+/** 框一块区域 + 填要认的字 → 注册 OCR 识别器（不需要模板图，但会留一张截图做证据）。 */
+export function recordOcr(params: {
+  deviceId: string;
+  rect: readonly [number, number, number, number];
+  label: string;
+  text: string;
+  mode?: 'contains' | 'equals';
+  threshold?: number;
+  nodeId?: string;
+  nodeName?: string;
+  allocateNodeId?: boolean;
+  asEnter?: boolean;
+  asActionTarget?: boolean;
+  search?: 'region' | 'full';
+}): Promise<RecordResult> {
+  return rpc<RecordResult>('record.ocr', { ...params });
 }
 
 export function setRecognizerThreshold(deviceId: string, label: string, threshold: number): Promise<void> {
   return rpc<void>('recognizer.threshold', { deviceId, label, threshold });
 }
 
-export function runStart(deviceId: string): Promise<{ running: boolean }> {
-  return rpc<{ running: boolean }>('run.start', { deviceId });
+export function setRecognizerSearch(
+  deviceId: string,
+  label: string,
+  search: 'region' | 'full',
+): Promise<{ label: string; search: 'region' | 'full' }> {
+  return rpc<{ label: string; search: 'region' | 'full' }>('recognizer.search', {
+    deviceId,
+    label,
+    search,
+  });
 }
 
-export function runStop(deviceId: string): Promise<{ running: boolean }> {
-  return rpc<{ running: boolean }>('run.stop', { deviceId });
+export function runStart(
+  deviceId: string,
+  stepId?: string,
+  workflowRoot?: string,
+): Promise<{ running: boolean }> {
+  return rpc<{ running: boolean }>('run.start', {
+    deviceId,
+    ...(stepId ? { stepId } : {}),
+    ...(workflowRoot ? { workflowRoot } : {}),
+  });
 }
 
-export function timelineGet(deviceId: string, limit = 60): Promise<{ frames: unknown[]; events: unknown[] }> {
-  return rpc<{ frames: unknown[]; events: unknown[] }>('timeline.get', { deviceId, limit });
+export function runStop(deviceId: string, workflowRoot?: string): Promise<{ running: boolean }> {
+  return rpc<{ running: boolean }>('run.stop', {
+    deviceId,
+    ...(workflowRoot ? { workflowRoot } : {}),
+  });
+}
+
+export function timelineGet<T = { frames: unknown[]; events: unknown[]; evidence: RunEvidenceBundle | null }>(
+  deviceId: string,
+  limit = 60,
+): Promise<T> {
+  return rpc<T>('timeline.get', { deviceId, limit });
+}
+
+/** 一次运行里的一步：截图文件名 + 当时的参数（排查"它看到了什么"） */
+export interface RunEvidenceStep {
+  readonly index: number;
+  readonly stepId: string;
+  readonly kind: string;
+  readonly ts: number;
+  /** 截图文件名（相对证据目录）；没有图时是空串 */
+  readonly screenshot: string;
+  /** 失败原因 / 这一步的说明 */
+  readonly message: string;
+  /** 这一步的实际入参（变量已求值） */
+  readonly params?: Record<string, unknown> | null;
+  /** 动作执行结果的描述（如「点击 · 0.50, 0.50」） */
+  readonly result?: string;
+  /** 按识别器定位的动作：当帧识别分数 */
+  readonly score?: number | null;
+  /** 按识别器定位的动作：命中框（归一化 x/y/w/h） */
+  readonly matchedRect?: readonly number[] | null;
+  readonly durationMs?: number | null;
+}
+
+export interface RunEvidenceBundle {
+  /** 相对工作流根目录：`.runs/20261018-201233` */
+  readonly dir: string;
+  readonly steps: readonly RunEvidenceStep[];
+}
+
+/** 最近一次运行的证据（跑完才有；没跑过 / 关掉了证据 → null） */
+export function runEvidence(
+  deviceId: string,
+  workflowRoot?: string,
+): Promise<{ evidence: RunEvidenceBundle | null }> {
+  return rpc<{ evidence: RunEvidenceBundle | null }>('run.evidence', { deviceId, workflowRoot });
+}
+
+/** 按文件名取一张证据截图（base64 JPEG） */
+export function evidenceImage(
+  deviceId: string,
+  name: string,
+  workflowRoot?: string,
+): Promise<{ jpeg: string }> {
+  return rpc<{ jpeg: string }>('evidence.image', { deviceId, name, workflowRoot });
+}
+
+export interface OcrStatusPayload {
+  readonly modelId: string;
+  readonly modelName: string;
+  readonly sizeMb: number;
+  readonly state: 'not_downloaded' | 'downloading' | 'downloaded' | 'ready' | 'error';
+  readonly downloaded: boolean;
+  readonly loaded: boolean;
+  readonly progress: number;
+  readonly downloadedBytes: number;
+  readonly totalBytes: number;
+  readonly stage: string;
+  readonly error: string | null;
+}
+
+export interface OcrBoxItem {
+  readonly text: string;
+  readonly score: number;
+  readonly rect: readonly [number, number, number, number];
+}
+
+export interface OcrRecognizeResult {
+  readonly text: string;
+  readonly score: number;
+  readonly items: readonly OcrBoxItem[];
+  readonly cancelled?: boolean;
+  readonly error?: string;
+  readonly deviceId?: string;
+}
+
+export interface OcrRecognizeAccepted {
+  readonly accepted: boolean;
+  readonly reason?: string;
+}
+
+export function ocrStatus(): Promise<OcrStatusPayload> {
+  return rpc<OcrStatusPayload>('ocr.status');
+}
+
+export function ocrLoad(): Promise<OcrStatusPayload> {
+  return rpc<OcrStatusPayload>('ocr.load');
+}
+
+export function ocrRecognize(
+  deviceId: string,
+  rect?: readonly [number, number, number, number],
+): Promise<OcrRecognizeAccepted> {
+  return rpc<OcrRecognizeAccepted>('ocr.recognize', rect ? { deviceId, rect } : { deviceId });
+}
+
+export function ocrCancel(): Promise<{ readonly cancelled: boolean }> {
+  return rpc<{ cancelled: boolean }>('ocr.cancel');
 }
 
 /** 统一的引擎通知订阅：按 method 分发，返回取消订阅函数。 */

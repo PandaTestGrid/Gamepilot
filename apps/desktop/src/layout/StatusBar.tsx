@@ -1,5 +1,7 @@
 import { type ReactNode } from 'react';
 
+import { RunBusySpinner } from '@/features/graph/flow/RunBusySpinner';
+import { useRunBusy } from '@/lib/useRunBusy';
 import { cn } from '@/lib/utils';
 import { activeDevice, useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
@@ -16,7 +18,7 @@ import { useSessionStore } from '@/stores/session.store';
  *
  * 阈值查的是**状态行自己的宽度**（根节点上的 `@container`），不是窗口宽度：
  * 真正决定放不放得下的是"窗口宽 − 右侧 Tab / 抽屉按钮"，拿窗口宽当尺子会算错。
- * 数字来自各枚的实测宽度（11px 字号 + `tabular-nums`）：8 枚 ≈ 596px（含 12px 间距），
+ * 宽度按 11px + `tabular-nums` 估算：8 枚 ≈ 596px（含间距），
  * 每级留 ≥ 96px 给右侧事件摘要，所以才是一档一档往下掉。
  */
 interface Metric {
@@ -41,7 +43,7 @@ interface Metric {
 export function StatusBar(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
-  const running = useSessionStore((state) => Boolean(state.running[activeId]));
+  const { switching, showRunning } = useRunBusy();
   const graph = useGraphStore((state) => graphForDevice(state, activeId));
   const events = useEventStore((state) => state.events[activeId]);
   const engineStatus = useEngineStore((state) => state.status);
@@ -56,7 +58,7 @@ export function StatusBar(): ReactNode {
   const items: readonly Metric[] = [
     { key: 'node', value: frame?.node ?? graph?.activeNodeId ?? '-' },
     { key: 'tick', value: String(frame?.tick ?? 0), hideBelow: '@max-[260px]:hidden' },
-    { key: 'vote', value: running ? '2/2' : '-', hideBelow: '@max-[520px]:hidden' },
+    { key: 'vote', value: showRunning ? '2/2' : '-', hideBelow: '@max-[520px]:hidden' },
     {
       key: 'link',
       value: link ? `${link.channel}${link.channel === 'scrcpy' ? '' : '（慢）'}` : '-',
@@ -76,7 +78,7 @@ export function StatusBar(): ReactNode {
       hideBelow: '@max-[610px]:hidden',
     },
     { key: 'input', value: connected ? '48ms' : '-', hideBelow: '@max-[690px]:hidden' },
-    { key: 'run', value: running ? '运行中' : '停止' },
+    { key: 'run', value: showRunning ? '运行中' : '停止' },
   ];
 
   return (
@@ -91,6 +93,7 @@ export function StatusBar(): ReactNode {
             className={cn('flex shrink-0 items-center gap-1 whitespace-nowrap', item.hideBelow)}
           >
             <span className="text-faint">{item.key}</span>
+            {item.key === 'run' && switching && showRunning ? <RunBusySpinner className="text-dim" /> : null}
             <span className={item.bad ? 'text-failed' : undefined}>{item.value}</span>
           </span>
         ))}

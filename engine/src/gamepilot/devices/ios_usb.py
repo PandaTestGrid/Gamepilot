@@ -33,7 +33,7 @@ from typing import Any
 logger = logging.getLogger("gamepilot.devices.ios_usb")
 
 APPLE_VENDOR_ID = 0x05AC
-# QuickTime 采集要的配置：通路更多的那一套（实测 2 通路 → 4 通路）
+# QuickTime 相关：通路更多的 USB 配置（诊断用）
 QUICKTIME_CONFIGURATION = 2
 
 
@@ -61,10 +61,6 @@ class AppleUsbDevice:
     name: str
     current: int
     configurations: list[UsbConfiguration] = field(default_factory=list)
-
-    @property
-    def is_iphone(self) -> bool:
-        return self.vendor == APPLE_VENDOR_ID
 
     def describe(self) -> str:
         lines = [
@@ -176,7 +172,7 @@ def ensure_configuration(target: int = QUICKTIME_CONFIGURATION) -> str:
 
     return (
         f"{devices[0].name} 当前是配置 {devices[0].current}，需要切到 {target} 才能做 QuickTime 采集。"
-        "自动切换没成功：可以装 pyusb（uv sync --extra ios）或设置 GAMEPILOT_IOS_USB_CONFIG_CMD"
+        "自动切换没成功：确认已 uv sync，或设置 GAMEPILOT_IOS_USB_CONFIG_CMD"
     )
 
 

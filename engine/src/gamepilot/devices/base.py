@@ -23,7 +23,6 @@ Size = tuple[int, int]  # (w, h) 像素
 KIND_ANDROID = "android"
 KIND_EMULATOR = "emulator"
 KIND_WINDOWS = "windows"
-KIND_MOCK = "mock"
 KIND_REMOTE = "remote"
 
 STATUS_DISCOVERED = "discovered"
@@ -125,10 +124,24 @@ class Controller(abc.ABC):
 
     # ---------- 输入（归一化坐标） ----------
 
-    def click(self, x: float, y: float) -> None:
+    def click(
+        self,
+        x: float,
+        y: float,
+        duration: float = 0.05,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
         raise NotImplementedError(f"{type(self).__name__} 不支持 click")
 
-    def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
+    def swipe(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        duration: float = 0.3,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
         raise NotImplementedError(f"{type(self).__name__} 不支持 swipe")
 
     def key(self, name: str) -> None:
@@ -152,10 +165,6 @@ class Controller(abc.ABC):
             "resolution": list(self.resolution) if self._connected else None,
         }
 
-
-# --------------------------------------------------------------------------- #
-# 注册表：scheme → Controller
-# --------------------------------------------------------------------------- #
 
 _REGISTRY: dict[str, type[Controller]] = {}
 

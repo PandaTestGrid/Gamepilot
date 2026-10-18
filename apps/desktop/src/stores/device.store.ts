@@ -4,18 +4,16 @@
  * 数据来源分两种，注意别混：
  *   1. **扫描结果**（`scan()` → 引擎 `device.list`）——真实 adb 设备列表，
  *      每次刷新整体替换掉"非连接中"的条目；
- *   2. **连接态**（connect/disconnect/心跳）——由引擎 `device.*` 通知驱动，
- *      第 2 块接入；现在用定时器模拟连接过程。
+ *   2. **连接态**（connect/disconnect/截图恢复）——由引擎 `device.*` 通知驱动。
  *
  * 合并规则：**已连接/连接中的设备不被扫描结果覆盖**（它们有活的会话），
  * 其余全量替换。这样刷新不会把正在跑的设备踢掉。
  */
 import { create } from 'zustand';
 
+import { androidAddress, isSecondaryAndroidDisplay } from '@/features/device/emulator-displays';
 import { type DeviceInfoPayload, listDevices } from '@/lib/rpc';
 import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
-
-export const MAX_ACTIVE_DEVICES = 4;
 
 /*
  * 白名单写成"穷举 Record"而不是数组：`DeviceKind` 里加了新来源（比如 ios、以后的 harmony），
@@ -27,7 +25,6 @@ const KINDS: Record<DeviceKind, true> = {
   emulator: true,
   windows: true,
   ios: true,
-  mock: true,
   remote: true,
 };
 const STATUSES: Record<DeviceStatus, true> = {
@@ -57,6 +54,8 @@ interface DeviceState {
   readonly scanErrors: readonly string[];
   readonly scanError: string | null;
   readonly lastScanAt: number | null;
+  /** 模拟器屏号枚举偶尔只返回主屏；移除活会话前要复核一次。 */
+  readonly missingDisplays: Readonly<Record<string, number>>;
   readonly scan: () => Promise<void>;
   readonly setActive: (id: string) => void;
   readonly connect: (id: string) => void;
@@ -70,6 +69,8 @@ interface DeviceState {
   ) => void;
   readonly failConnect: (id: string, error: string) => void;
   readonly disconnect: (id: string) => void;
+  /** 引擎重启后旧会话都没了，扫描前先去掉界面里的假「已连接」。 */
+  readonly resetConnections: () => void;
   readonly toggleGrid: () => void;
   readonly markWindowed: (id: string, windowed: boolean) => void;
 }
@@ -97,8 +98,21 @@ export function mergeScan(
   current: readonly DeviceRuntime[],
   incoming: readonly DeviceRuntime[],
   activeId: string,
+  removed: ReadonlySet<string> = new Set(),
+  retained: ReadonlySet<string> = new Set(),
 ): { devices: DeviceRuntime[]; activeId: string } {
-  const live = current.filter((device) => device.status === 'connected' || device.status === 'connecting');
+  const scanned = new Map(incoming.map((device) => [device.id, device]));
+  const live = current
+    .filter(
+      (device) =>
+        (device.status === 'connected' || device.status === 'connecting' || retained.has(device.id)) &&
+        !removed.has(device.id),
+    )
+    .map((device) => {
+      const fresh = scanned.get(device.id);
+      // 逻辑屏号会重排，但物理 id 不变；保留会话态，更新屏号/URI/窗口名。
+      return fresh ? { ...device, name: fresh.name, uri: fresh.uri } : device;
+    });
   const liveIds = new Set(live.map((device) => device.id));
   const devices = [...live, ...incoming.filter((device) => !liveIds.has(device.id))];
   const stillThere = devices.some((device) => device.id === activeId);
@@ -108,11 +122,33 @@ export function mergeScan(
   return { devices, activeId: nextActive };
 }
 
+/** 同一台模拟器仍可扫描到，但某块附屏的物理 id 消失：它已被关闭，不能保留旧连接。 */
+export function vanishedEmulatorDisplays(
+  current: readonly DeviceRuntime[],
+  incoming: readonly DeviceRuntime[],
+): DeviceRuntime[] {
+  const seen = new Set(incoming.map((device) => device.id));
+  const emulatorSerials = new Set(
+    incoming
+      .filter((device) => device.kind === 'emulator')
+      .map((device) => androidAddress(device.uri))
+      .filter((address) => address?.display === 0)
+      .map((address) => address?.serial),
+  );
+  return current.filter((device) => {
+    if (!isSecondaryAndroidDisplay(device) || seen.has(device.id)) {
+      return false;
+    }
+    const address = androidAddress(device.uri);
+    return Boolean(address && emulatorSerials.has(address.serial));
+  });
+}
+
 function patch(list: readonly DeviceRuntime[], id: string, value: Partial<DeviceRuntime>): DeviceRuntime[] {
   return list.map((device) => (device.id === id ? { ...device, ...value } : device));
 }
 
-export const useDeviceStore = create<DeviceState>()((set) => ({
+export const useDeviceStore = create<DeviceState>()((set, get) => ({
   devices: [],
   activeId: '',
   gridView: false,
@@ -120,21 +156,76 @@ export const useDeviceStore = create<DeviceState>()((set) => ({
   scanErrors: [],
   scanError: null,
   lastScanAt: null,
+  missingDisplays: {},
 
   scan: async () => {
+    if (get().scanState === 'scanning') return;
     set({ scanState: 'scanning', scanError: null });
     try {
-      const result = await listDevices(true);
+      let result = await listDevices(true);
+      const initial = get().devices;
+      const androidFailed = result.errors.some((error) => error.provider === 'android');
+      const firstMissing = androidFailed
+        ? []
+        : vanishedEmulatorDisplays(initial, result.devices.map(toRuntimeDevice));
+      const confirmed = new Set<string>();
+      if (firstMissing.length > 0) {
+        // 一次 dumpsys 抖动不能把活会话踢掉；同一轮刷新里复核一次，
+        // 而不是要求用户手动点两次「刷新」才能移走确实关闭的黑屏槽位。
+        const checked = await listDevices(true);
+        if (checked.errors.some((error) => error.provider === 'android')) {
+          result = { ...result, errors: [...result.errors, ...checked.errors] };
+        } else {
+          result = checked;
+          const absent = new Set(
+            vanishedEmulatorDisplays(initial, checked.devices.map(toRuntimeDevice)).map((item) => item.id),
+          );
+          for (const item of firstMissing) {
+            if (absent.has(item.id)) confirmed.add(item.id);
+          }
+        }
+      }
+      const incoming = result.devices.map(toRuntimeDevice);
+      const { useSessionStore } = await import('@/stores/session.store');
+      const ready = useSessionStore.getState().ready;
+      let vanished: DeviceRuntime[] = [];
       set((state) => {
-        const merged = mergeScan(state.devices, result.devices.map(toRuntimeDevice), state.activeId);
+        const missing = result.errors.some((error) => error.provider === 'android')
+          ? []
+          : vanishedEmulatorDisplays(state.devices, incoming);
+        const counts = Object.fromEntries(
+          missing.map((device) => [
+            device.id,
+            (state.missingDisplays[device.id] ?? 0) + (confirmed.has(device.id) ? 2 : 1),
+          ]),
+        );
+        vanished = missing.filter(
+          (device) =>
+            (counts[device.id] ?? 0) >= 2 &&
+            (device.status === 'connected' || device.status === 'connecting' || ready[device.id]),
+        );
+        const merged = mergeScan(
+          state.devices,
+          incoming,
+          state.activeId,
+          new Set(vanished.map((device) => device.id)),
+          new Set(Object.keys(ready).filter((id) => ready[id])),
+        );
         return {
           devices: merged.devices,
           activeId: merged.activeId,
           scanState: 'idle',
           scanErrors: result.errors.map((error) => `${error.provider}: ${error.message}`),
           lastScanAt: Date.now(),
+          missingDisplays: result.errors.some((error) => error.provider === 'android')
+            ? state.missingDisplays
+            : counts,
         };
       });
+      if (vanished.length > 0) {
+        // 两次独立扫描都确认缺席才停旧会话；本次「刷新」已完成两次复核。
+        await Promise.all(vanished.map((device) => useSessionStore.getState().disconnect(device.id)));
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ scanState: 'error', scanError: message });
@@ -184,7 +275,7 @@ export const useDeviceStore = create<DeviceState>()((set) => ({
         status: 'failed',
         fps: 0,
         error,
-        suggestedFix: '重新检测设备连接',
+        suggestedFix: '点「重试」重新连接；如果模拟器窗口已关闭，先刷新屏幕列表',
       }),
     })),
 
@@ -200,6 +291,19 @@ export const useDeviceStore = create<DeviceState>()((set) => ({
         activeId: state.activeId === id ? (stillConnected[0]?.id ?? id) : state.activeId,
       };
     }),
+
+  resetConnections: () =>
+    set((state) => ({
+      devices: state.devices.map((device) => ({
+        ...device,
+        status: 'discovered' as const,
+        fps: 0,
+        windowed: false,
+        error: undefined,
+      })),
+      gridView: false,
+      missingDisplays: {},
+    })),
 
   toggleGrid: () => set((state) => ({ gridView: !state.gridView })),
 

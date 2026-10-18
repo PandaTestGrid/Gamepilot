@@ -3,7 +3,7 @@
  *
  * 这里 mock 掉 Tauri 的 invoke（也就是 RPC 出口），验三件事：
  *   1. **方法名与参数**是否就是契约里的那套（`workflow.*` 只碰工作流，`workspace.add` 带名字）；
- *   2. 树/列表/回收站路径都进了 store（面板与树直接渲染它们）；
+ *   2. 树/列表都进了 store（面板与树直接渲染它们）；
  *   3. 引擎返回脏数据（`{}`、少字段）时收窄成空，不让界面崩在 `.length` 上。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkflowSummary } from '@/lib/rpc';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
+import { useUiStore } from '@/stores/ui.store';
 
 /** engine_rpc 的调用形状（method + params）；其它命令（dev_log 等）不关心参数。 */
 type RpcCall = { method?: string; params?: Record<string, unknown> };
@@ -49,9 +50,9 @@ function calls(method: string): Record<string, unknown>[] {
 }
 
 /** 引擎侧写完之后界面"回显当前工作流"这一步（真实实现会发 project.get 并重拉各设备状态图）。 */
-const applyProjectChange = vi.fn((): Promise<void> => {
+const syncCurrentWorkflow = vi.fn((): Promise<void> => {
   useSessionStore.setState({
-    project: { root: CURRENT, graphPath: '', nodes: 3, edges: 2, recognizers: 4, templates: 5 },
+    currentWorkflow: { root: CURRENT, graphPath: '', nodes: 3, edges: 2, recognizers: 4, templates: 5 },
   });
   return Promise.resolve();
 });
@@ -70,22 +71,21 @@ describe('工作区 store（v4）', () => {
       }
       return next.error ? Promise.reject(new Error(next.error)) : Promise.resolve(next.result);
     });
-    applyProjectChange.mockClear();
+    syncCurrentWorkflow.mockClear();
 
     useLibraryStore.setState({
       workspaceRoot: '',
       workflows: [],
       workspaces: [],
       recommendedWorkspace: '',
-      trashRoot: '',
       loading: false,
       error: null,
     });
     useSessionStore.setState({
-      project: { root: CURRENT, graphPath: '', nodes: 3, edges: 2, recognizers: 4, templates: 5 },
+      currentWorkflow: { root: CURRENT, graphPath: '', nodes: 3, edges: 2, recognizers: 4, templates: 5 },
       error: null,
       ready: {},
-      applyProjectChange,
+      syncCurrentWorkflow,
     } as never);
   });
 
@@ -109,6 +109,13 @@ describe('工作区 store（v4）', () => {
     expect(useLibraryStore.getState().workspaceRoot).toBe('');
   });
 
+  it('没有工作区或工作流时 reconcile 会清掉 localStorage 里的历史 Tab', () => {
+    useUiStore.setState({ openWorkflowTabs: [`${WS}/asdasd`] });
+    useLibraryStore.setState({ workspaces: [], workflows: [], workspaceRoot: '' });
+    useLibraryStore.getState().reconcileOpenWorkflowTabs();
+    expect(useUiStore.getState().openWorkflowTabs).toEqual([]);
+  });
+
   it('刷新失败：错误留在面板里，不抛给调用方', async () => {
     reply('workspace.tree', null, '引擎未启动');
     await useLibraryStore.getState().refresh();
@@ -125,8 +132,8 @@ describe('工作区 store（v4）', () => {
 
     expect(ok).toBe(true);
     expect(calls('workflow.create')).toEqual([{ name: '签到' }]);
-    // 引擎侧已经切好工作流：界面回显（applyProjectChange）+ 重拉树
-    expect(applyProjectChange).toHaveBeenCalled();
+    // 引擎侧已经切好工作流：界面回显（syncCurrentWorkflow）+ 重拉树
+    expect(syncCurrentWorkflow).toHaveBeenCalled();
     expect(calls('workspace.tree')).toHaveLength(1);
     expect(useLibraryStore.getState().workflows).toHaveLength(2);
   });
@@ -134,7 +141,7 @@ describe('工作区 store（v4）', () => {
   it('改名 / 复制 / 删除工作流：走 workflow.*，参数是 { dir, name? } / { dir }', async () => {
     reply('workflow.rename', { root: 'x', current: 'x', items: WORKFLOWS });
     reply('workflow.duplicate', { created: 'x', current: 'x', items: WORKFLOWS });
-    reply('workflow.delete', { trashed: 'x', current: 'x', items: WORKFLOWS });
+    reply('workflow.delete', { removed: 'x', current: 'x', items: WORKFLOWS });
     reply('workspace.tree', TREE);
 
     expect(await useLibraryStore.getState().renameWorkflow(CURRENT, '斗技2')).toBe(true);
@@ -155,11 +162,10 @@ describe('工作区 store（v4）', () => {
     expect(calls('workflow.duplicate')).toEqual([{ dir: CURRENT }]);
   });
 
-  it('工作区列表：workspace.list 的 active/recommended/trashRoot/items 都进 store；脏数据降级成空', async () => {
+  it('工作区列表：workspace.list 的 active/recommended/items 都进 store；脏数据降级成空', async () => {
     reply('workspace.list', {
       active: WS,
       recommended: '/repo/workspaces/默认',
-      trashRoot: '/config/gamepilot/.trash',
       items: [
         { name: '我的工作区', root: WS, active: true, exists: true },
         { name: 'game-b', root: '/w/game-b', active: false, exists: false },
@@ -171,12 +177,10 @@ describe('工作区 store（v4）', () => {
     expect(state.workspaces.map((item) => item.name)).toEqual(['我的工作区', 'game-b']);
     expect(state.workspaces[1]?.exists).toBe(false);
     expect(state.recommendedWorkspace).toBe('/repo/workspaces/默认');
-    expect(state.trashRoot).toBe('/config/gamepilot/.trash');
 
     reply('workspace.list', {});
     await useLibraryStore.getState().refreshWorkspaces();
     expect(useLibraryStore.getState().workspaces).toEqual([]);
-    expect(useLibraryStore.getState().trashRoot).toBe('');
   });
 
   it('添加工作区：workspace.add { dir, name, create }；用返回的树切换当前工作区并刷新列表', async () => {
@@ -186,13 +190,11 @@ describe('工作区 store（v4）', () => {
       name: '我的第二个工作区',
       current: '',
       tree: treeB,
-      trashRoot: '/config/.trash',
       items: [{ name: '我的第二个工作区', root: '/w/game-b', active: true, exists: true }],
     });
     reply('workspace.list', {
       active: '/w/game-b',
       recommended: '/repo/workspaces/默认',
-      trashRoot: '/config/.trash',
       items: [{ name: '我的第二个工作区', root: '/w/game-b', active: true, exists: true }],
     });
 
@@ -203,7 +205,7 @@ describe('工作区 store（v4）', () => {
     expect(useLibraryStore.getState().workflows).toEqual([]);
     expect(useLibraryStore.getState().workspaces.map((item) => item.name)).toEqual(['我的第二个工作区']);
     // 切了工作区 = 当前工作流也换了：会话层要回显
-    expect(applyProjectChange).toHaveBeenCalled();
+    expect(syncCurrentWorkflow).toHaveBeenCalled();
   });
 
   it('添加工作区不传名字：只发 dir + create（引擎退回目录名）', async () => {
@@ -229,11 +231,10 @@ describe('工作区 store（v4）', () => {
       active: null,
       current: '',
       tree: { root: '', workflows: [] },
-      trashRoot: '/config/.trash',
-      trashed: '/config/.trash/game-b-1',
+      removed: '/w/game-b',
       items: [],
     });
-    reply('workspace.list', { active: null, recommended: '/repo/workspaces/默认', trashRoot: '', items: [] });
+    reply('workspace.list', { active: null, recommended: '/repo/workspaces/默认', items: [] });
 
     expect(await useLibraryStore.getState().removeWorkspace('/w/game-b', true)).toBe(true);
 
@@ -247,14 +248,12 @@ describe('工作区 store（v4）', () => {
       active: WS,
       current: CURRENT,
       tree: TREE,
-      trashRoot: '/config/.trash',
-      trashed: '',
+      removed: '',
       items: [{ name: '我的工作区', root: WS, active: true, exists: true }],
     });
     reply('workspace.list', {
       active: WS,
       recommended: '/repo/workspaces/默认',
-      trashRoot: '/config/.trash',
       items: [{ name: '我的工作区', root: WS, active: true, exists: true }],
     });
 

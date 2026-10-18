@@ -17,7 +17,11 @@
 > 3. **点工作区名字 = 切过去**（v4 的「打开」按钮删除）；**行尾的 ＋ = 在这个工作区里新建会话 = 一张状态图**。
 >    ＋ **先弹输入框让你起名**，提交了才建（这一条 v4 本来就是对的：
 >    期间试过"点一下自动命名『新会话』"，用户当场否掉 —— "一点后让用户输入名字不行么"）。
-> 这份文件是唯一事实来源；v1–v3 里没被 v4 改到的（单一 `.trash` 语义、可恢复删除、禁止 `window.prompt`、
+> 4. **删除改成真删除**（2026-10-12）：不再有 `.trash` / 全局回收站 —— `workflow.delete` 与
+>    `workspace.remove { deleteFiles: true }` 直接删目录；响应字段 `trashed` → `removed`，
+>    `workspace.list/add/remove` 去掉 `trashRoot`（`PROTOCOL_VERSION = 2`）。
+>    界面用**行内二次确认**兜风险，确认文案必须写明"删除后不可恢复"。
+> 这份文件是唯一事实来源；v1–v3 里没被 v4 改到的（禁止 `window.prompt`、
 > 配置持久化、没有当前脚本是一等状态）继续有效。
 
 ## 0. 层级与词汇（最终版）
@@ -36,7 +40,6 @@
 
 ```
 <用户选的文件夹>/                 ← 工作区根
-├── .trash/                      ← 这个工作区里删掉的工作流（可恢复）
 ├── 斗技/                         ← 工作流 = 一张流程图
 │   ├── graph.json
 │   └── templates/
@@ -45,7 +48,7 @@
 ```
 
 - **接入一个空文件夹时什么都不建**（连「默认项目」也不建了）。完全空着，等用户「＋工作流」。
-- 工作流 = 含 `graph.json` 的**直接子目录**；隐藏目录（`.` 开头，含 `.trash`）不算工作流。
+- 工作流 = 含 `graph.json` 的**直接子目录**；隐藏目录（`.` 开头，老版本留下的 `.trash` 也在这类里）不算工作流。
 - 配置持久化不变（v3 §1）：`config.json` 里 `{ active, workspaces }`，按最近使用排序，
   `GAMEPILOT_CONFIG_DIR` 换配置目录，`GAMEPILOT_WORKSPACE_DIR` 覆盖 active 且跳过配置读写。
   **v4 追加 `names`**（工作区显示名要活过重启，而空文件夹里不能放任何文件）：
@@ -60,7 +63,6 @@
 
   `names` 缺失/没有对应项 → 退化成 `basename(root)`；老配置（没有 `names`）必须能正常加载。
   `workspaces` 仍是**绝对路径数组**（顺序 = 最近使用），不是对象数组。
-- 全局回收站仍是 `<配置目录>/.trash/`（删整个工作区时才用）。
 
 ## 2. RPC 契约
 
@@ -68,10 +70,10 @@
 
 | 方法 | 参数 | 返回 |
 |---|---|---|
-| `workspace.list` | `{}` | `{ active, recommended, trashRoot, items: [{ name, root, active, exists }] }` |
-| `workspace.add` | `{ dir, name?, create? }` | `{ root, name, tree, current, items, trashRoot }` |
-| `workspace.remove` | `{ dir, deleteFiles? }` | `{ active, items, tree, current, trashed, trashRoot }` |
-| `workspace.tree` | `{}` | `{ root, workflows: [{ name, root, nodes, edges, recognizers, templates, modified }] }` |
+| `workspace.list` | `{}` | `{ active, recommended, items: [{ name, root, active, exists }] }` |
+| `workspace.add` | `{ dir, name?, create? }` | `{ root, name, tree, current, items }` |
+| `workspace.remove` | `{ dir, deleteFiles? }` | `{ active, items, tree, current, removed }` |
+| `workspace.tree` | `{}` | `{ root, workflows: [{ name, root, nodes, edges, recognizers, templates, modified, trigger }] }` |
 
 - **`workspace.add` 新增 `name?`**：用户在界面上输的名字。省略/空白时退化成 `basename(dir)`。
   - `name` 只是**列表里显示的名字**，不要求等于目录名（目录名不能被随便改）；重名时在列表里允许，
@@ -80,9 +82,9 @@
   - `create` 默认 `true`（目录不存在就建）；`create: false` 且不存在 → 报「工作区目录不存在: <路径>」。
   - 只接受绝对路径或 `~` 开头（相对路径报错）。
   - **不建任何目录内容**（空文件夹保持空着）。
-- `workspace.remove`：`deleteFiles: true`（默认）→ 整个目录移到全局回收站，回 `trashed`；`false` → 只移出列表，
-  `trashed` 回空串。移掉当前 → 切列表里下一个还存在的；列表空了 → `active: null`。
-- `trashRoot` / `recommended` 同 v3。
+- `workspace.remove`：`deleteFiles: true`（默认）→ 整个目录**真删除**（`shutil.rmtree`），回 `removed`；`false` → 只移出列表，
+  `removed` 回空串。移掉当前 → 切列表里下一个还存在的；列表空了 → `active: null`。
+- `recommended` 同 v3；`trashRoot` 已随回收站一起去掉。
 
 ### 2.2 工作流层（**由 `script.*` 改名而来**）
 
@@ -91,7 +93,7 @@
 | `workflow.create` | `{ name }` | `{ created, current, items }` |
 | `workflow.rename` | `{ dir, name }` | `{ root, current, items }` |
 | `workflow.duplicate` | `{ dir, name? }` | `{ created, current, items }` |
-| `workflow.delete` | `{ dir }` | `{ trashed, current, items }` |
+| `workflow.delete` | `{ dir }` | `{ removed, current, items }` |
 
 - **`name` 必填**（`workflow.create`）：界面会弹输入框；省略时报「缺少参数 name」。
   `duplicate` 的 `name` 可省（自动「<原名>-副本」）。
@@ -108,7 +110,8 @@
 
 ```json
 { "name": "斗技", "root": "/abs/path", "nodes": 3, "edges": 2,
-  "recognizers": 4, "templates": 5, "modified": 1760000000 }
+  "recognizers": 4, "templates": 5, "modified": 1760000000,
+  "trigger": { "type": "schedule", "params": { "at": "09:00" } } }
 ```
 
 `modified` = `max(graph.json mtime, 工作流目录 mtime)` 的 epoch 秒（面板显示「10 分钟」用）。
@@ -167,8 +170,8 @@
   一次拖多个就逐个登记，最后一个成为当前）。拖动中侧栏顶部显示「松手就把它添加为工作区」。
 - 点工作区名字 → `workspace.add { dir, name }`（幂等，沿用已知名字）→ 列表刷新、当前会话跟着换。
 - 搜索：按名字过滤工作区 + 工作流。
-- 设置（⚙）：移除当前工作区两个选项（移到回收站 / 只从列表移除），**行内二次确认**，
-  文案要显示 `trashRoot` 实际路径，**禁止"永久删除"**。
+- 设置（⚙）：移除当前工作区两个选项（**删除** / 只从列表移除），**行内二次确认**，
+  真删那条的确认文案必须写明"删除后不可恢复"。
 - `exists: false` 的工作区灰掉 + 标「目录不存在」+ 提供「从列表移除」。
 - **一个工作区都没有**时：区域里一个主按钮「＋ 添加工作区」。（以前还有个「用默认工作区」次按钮，已删）
 
@@ -198,8 +201,8 @@
      （不许出现 `默认项目/`、不许有 `graph.json`），列表里名字是「我的工作区」而不是目录名
    - 同目录再 add 一次 + 新名字 → 幂等且名字被更新
    - `workflow.create { name: "斗技" }` → `<工作区>/斗技/graph.json` 出现并切过去
-   - 再来一个 + 切换 + 改名 + 复制 + 删（校验 `.trash/`）
-   - `workspace.remove { deleteFiles: true }` → 目录进全局回收站
+   - 再来一个 + 切换 + 改名 + 复制 + 删（校验目录真的没了）
+   - `workspace.remove { deleteFiles: true }` → 目录真的被删掉
    - **重启进程** → 列表、名字、active、当前工作流都记得
    - 删掉最后一个工作流 → `project.get` 的 `root` 是空串，不崩
 5. 界面文案里不再出现"项目"当层级名（`README.md`、`docs/rpc.md` 同步）。

@@ -10,6 +10,7 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 
 import { ToolbarButton } from '@/layout/PanelShell';
 import { applyLayoutPreset, LAYOUT_PRESETS, resetLayouts } from '@/layout/layout-specs';
+import { useUiStore } from '@/stores/ui.store';
 
 export function LayoutMenu(): ReactNode {
   const [open, setOpen] = useState(false);
@@ -56,7 +57,11 @@ export function LayoutMenu(): ReactNode {
             <button
               key={preset.id}
               type="button"
-              onClick={() => applyLayoutPreset(preset)}
+              onClick={() => {
+                useUiStore.getState().setLeftPaneOpen(true);
+                useUiStore.getState().setRightPaneOpen(true);
+                applyLayoutPreset(preset);
+              }}
               className="flex w-full flex-col rounded-sm px-1.5 py-1 text-left hover:bg-raised"
               title={preset.note}
             >
@@ -70,6 +75,8 @@ export function LayoutMenu(): ReactNode {
           <button
             type="button"
             onClick={() => {
+              useUiStore.getState().setLeftPaneOpen(true);
+              useUiStore.getState().setRightPaneOpen(true);
               resetLayouts();
               setOpen(false);
             }}
@@ -80,7 +87,7 @@ export function LayoutMenu(): ReactNode {
           </button>
 
           <div className="px-1.5 py-1 text-badge text-faint">
-            左右拖栏与栏之间的竖线改宽度；上下拖栏内的横线改高度（画面/读数、事件/识别器、画布/编辑器）。
+            左右拖栏与栏之间的竖线改宽度；上下拖栏内的横线改高度（画面/素材区、事件/识别器、画布/编辑器）。
             双击横线或竖线 = 这一栏回到默认比例。
           </div>
         </div>

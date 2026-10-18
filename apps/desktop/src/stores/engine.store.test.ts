@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { REQUIRED_ENGINE_METHODS } from '@/lib/engine-methods';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEngineStore } from '@/stores/engine.store';
+import { PROTOCOL_VERSION } from '@/lib/rpc';
 import { useSessionStore } from '@/stores/session.store';
 
 const invoke = vi.fn((_cmd: string, _args?: Record<string, unknown>): Promise<unknown> =>
@@ -21,7 +22,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => undefined)) }));
 
-const START = { pong: true, version: '0.0.1', protocol: 1, ts: 0 };
+// 协议版本从 rpc.ts 拿：契约一升级，这里跟着走（别手写死数字）
+const START = { pong: true, version: '0.0.1', protocol: PROTOCOL_VERSION, ts: 0 };
 
 describe('引擎 store', () => {
   beforeEach(() => {
@@ -34,7 +36,7 @@ describe('引擎 store', () => {
       if (method === 'engine.info') {
         return Promise.resolve({
           version: '0.0.1',
-          protocol: 1,
+          protocol: PROTOCOL_VERSION,
           // 旧进程的方法表：只有项目当前值的读写（没有工作区层，也没有工作流层）
           methods: ['device.list', 'project.get', 'project.set'],
         });
@@ -72,7 +74,7 @@ describe('引擎 store', () => {
       if (args?.method === 'engine.info') {
         return Promise.resolve({
           version: '0.0.1',
-          protocol: 1,
+          protocol: PROTOCOL_VERSION,
           // 新进程 = 能力清单齐全（跟着 REQUIRED_ENGINE_METHODS 走，契约变了这里自动跟上）
           methods: [...REQUIRED_ENGINE_METHODS, 'device.list'],
         });
@@ -90,19 +92,41 @@ describe('引擎 store', () => {
 
   it('重启后设备/会话连接态复位（旧进程的 session 已经没了）', async () => {
     useSessionStore.setState({
-      ready: { 'mock:1': true },
-      frames: { 'mock:1': {} as never },
-      running: { 'mock:1': true },
+      ready: { 'android:1': true },
+      frames: { 'android:1': {} as never },
+      running: { 'android:1': true },
       error: '旧错误',
+    });
+
+    useDeviceStore.setState({
+      devices: [
+        {
+          id: 'android:1',
+          name: '测试机',
+          uri: 'Android:///?serial=1',
+          kind: 'android',
+          status: 'connected',
+          resolution: [640, 360],
+          fps: 10,
+        },
+      ],
+      activeId: 'android:1',
+      gridView: true,
     });
 
     await useEngineStore.getState().restart();
 
     const session = useSessionStore.getState();
+
     expect(session.ready).toEqual({});
     expect(session.frames).toEqual({});
     expect(session.running).toEqual({});
     expect(session.error).toBeNull();
+
+    // 旧进程里的设备会话已经没了：界面上的「已连接」与多开网格必须一起复位
+    const device = useDeviceStore.getState().devices.find((item) => item.id === 'android:1');
+    expect(device?.status).toBe('discovered');
+    expect(useDeviceStore.getState().gridView).toBe(false);
   });
 
   it('重启失败：状态置 error 且把原因写进 info（不静默）', async () => {

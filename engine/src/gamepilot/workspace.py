@@ -3,7 +3,6 @@
 契约 docs/WORKSPACE-CONTRACT.md v4 §1：
 
     <用户选的文件夹>/                 ← 工作区根（任意绝对路径，支持 `~`）
-    ├── .trash/                      ← 这个工作区里删掉的工作流（可恢复）
     ├── 斗技/                         ← 工作流 = 一张状态图（graph.json + templates/）
     └── 御魂/
 
@@ -11,7 +10,8 @@
 - **接入一个空文件夹时什么都不建**（完全空着，等用户「＋工作流」）；
 - "没有当前工作区 / 没有当前工作流"是一等状态 —— 工作区根用空串表示，绝不伪造磁盘上不存在的路径，
   也绝不偷偷建目录；
-- 删整个工作区 → 全局回收站 `<配置目录>/.trash/`（可恢复）；工作区里的工作流 → 该工作区的 `.trash/`。
+- 删除一律是**真删除**（工作流；以及 `delete_files: true` 的整个工作区），删了就没了 ——
+  不可恢复，所以界面必须二次确认。
 
 本模块是**纯文件系统 + 列表状态逻辑**，不认识 RPC、不碰 stdout。
 """
@@ -27,7 +27,6 @@ from . import config, library
 
 WORKSPACE_NAME = "默认"
 WORKSPACE_ROOT = "workspaces"
-TRASH_DIR = ".trash"
 WORKSPACE_DIR_ENV = config.WORKSPACE_DIR_ENV
 
 
@@ -61,18 +60,8 @@ def workspace_root(base: str | None = None) -> str:
     return _abs(base) if base else active_root()
 
 
-def global_trash_root() -> str:
-    """全局回收站（删整个工作区时用）：`<配置目录>/.trash`。"""
-    return config.global_trash_root()
-
-
-def trash_root(base: str | None = None) -> str:
-    """某个工作区的回收站：`<工作区根>/.trash`（工作流删了都进这里）。"""
-    return os.path.join(workspace_root(base), TRASH_DIR)
-
-
 def subdir_names(path: str) -> list[str]:
-    """目录下已占用的子目录名（按名字排序，跳过隐藏目录 —— 包含 `.trash`）。"""
+    """目录下已占用的子目录名（按名字排序，跳过隐藏目录 —— 老版本留下的 `.trash` 也在这类里）。"""
     if not os.path.isdir(path):
         return []
     with os.scandir(path) as entries:
@@ -133,17 +122,15 @@ def normalize_dir(directory: str) -> str:
 
 
 def delete_workflow(root: str) -> str:
-    """把一个工作流移进**它所属工作区**的 `.trash/`，返回回收站路径。
+    """**真删除**一个工作流目录，返回被删掉的路径（不可恢复）。
 
-    工作流是工作区根的直接子目录，所以回收站就是它父目录下的 `.trash/` —— 无论当前工作区
-    是哪一个，删除物都落在**它自己的工作区**里。层级护栏：必须真的含 `graph.json`，
-    传工作区根本身（或别的目录）过来会报「工作流目录不存在」。**不做真删除。**
+    层级护栏：必须真的含 `graph.json`，传工作区根本身（或别的目录）过来会报
+    「工作流目录不存在」—— 免得手滑把整个工作区删掉。
     """
     source = _abs(root)
     if not os.path.isfile(os.path.join(source, library.GRAPH_FILE)):
         raise ValueError(f"工作流目录不存在: {source}")
-    trash = os.path.join(os.path.dirname(source), TRASH_DIR)
-    return library.trash_into(source, trash, "工作流目录")
+    return library.remove_dir(source, "工作流目录")
 
 
 @dataclass(frozen=True)
@@ -151,7 +138,7 @@ class Removal:
     """移除一个工作区之后的状态（给 RPC 层切当前工作流用）。"""
 
     root: str
-    trashed: str | None
+    removed: str | None
     was_active: bool
 
 
@@ -201,7 +188,7 @@ class Workspaces:
     def remove(self, directory: str, *, delete_files: bool = True) -> Removal:
         """把一个工作区从列表里移除。
 
-        - `delete_files`（默认 True）→ 整个目录**移到全局回收站**（可恢复，不是真删除）；
+        - `delete_files`（默认 True）→ 整个目录**真删除**（`shutil.rmtree`，不可恢复）；
         - `delete_files=False` → 只从列表移除，磁盘一个字节不动；
         - 不在列表里 → 报错「没有这个工作区: <路径>」，不猜。
         """
@@ -211,11 +198,11 @@ class Workspaces:
         if match is None:
             raise ValueError(f"没有这个工作区: {root}")
         was_active = current.active is not None and _same_path(current.active, match)
-        trashed: str | None = None
+        removed: str | None = None
         if delete_files and os.path.isdir(match):
-            trashed = library.trash_into(match, config.global_trash_root(), "工作区目录")
+            removed = library.remove_dir(match, "工作区目录")
         config.save(config.without_workspace(current, match))
-        return Removal(root=match, trashed=trashed, was_active=was_active)
+        return Removal(root=match, removed=removed, was_active=was_active)
 
     def next_existing(self) -> str | None:
         """列表里下一个还存在的工作区（移除当前工作区之后切过去用）；没有就 None。"""
@@ -241,7 +228,6 @@ def _entry(root: str, cfg: config.Config) -> dict[str, Any]:
 
 
 __all__ = [
-    "TRASH_DIR",
     "WORKSPACE_DIR_ENV",
     "WORKSPACE_NAME",
     "WORKSPACE_ROOT",
@@ -251,13 +237,11 @@ __all__ = [
     "auto_name",
     "delete_workflow",
     "first_workflow",
-    "global_trash_root",
     "list_workflows",
     "normalize_dir",
     "recommended_root",
     "repo_root",
     "subdir_names",
-    "trash_root",
     "tree",
     "workspace_root",
 ]

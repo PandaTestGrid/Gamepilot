@@ -12,7 +12,7 @@ export default defineConfig({
   // Tauri 的约定：固定端口，且不要把 Rust 源码纳入前端热更新
   clearScreen: false,
   server: {
-    port: 5173,
+    port: 30110,
     strictPort: true,
     watch: { ignored: ['**/src-tauri/**'] },
   },

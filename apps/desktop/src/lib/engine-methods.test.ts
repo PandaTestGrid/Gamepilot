@@ -32,10 +32,11 @@ describe('引擎能力校验', () => {
       'workflow.rename',
       'workflow.delete',
       'workflow.duplicate',
+      'recognizer.search',
     ]);
   });
 
-  it('能力清单就是 v4 这八个方法（老的层级名不该再出现）', () => {
+  it('能力清单 = v4 八个方法 + recognizer.search（老的层级名不该再出现）', () => {
     expect([...REQUIRED_ENGINE_METHODS]).toEqual([
       'workspace.tree',
       'workspace.list',
@@ -45,6 +46,7 @@ describe('引擎能力校验', () => {
       'workflow.rename',
       'workflow.delete',
       'workflow.duplicate',
+      'recognizer.search',
     ]);
   });
 

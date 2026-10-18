@@ -195,7 +195,11 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 
 ### 5.1 RPC 契约
 
-- 契约源在 `engine/src/gamepilot/protocol.py`，人读版在 `docs/rpc.md`，前端类型在 `apps/desktop/src/lib/rpc.ts`——**三处必须同步**。
+- 契约源在 `engine/src/gamepilot/protocol.py`，人读版在 `docs/rpc.md`，前端调用在 `apps/desktop/src/lib/rpc.ts`，
+  握手兼容清单在 `apps/desktop/src/lib/engine-methods.ts`——**四处必须同步**。
+- 同步不再靠人记：`engine/tests/test_contract.py` 断言「`METHOD_*` 常量 == `rpc/` 注册的 handler ==
+  `docs/rpc.md` 里出现的方法名 == 前端 `rpc('x')` 字面量」，还顺带守 `STEP_KINDS` ↔ `FLOW_STEP_TYPES`。
+  改接口时忘了同步文档或前端，`pytest` 直接红（新增方法必须先写 `protocol.py`）。
 - 变更分级：
 
 | 变更 | 是否破坏性 | 动作 |
@@ -305,7 +309,7 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 | 目的 | 命令 |
 |---|---|
 | 装前端依赖 | `pnpm install` |
-| 装引擎依赖 | `cd engine && uv sync` |
+| 装引擎依赖 | `cd engine && uv sync --extra ocr` |
 | 启动桌面 App（开发态） | `pnpm tauri dev` |
 | 只跑前端页面（浏览器） | `pnpm dev` |
 | 前端 lint / 类型 / 测试 / 构建 | `pnpm lint` / `pnpm typecheck` / `pnpm test` / `pnpm build` |
@@ -338,11 +342,7 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 
 ### 11.3 加一个 RPC 方法
 
-> 补两条真踩过的：
-> 1. **界面依赖的方法名要登记**到 `apps/desktop/src/lib/engine-methods.ts` 的清单里 ——
->    引擎是独立进程，用户的应用里很可能还跑着旧进程；有这张表才能在顶栏提示「引擎旧进程 · 重启」，
->    而不是丢一个 `-32601 未知方法` 给用户。
-> 2. 方法实现放在**按域拆分的模块**里（`rpc/devices.py`、`rpc/projects.py`…），不要再往 `rpc/session.py` 里堆。
+> 新增 RPC：在 `engine-methods.ts` 登记前端依赖的方法名；实现放在 `rpc/` 分域模块，勿堆进 `session.py`。
 
 1. `engine/src/gamepilot/rpc/` 注册 handler（`RpcServer.method` 装饰器）。
 2. 常量加到 `protocol.py`（方法名、通知名）。
@@ -387,7 +387,7 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 同时界面必须用 `device.stream` 告诉引擎"这台设备我看多少帧"（0 = 停推）：
 单画面 10fps、多开每台 4~6fps、窗口不可见 0fps。不做这件事，多设备必然卡。
 
-## 12.6 布局陷阱（都真实踩过，改 UI 时注意）
+## 12.6 布局陷阱（改 UI 时注意）
 
 1. **`<button>` 有 `align-items: center` 的浏览器默认样式**。
    如果按钮里是"只有绝对定位内容"的容器，它的内容宽度是 0，居中布局下会被压成 **0 宽**：

@@ -32,10 +32,6 @@ class Condition:
     # 总是成立（录制出来的一步：不依赖任何识别器，进节点就做）
     always: bool = False
 
-    # ---------------------------------------------------------------- #
-    # 解析 / 序列化
-    # ---------------------------------------------------------------- #
-
     @classmethod
     def parse(cls, spec: object, *, fallback: str | None = None) -> Condition:
         """从 graph.json 的 ``condition`` 字段解析；没有就和 ``when`` 等价。"""
@@ -104,10 +100,6 @@ class Condition:
         if self.within_ms:
             out["within_ms"] = self.within_ms
         return out
-
-    # ---------------------------------------------------------------- #
-    # 求值
-    # ---------------------------------------------------------------- #
 
     @property
     def labels(self) -> tuple[str, ...]:

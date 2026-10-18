@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { toActionPayload, toConditionPayload, toGraphData } from '@/lib/graph-adapter';
+import { toGraphData } from '@/lib/graph-adapter';
 import type { GraphPayload } from '@/lib/rpc';
 
 const payload: GraphPayload = {
@@ -9,6 +9,13 @@ const payload: GraphPayload = {
   recognizers: {
     main_start: { type: 'template', template: 'main_start.png', threshold: 0.82 },
     popup: { type: 'color', target_bgr: [10, 20, 30], threshold: 0.9 },
+    popup_ok: {
+      type: 'template',
+      template: 'popup_ok.png',
+      threshold: 0.88,
+      roi: [0.3, 0.4, 0.4, 0.2],
+      search: 'full',
+    },
   },
   nodes: [
     { id: 'main', name: '主界面', enter: ['main_start'] },
@@ -64,46 +71,15 @@ describe('graph.json → 界面模型', () => {
     expect(color?.type).toBe('color');
     expect(color?.template).toBeUndefined();
   });
-});
 
-describe('界面模型 → graph.json', () => {
-  it('默认条件（只有 when）不写进文件，保持 graph.json 干净', () => {
-    const spec = toConditionPayload(
-      { allOf: ['main_start'], anyOf: [], noneOf: [], minScore: 0, withinMs: 0 },
-      'main_start',
-    );
-    expect(spec).toBeUndefined();
-  });
+  it('搜索范围：缺省 region、显式 full 保留；没写 roi 映射成全屏而不是 0×0', () => {
+    const plain = graph.recognizers.find((item) => item.label === 'main_start');
+    expect(plain?.search).toBe('region');
+    // 没写 roi = 引擎整帧搜索；界面不能显示成 0 宽高
+    expect(plain?.roi).toEqual([0, 0, 1, 1]);
 
-  it('多标签/门槛/限时都写进去', () => {
-    const spec = toConditionPayload(
-      { allOf: ['main_start', 'other'], anyOf: ['a'], noneOf: ['popup'], minScore: 0.8, withinMs: 2000 },
-      'main_start',
-    );
-    expect(spec).toEqual({
-      all_of: ['other'],
-      any_of: ['a'],
-      none_of: ['popup'],
-      min_score: 0.8,
-      within_ms: 2000,
-    });
-  });
-
-  it('动作按类型只写必要字段', () => {
-    expect(toActionPayload({ type: 'wait', seconds: 1.5 })).toEqual({ type: 'wait', seconds: 1.5 });
-    expect(toActionPayload({ type: 'key', value: 'back' })).toEqual({ type: 'key', value: 'back' });
-    expect(toActionPayload({ type: 'click', target: 'a', durationMs: 200 })).toEqual({
-      type: 'click',
-      target: 'a',
-      duration_ms: 200,
-    });
-    expect(toActionPayload({ type: 'swipe', x: 0.5, y: 0.9, toX: 0.5, toY: 0.1, durationMs: 300 })).toEqual({
-      type: 'swipe',
-      x: 0.5,
-      y: 0.9,
-      to_x: 0.5,
-      to_y: 0.1,
-      duration_ms: 300,
-    });
+    const full = graph.recognizers.find((item) => item.label === 'popup_ok');
+    expect(full?.search).toBe('full');
+    expect(full?.roi).toEqual([0.3, 0.4, 0.4, 0.2]);
   });
 });

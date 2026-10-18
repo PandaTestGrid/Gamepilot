@@ -1,45 +1,28 @@
-"""iOS 设备支持（**仅 iOS ≥ 17.4**）。
+"""iOS ≥ 17.4：RSD 隧道 + DVT 截图；CoreDevice HID 触摸/按键/键盘。
 
-采集：pymobiledevice3 用户态 RSD 隧道 + **DVT 截图循环**（实测 iPhone 15 Pro Max / iOS 26.6.2：
-128ms/张 ≈ 7.8fps、2796x1290；和 adb screencap 一个量级，对模板匹配足够）。
-
-控制：同一条隧道上的 CoreDevice HID
-- 触摸：`UniversalHIDServiceService.send_touchscreen(CONTACT/RELEASE, x, y)`，坐标 0..65535
-- 按键：`IndigoHIDService.send_button(usage_page, usage_code, DOWN/UP)`
-- 文本：`create_keyboard_service()` + `send_keyboard()`
-
-**为什么不是 QuickTime**（实测结论，别再走弯路）：
-
-1. macOS 上 ffmpeg/avfoundation **看不到** iOS 屏幕采集设备 —— 它属于 Continuity/External
-   类型，进程没有 `NSCameraUseContinuityCameraDeviceType` 声明就会被系统隐藏；
-   配置 1~6 全试过都不出现（ffmpeg 自己也警告这个 key）。
-2. pymobiledevice3 的隧道投屏（`DisplayService.startmediastream`）在 iOS 26 上直接报
-   "Remote control requires iOS 27.0 or later"。
-3. pymobiledevice3 的 HID 文档提到"触摸注入需要媒体流在跑"，但实测 **iOS 26.6.2 上不需要**
-   （UniversalHIDService 连上就能注入，触摸/按键都生效）。
-
-**USB 配置的真相**（用 pyusb 测绘了 6 套配置，见 `ios_usb.py`）：
-把设备切到配置 2 之后 **usbmux 通路会消失**（配置 2 只有 PTP + 音频 + HID），
-所以"QuickTime 独占设备、别的连不上"就是这么来的。正常数据通路在配置 6（11 条接口），
-本实现**不切配置**；`ios_usb.survey()` 只做诊断。
-
-`UserspaceRsdTunnel` 是**进程级单例**，一个进程同时只能带一台 iOS 设备（多台要拆进程）。
+不用 QuickTime/ffmpeg 采集（macOS 无 Continuity 声明时不可见；iOS 26 上隧道投屏需 27+）。
+不切 USB 配置（配置 2 会断 usbmux）。`UserspaceRsdTunnel` 每进程一台设备。
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from ..core.bezier_trajectory import play_swipe_path, play_tap, resolve_swipe_points
 from . import ios_usb
 from .base import (
     KIND_ANDROID,
@@ -55,6 +38,119 @@ from .base import (
 logger = logging.getLogger("gamepilot.devices.ios")
 
 KIND_IOS = "ios"
+
+# 用户态隧道（PyTCP 的栈）是**进程级单例**：一个引擎进程同时只能带一台 iOS 设备（见模块 docstring）。
+# 这里记着"谁在用这个额度"，第二台在碰隧道**之前**就给出人话原因，而不是把 pymobiledevice3 的
+# 英文异常（a userspace tunnel is already active in this process）糊到界面上。
+_TUNNEL_SLOT: tuple[str, str] | None = None  # (udid, 显示名)
+_TUNNEL_SLOT_LOCK = threading.Lock()
+
+# 额度只是"许可证"：它不保证库那边的隧道真的拆掉了（start 超时/没出帧时最容易漏）。
+# `_LIVE_SESSION` 才是"谁真的握着 PyTCP 那条隧道"——下一次同设备连接要能先把它收掉。
+_LIVE_SESSION: TunnelSession | None = None
+_LIVE_LOCK = threading.Lock()
+
+# 建隧道/拆隧道一次只允许一个：pymobiledevice3 的单例检查在各自的事件循环里，
+# 跨会话（两套事件循环）没有互斥，必须由我们串起来。
+_TUNNEL_TRANSITION_LOCK = threading.RLock()
+
+
+def _active_tunnel_handle() -> Any:
+    """pymobiledevice3 眼里那条活着的隧道句柄（没导入过模块就说明不可能有）。"""
+    module = sys.modules.get("pymobiledevice3.remote.userspace_tunnel")
+    if module is None:
+        return None
+    return getattr(module, "_active_tunnel", None)
+
+
+def _userspace_tunnel_active() -> bool:
+    """以**库的实际状态**为准判断进程里还有没有用户态隧道。
+
+    不能只看 `_TUNNEL_SLOT`：额度在 `close()` 里已经还了、库里的单例却还挂着的时候，
+    下一次连接会绕过额度直接撞上英文异常。
+    """
+    module = sys.modules.get("pymobiledevice3.remote.userspace_tunnel")
+    if module is None:
+        return False
+    return _active_tunnel_handle() is not None or bool(getattr(module, "USERSPACE_ACTIVE", False))
+
+
+def _wait_userspace_released(timeout: float) -> bool:
+    """等库那边把隧道放掉（close 可能正把最后一个协程收尾）。"""
+    deadline = time.time() + timeout
+    while True:
+        if not _userspace_tunnel_active():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _stale_tunnel_message(name: str = "") -> str:
+    owner = f"「{name}」的" if name else "上一次"
+    return (
+        f"引擎进程里还留着{owner} iOS 用户态隧道没释放（一个进程同时只能有一条）。"
+        "先把设备断开、等一两秒再连；还不行就重启引擎"
+    )
+
+
+def _live_session() -> TunnelSession | None:
+    with _LIVE_LOCK:
+        return _LIVE_SESSION
+
+
+def _set_live_session(session: TunnelSession) -> TunnelSession | None:
+    """登记"现在谁握着隧道"，返回被顶掉的上一个会话。"""
+    global _LIVE_SESSION
+    with _LIVE_LOCK:
+        previous, _LIVE_SESSION = _LIVE_SESSION, session
+        return previous
+
+
+def _clear_live_session(session: TunnelSession) -> None:
+    global _LIVE_SESSION
+    with _LIVE_LOCK:
+        if _LIVE_SESSION is session:
+            _LIVE_SESSION = None
+
+
+def _friendly_tunnel_error(exc: BaseException) -> BaseException:
+    """库里那条单例异常翻成人话（最后一道兜底：前面的清理都失败时也不能直接糊英文）。"""
+    if "userspace tunnel is already active" not in str(exc):
+        return exc
+    # 原文留在日志里：界面上说人话，排障时还看得到是单例冲突
+    logger.warning("pymobiledevice3 用户态隧道单例冲突: %s", exc)
+    return RuntimeError(
+        "引擎进程里已经有一条 iOS 用户态隧道（一个进程同时只能带一台 iPhone）。"
+        "先把现在连着的 iPhone 断开，等一两秒再连这台；如果还报同样的错，重启引擎"
+    )
+
+
+def _claim_tunnel_slot(udid: str, name: str) -> None:
+    """占额度：被别的设备占着就报「先断开哪一台」。
+
+    额度空着但库里的隧道还活着（上一次没关干净）也要在这里说清楚：同一台设备的
+    残留交给 `TunnelSession.start()` 接管，别的设备/没有句柄的残留只能让人先处理。
+    """
+    global _TUNNEL_SLOT
+    with _TUNNEL_SLOT_LOCK:
+        owner = _TUNNEL_SLOT
+        if owner is not None and owner[0] != udid:
+            raise RuntimeError(f"一次只能连一台 iPhone：先断开「{owner[1]}」再连这台")
+        if _userspace_tunnel_active():
+            stale = _live_session()
+            handover = stale is not None and stale.udid == udid
+            if not handover and not _wait_userspace_released(1.5):
+                raise RuntimeError(_stale_tunnel_message(owner[1] if owner else ""))
+        _TUNNEL_SLOT = (udid, name)
+
+
+def _release_tunnel_slot(udid: str) -> None:
+    global _TUNNEL_SLOT
+    with _TUNNEL_SLOT_LOCK:
+        if _TUNNEL_SLOT is not None and _TUNNEL_SLOT[0] == udid:
+            _TUNNEL_SLOT = None
+
 
 # 只有 17.4+ 才有可用的用户态 RSD 隧道（不用 sudo 就能控制）
 IOS_MIN_VERSION = (17, 4)
@@ -81,34 +177,89 @@ DIGITIZER_MAX = 65535
 HID_CALL_TIMEOUT = 2.0
 
 
-# 界面方向（UIInterfaceOrientation）：和 SpringBoard 返回的方向码一致
+# 界面方向（UIInterfaceOrientation）：值跟 UIKit 的枚举、SpringBoard 返回的方向码一致。
+# 注意别按"手机往哪转"来记：3 = LandscapeRight（Home 在右），4 = LandscapeLeft（Home 在左）。
 ORIENT_PORTRAIT = 1
 ORIENT_PORTRAIT_UPSIDE_DOWN = 2
-ORIENT_LANDSCAPE_LEFT = 3
-ORIENT_LANDSCAPE_RIGHT = 4
+ORIENT_LANDSCAPE_RIGHT = 3  # Home 在右
+ORIENT_LANDSCAPE_LEFT = 4  # Home 在左
 
 ORIENTATION_NAMES = {
     ORIENT_PORTRAIT: "竖屏",
     ORIENT_PORTRAIT_UPSIDE_DOWN: "竖屏（倒置）",
-    ORIENT_LANDSCAPE_LEFT: "横屏（左）",
-    ORIENT_LANDSCAPE_RIGHT: "横屏（右）",
+    ORIENT_LANDSCAPE_RIGHT: "横屏（Home 在右）",
+    ORIENT_LANDSCAPE_LEFT: "横屏（Home 在左）",
 }
 
+# SpringBoard / pymobiledevice3：3=常见横屏（Home 在右），4=Home 在左。
+# 不要按「手机往哪转」来记，Apple 的 Left/Right 是 Home 键位置。
+_LANDSCAPE_CODES = (ORIENT_LANDSCAPE_RIGHT, ORIENT_LANDSCAPE_LEFT)
 
-def to_digitizer(x: float, y: float, orientation: int) -> tuple[float, float]:
+
+def effective_orientation(orientation: int, width: int = 0, height: int = 0) -> int:
+    """方向码和截图缓冲对不上时的兜底：**以界面方向为准，不按缓冲形状判断**。
+
+    HID digitizer 固定在物理玻璃的**竖屏轴**上（`mainTouchscreen` 永远用
+    natural portrait 坐标，见 `to_digitizer`），跟这一帧 DVT 截图是横是竖无关，
+    所以缓冲已经是横屏时也**不能**把旋转省掉。
+    方向码还停在竖屏（查询失败 / 还没刷新 / 压根不认识）而缓冲已经是横屏时，
+    按最常见的横屏方向（Home 在右 = 3）兜底 —— 总比原样送进去偏 90° 好。
+    宽高未知时保留方向码。
+    """
+    if width > height > 0 and orientation not in _LANDSCAPE_CODES:
+        return ORIENT_LANDSCAPE_RIGHT
+    return orientation
+
+
+def orient_screenshot(image: np.ndarray, orientation: int) -> np.ndarray:
+    """把 DVT 原图转到当前界面方向，让投屏/框选/点击共用横屏坐标系。
+
+    DVT 常常交出硬件竖屏像素；手机已经横过来时必须把图转成宽>高，
+    否则画面栏仍按竖屏控制。图本身已经是横的就不再转。
+    """
+    if image.ndim < 2:
+        return image
+    import cv2
+
+    already_landscape = image.shape[1] > image.shape[0]
+    if orientation == ORIENT_PORTRAIT_UPSIDE_DOWN:
+        return cv2.rotate(image, cv2.ROTATE_180)
+    # 3 = Home 在右：竖屏缓冲逆时针转 90° 才是用户看到的横屏
+    if orientation == ORIENT_LANDSCAPE_RIGHT:
+        return image if already_landscape else cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    # 4 = Home 在左：竖屏缓冲顺时针转 90°
+    if orientation == ORIENT_LANDSCAPE_LEFT:
+        return image if already_landscape else cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    return image
+
+
+def to_digitizer(
+    x: float,
+    y: float,
+    orientation: int,
+    size: Size | None = None,
+) -> tuple[float, float]:
     """把"当前画面里的归一化坐标"换算成 **HID digitizer 坐标**。
 
-    iOS 的触摸注入坐标系是**硬件竖屏**的：界面转到横屏后，直接送 (x, y) 会整体错位
-    （实机验证：横屏下点「7」键会点到别处，显示区出现 `888×333.`）。
-    用计算器做量化探针逐个方向测过，方向码 4（横屏右）对应 (x, y) → (y, 1-x)：
-    在这个变换下点 5 次「7」→ 显示区亮像素 +6060（真的键入了 5 个数字），
-    其余三种候选映射分别是 0 / +947 / +164。
+    `mainTouchscreen` 的 digitizer 固定在**物理玻璃的竖屏轴**上
+    （natural portrait，Home 在底边），不会跟着界面转。所以不管投屏这一帧
+    是横是竖，横屏的点击都必须旋回竖屏玻璃坐标：
+
+    - Home 在右（方向码 3，竖屏画面逆时针转 90° 后才是横屏）：(x, y) → (1-y, x)
+    - Home 在左（方向码 4，竖屏画面顺时针转 90° 后才是横屏）：(x, y) → (y, 1-x)
+
+    `size` 是原始截图的宽高，只用来在方向码缺失时兜底（见
+    `effective_orientation`），不参与换算本身。
     """
+    if size is not None:
+        orientation = effective_orientation(orientation, size[0], size[1])
     if orientation == ORIENT_PORTRAIT_UPSIDE_DOWN:
         return (1.0 - x, 1.0 - y)
-    if orientation == ORIENT_LANDSCAPE_LEFT:
-        return (1.0 - y, x)
+    # 3 = Home 在右（画面是竖屏缓冲逆时针转 90°）：点画面 (x,y) → 竖屏玻璃 (1-y, x)
     if orientation == ORIENT_LANDSCAPE_RIGHT:
+        return (1.0 - y, x)
+    # 4 = Home 在左（画面是竖屏缓冲顺时针转 90°）：(x,y) → (y, 1-x)
+    if orientation == ORIENT_LANDSCAPE_LEFT:
         return (y, 1.0 - x)
     return (x, y)
 
@@ -123,13 +274,16 @@ def version_supported(version: str) -> bool:
     return _version_tuple(version) >= IOS_MIN_VERSION
 
 
-def pymobiledevice3_available() -> bool:
-    return shutil.which("pymobiledevice3") is not None
+def _pymobiledevice3_cli() -> str | None:
+    """当前解释器 venv 里的 CLI，或 PATH 上的 pymobiledevice3。"""
+    import sys
 
-
-# ---------------------------------------------------------------------- #
-# 设备发现
-# ---------------------------------------------------------------------- #
+    scripts = Path(sys.executable).resolve().parent
+    for name in ("pymobiledevice3", "pymobiledevice3.exe"):
+        candidate = scripts / name
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("pymobiledevice3")
 
 
 @dataclass
@@ -149,7 +303,7 @@ class IosDevice:
 
 def list_devices() -> list[IosDevice]:
     """`pymobiledevice3 usbmux list` → 设备列表（解析 JSON）。"""
-    binary = shutil.which("pymobiledevice3")
+    binary = _pymobiledevice3_cli()
     if binary is None:
         return []
     try:
@@ -190,6 +344,53 @@ def list_devices() -> list[IosDevice]:
     return devices
 
 
+_SCREEN_SIZE_CACHE: dict[str, Size] = {}
+
+
+def screen_size(udid: str) -> Size | None:
+    """读 iOS 屏幕的**像素**分辨率（lockdown 的 `com.apple.mobile.iTunes` 域）。
+
+    为什么在发现阶段读：iOS 的分辨率本来只有连上之后才从采集管道里知道（DVT 画布尺寸），
+    而"这台是什么屏"是挑设备时就要看的信息 —— 用户反馈"iOS 设备没有看到设备分辨率"。
+    `ScreenWidth / ScreenHeight` 就是像素（iPhone 13 Pro → 1170×2532），
+    和 Android 的 `wm size` 是同一层含义。
+
+    读一次要开一条 lockdown 会话（~0.5s），所以只缓存**成功**的结果；
+    没配对 / 没信任 / 隧道被占 / 读不到 —— 一律返回 None（列表照常出现，那一格显示 `—`），
+    绝不因为拿不到分辨率就让设备从列表里消失。
+    """
+    cached = _SCREEN_SIZE_CACHE.get(udid)
+    if cached is not None:
+        return cached
+    try:
+        size = asyncio.run(_read_screen_size(udid))
+    except Exception as exc:  # 任何失败都只是"拿不到"：发现流程不能因为它挂掉
+        logger.debug("读取 iOS 屏幕尺寸失败 %s: %s", udid, exc)
+        return None
+    if size is not None:
+        _SCREEN_SIZE_CACHE[udid] = size
+    return size
+
+
+async def _read_screen_size(udid: str) -> Size | None:
+    from pymobiledevice3.lockdown import create_using_usbmux
+
+    lockdown = await asyncio.wait_for(create_using_usbmux(serial=udid), timeout=8)
+    try:
+        values = await asyncio.wait_for(lockdown.get_value(domain="com.apple.mobile.iTunes"), timeout=8)
+    finally:
+        # 及时关闭 lockdown，避免 GC 时 StreamWriter 警告在 pytest 里判失败。
+        with contextlib.suppress(Exception):
+            await lockdown.close()
+    if not isinstance(values, dict):
+        return None
+    width = values.get("ScreenWidth")
+    height = values.get("ScreenHeight")
+    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+        return (int(width), int(height))
+    return None
+
+
 def discover() -> list[DeviceInfo]:
     """给 device.list 用的发现函数（只返回达标的设备）。"""
     out: list[DeviceInfo] = []
@@ -203,34 +404,20 @@ def discover() -> list[DeviceInfo]:
                 status=STATUS_DISCOVERED if device.supported() else STATUS_FAILED,
                 serial=device.udid,
                 model=device.name,
-                resolution=None,
+                # 发现阶段就把分辨率读出来（读不到就是 None，界面显示 —）
+                resolution=screen_size(device.udid) if device.supported() else None,
                 error=None if device.supported() else f"仅支持 iOS {IOS_MIN_VERSION[0]}.{IOS_MIN_VERSION[1]}+",
             )
         )
     return out
 
 
-# ---------------------------------------------------------------------- #
-# QuickTime 采集
-# ---------------------------------------------------------------------- #
-
-
 class TunnelSession:
-    """iOS 用户态隧道 + DVT 采集（进程级单例：一次一台设备）。
+    """RSD 隧道 + DVT 截图（单例，一进程一台设备）。不切 USB 配置。"""
 
-    **为什么不是 QuickTime**：macOS 上 ffmpeg/avfoundation 看不到 iOS 屏幕采集设备
-    （它属于 Continuity/External 类型，进程没有 `NSCameraUseContinuityCameraDeviceType`
-    声明就会被系统隐藏；实测 config 1~6 全都不出现）。而 pymobiledevice3 的隧道投屏
-    （DisplayService.startmediastream）在 iOS 26 上直接报 "requires iOS 27.0 or later"。
-    所以 17.4 ~ 26.x 这条区间用 **DVT 截图循环**出帧：实测 128ms/张 ≈ 7.8fps、2796x1290，
-    对模板匹配足够（和 adb screencap 一个量级）。
-
-    隧道不需要 sudo（UserspaceRsdTunnel），也不需要切 USB 配置
-    （配置 6 = 正常数据通路；切到配置 2 反而会让 usbmux 消失 —— 那才是"QT 独占"的真相）。
-    """
-
-    def __init__(self, udid: str, *, fps: float = 8.0) -> None:
+    def __init__(self, udid: str, *, fps: float = 8.0, name: str = "") -> None:
         self.udid = udid
+        self.name = name
         self.fps = fps
         self.size: Size = (0, 0)
         self.fps_actual = 0.0
@@ -243,6 +430,7 @@ class TunnelSession:
         self._dvt: Any = None
         self._shot: Any = None
         self._frame: np.ndarray | None = None
+        self._encoded: bytes | None = None
         self._frame_id = 0
         self.failures = 0
         self.reconnects = 0
@@ -289,12 +477,54 @@ class TunnelSession:
     # ---------- 连接 ----------
 
     def start(self, timeout: float = 25.0) -> None:
-        self.run(self._astart(), timeout=timeout)
+        """建隧道 + 等第一帧；**任何失败都把自己收干净**。
+
+        以前这里 `run(...)` 一把梭：超时/没出帧时控制器还没把 session 挂到 `self._session`，
+        隧道就漏在 pymobiledevice3 的进程级单例里；下一次连接撞上英文异常
+        "a userspace tunnel is already active in this process"。
+        """
+        with _TUNNEL_TRANSITION_LOCK:
+            previous = _set_live_session(self)
+            if previous is not None and previous is not self:
+                if previous.udid != self.udid:
+                    _set_live_session(previous)  # 还没动手，先还原
+                    raise RuntimeError(f"一次只能连一台 iPhone：先断开「{previous.name or previous.udid}」再连这台")
+                # 同一台设备上一次没收干净：先拆旧的，再开新的
+                logger.warning("iOS 隧道重连：先拆掉同一台设备的旧会话 %s", self.udid)
+                previous.close()
+            if _userspace_tunnel_active() and not _wait_userspace_released(2.0):
+                _clear_live_session(self)
+                raise RuntimeError(_stale_tunnel_message(previous.name if previous else ""))
+            from concurrent.futures import TimeoutError as FutureTimeoutError
+
+            try:
+                loop = self._ensure_loop()
+                future = asyncio.run_coroutine_threadsafe(self._astart(), loop)
+                try:
+                    future.result(timeout)
+                except FutureTimeoutError as exc:
+                    # 超时的协程还在跑：取消并等它退出来，否则半条隧道会留在库的单例里
+                    future.cancel()
+                    with contextlib_suppress():
+                        future.result(5.0)
+                    raise RuntimeError(f"iOS 隧道建立超过 {timeout:g}s 没完成（设备锁着？）") from exc
+            except BaseException as exc:
+                self.close()
+                friendly = _friendly_tunnel_error(exc)
+                if friendly is exc:
+                    raise
+                raise friendly from exc
+
         deadline = time.time() + timeout
-        while time.time() < deadline and self._frame is None:
+        while time.time() < deadline and self._frame is None and not self._stop.is_set():
             time.sleep(0.05)
         if self._frame is None:
-            raise RuntimeError(f"iOS 采集没有出帧: {self.error or '未知原因'}")
+            try:
+                if self._stop.is_set():
+                    raise RuntimeError("iOS 连接已取消")
+                raise RuntimeError(f"iOS 采集没有出帧: {self.error or '未知原因'}")
+            finally:
+                self.close()
 
     async def _astart(self) -> None:
         from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
@@ -332,6 +562,8 @@ class TunnelSession:
                 if image is not None:
                     with self._lock:
                         self._frame = image
+                        # 原始截图字节也留着：子进程那条路要转发它（不重新编码一次）
+                        self._encoded = bytes(raw)
                         self._frame_id += 1
                         self.size = (int(image.shape[1]), int(image.shape[0]))
                     self.last_frame_at = time.time()
@@ -386,6 +618,13 @@ class TunnelSession:
         with self._lock:
             return None if self._frame is None else self._frame.copy()
 
+    def latest_encoded(self, timeout: float = 0.0) -> bytes | None:
+        """最近一帧的**原始截图字节**（子进程转发用；进程内直接用 latest_frame）。"""
+        if timeout > 0:
+            self._event.wait(timeout)
+        with self._lock:
+            return self._encoded
+
     @property
     def frame_id(self) -> int:
         return self._frame_id
@@ -398,30 +637,67 @@ class TunnelSession:
         return self._rsd
 
     def close(self) -> None:
-        self._stop.set()
+        """拆隧道；返回时尽量保证库里的进程级单例真的空出来了。幂等。
 
-        async def cleanup() -> None:
-            if self._task is not None:
-                self._task.cancel()
+        以前的写法是 ``run(cleanup(), timeout=10)`` 一把梭：超时就把异常吞掉、照停事件循环，
+        最容易留下"额度已经还了、库里的隧道还在"的状态 —— 下一次连接直接撞英文单例异常。
+        现在超时会取消清理协程再等一会儿，并且**以库的状态为准**做最后兜底。
+        """
+        with _TUNNEL_TRANSITION_LOCK:
+            self._stop.set()
+            loop = self._loop
+            thread = self._thread
+            if loop is not None and not loop.is_closed():
+                from concurrent.futures import TimeoutError as FutureTimeoutError
+
+                async def cleanup() -> None:
+                    if self._task is not None:
+                        self._task.cancel()
+                        with contextlib_suppress():
+                            await self._task
+                    if self._dvt is not None:
+                        with contextlib_suppress():
+                            await self._dvt.__aexit__(None, None, None)
+                    if self._tunnel is not None:
+                        with contextlib_suppress():
+                            await self._tunnel.aclose()
+                    # aopen 成功、句柄还没挂到 self._tunnel 就被取消/超时的窗口里，
+                    # 库里那条隧道只剩 `_active_tunnel` 一个引用：在同一个循环里关掉它。
+                    active = _active_tunnel_handle()
+                    if active is not None and getattr(active, "serial", None) == self.udid:
+                        with contextlib_suppress():
+                            await active.aclose()
+                    self._task = None
+                    self._dvt = None
+                    self._shot = None
+                    self._tunnel = None
+                    self._rsd = None
+
+                future = asyncio.run_coroutine_threadsafe(cleanup(), loop)
+                try:
+                    future.result(timeout=15.0)
+                except FutureTimeoutError:
+                    logger.warning("关闭 iOS 隧道超时：取消清理协程 %s", self.udid)
+                    future.cancel()
+                    with contextlib_suppress():
+                        future.result(3.0)
+                except Exception:
+                    logger.warning("关闭 iOS 隧道时出错: %s", self.udid, exc_info=True)
                 with contextlib_suppress():
-                    await self._task
-            if self._dvt is not None:
+                    loop.call_soon_threadsafe(loop.stop)
+            if thread is not None:
+                thread.join(timeout=2)
+            if loop is not None and not loop.is_closed():
+                # 只 stop 不 close 会漏掉循环自己的 self-pipe（ResourceWarning），
+                # 半开状态下反复重连尤其明显。
                 with contextlib_suppress():
-                    await self._dvt.__aexit__(None, None, None)
-            if self._tunnel is not None:
-                with contextlib_suppress():
-                    await self._tunnel.aclose()
-
-        with contextlib_suppress():
-            self.run(cleanup(), timeout=10)
-        if self._thread is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop) if self._loop else None
-            self._thread.join(timeout=2)
-
-
-# ---------------------------------------------------------------------- #
-# pymobiledevice3 CoreDevice HID
-# ---------------------------------------------------------------------- #
+                    loop.close()
+            self._loop = None
+            self._thread = None
+            if not _userspace_tunnel_active():
+                _clear_live_session(self)
+            else:
+                logger.warning("iOS 隧道仍未释放（%s）：留给下一次连接接管", self.udid)
 
 
 class HidBridge:
@@ -578,32 +854,15 @@ def contextlib_suppress() -> Any:
     return contextlib.suppress(Exception)
 
 
-async def asyncio_wait_for(coro: Any, timeout: float) -> Any:
-    import asyncio
-
-    return await asyncio.wait_for(coro, timeout=timeout)
-
-
 async def asyncio_sleep(seconds: float) -> None:
     import asyncio
 
     await asyncio.sleep(seconds)
 
 
-# ---------------------------------------------------------------------- #
-# 控制器
-# ---------------------------------------------------------------------- #
-
-
 @register
 class IosController(Controller):
-    """URI: ``iOS:///?udid=xxxx``（仅 iOS ≥ 17.4）。
-
-    采集：pymobiledevice3 用户态隧道 + DVT 截图循环（实测 ~8fps / 2796x1290）
-    控制：同一条隧道上的 CoreDevice HID（UHS 触摸 0..65535 + Indigo 按键 + 虚拟键盘）
-    连接前会跑一次 USB 配置测绘：只有当设备不在"有数据通路"的配置上时才提示需要切回来
-    （切到配置 2 会让 usbmux 消失，那正是"QuickTime 独占"的真相）。
-    """
+    """``iOS:///?udid=…``，≥17.4。DVT 截图 + 同隧道 HID；不切 USB 配置。"""
 
     scheme = "iOS"
     kind = "ios"
@@ -619,6 +878,7 @@ class IosController(Controller):
         self._orientation_lockdown: Any = None
         self._last_aspect: str = ""
         self._orientation_querying = False
+        self._orientation_warned = False
         self._recovering = False
         self.channel = "dvt"
         self.link_note = ""
@@ -626,6 +886,7 @@ class IosController(Controller):
         self._session: TunnelSession | None = None
         self._hid: HidBridge | None = None
         self._last_frame: np.ndarray | None = None
+        self._oriented_size: Size | None = None
         self._frame_seq = 0
         self._fps = fps
 
@@ -649,28 +910,35 @@ class IosController(Controller):
                 "（低版本没有用户态 RSD 隧道）"
             )
         self._display_name = f"{device.name} (iOS {device.version})" if device.version else device.name
-        if not pymobiledevice3_available():
-            raise RuntimeError("缺少 pymobiledevice3（uv sync --extra ios 或 brew install pymobiledevice3）")
 
-        self._report_usb_config()
-        session = TunnelSession(self.udid, fps=self._fps)
-        session.start()
-        self._session = session
-        self.channel = "dvt"
-        self.link_note = f"DVT 采集（{session.size[0]}x{session.size[1]}）"
-        if self.usb_report:
-            self.link_note += f" · {self.usb_report}"
+        # 先占进程级额度，再碰隧道：第二台在这里就被挡下（不会走到隧道那一步）
+        _claim_tunnel_slot(self.udid, self._display_name)
+        try:
+            self._report_usb_config()
+            session = TunnelSession(self.udid, fps=self._fps, name=self._display_name)
+            # **先挂上**再 start：start 半路失败（没出帧/超时）时下面的 close() 才能把它收干净。
+            # 以前是 start() 成功后才赋值，失败就漏一条隧道在进程级单例里，重试直接撞英文异常。
+            self._session = session
+            session.start()
+            self.channel = "dvt"
+            self.link_note = f"DVT 采集（{session.size[0]}x{session.size[1]}）"
+            if self.usb_report:
+                self.link_note += f" · {self.usb_report}"
 
-        bridge = HidBridge(self.udid)
-        bridge.attach(session)
-        bridge.connect()
-        self._hid = bridge
-        try:  # 首次必须拿到方向（横屏下第一次触摸就要对），这里同步等一小会儿
-            self._orientation = self._session.run(self._aquery_orientation(), timeout=6)
-            logger.info("iOS 界面方向: %s", ORIENTATION_NAMES.get(self._orientation, self._orientation))
-        except Exception as exc:
-            logger.warning("首次查界面方向失败（按竖屏处理）: %s", exc)
-        self._connected = True
+            bridge = HidBridge(self.udid)
+            bridge.attach(session)
+            bridge.connect()
+            self._hid = bridge
+            try:  # 首次必须拿到方向（横屏下第一次触摸就要对），这里同步等一小会儿
+                self._orientation = self._session.run(self._aquery_orientation(), timeout=6)
+                logger.info("iOS 界面方向: %s", ORIENTATION_NAMES.get(self._orientation, self._orientation))
+            except Exception as exc:
+                logger.warning("首次查界面方向失败（按竖屏处理）: %s", exc)
+            self._connected = True
+        except BaseException:
+            # 半连接也要收干净：额度只有一个，漏一次这台就再也连不上了
+            self.close()
+            raise
 
     async def _aquery_orientation(self) -> int:
         """（会话循环里执行）查当前界面方向。"""
@@ -689,8 +957,9 @@ class IosController(Controller):
     def _refresh_orientation(self, force: bool = False) -> None:
         """刷新缓存的界面方向：每秒最多查一次；画面比例一变（旋转）立刻查。
 
-        iOS 的 HID digitizer 是硬件竖屏坐标系，界面转横屏后必须做变换，
-        所以要不断知道"现在是哪个方向"。
+        iOS 的 HID digitizer 是**硬件竖屏坐标系**，界面转横屏后必须做变换，
+        所以要不断知道"现在是哪个方向"。查询失败时保留上次的值，并由
+        `effective_orientation` 按画面比例兜底。
         """
         now = time.time()
         if not force and now - self._orientation_at < 1.0:
@@ -701,13 +970,22 @@ class IosController(Controller):
         try:
             previous = self._orientation
             self._orientation = self._session.run(self._aquery_orientation(), timeout=8)
+            self._orientation_warned = False
             if self._orientation != previous:
                 logger.info(
                     "iOS 界面方向: %s（触摸坐标会做对应旋转）",
                     ORIENTATION_NAMES.get(self._orientation, self._orientation),
                 )
         except Exception as exc:
-            logger.debug("查界面方向失败（按竖屏处理）: %s", exc)
+            # 只警告一次：横屏触摸会由 effective_orientation 按画面比例兜底，
+            # 但方向码要是猜的（Home 在左 vs 右），点起来会差 90°，得让人看见。
+            if not self._orientation_warned:
+                self._orientation_warned = True
+                logger.warning(
+                    "查界面方向失败（沿用 %s，横屏按画面比例兜底）: %s",
+                    ORIENTATION_NAMES.get(self._orientation, self._orientation),
+                    exc,
+                )
 
     @property
     def orientation(self) -> int:
@@ -723,6 +1001,11 @@ class IosController(Controller):
         if not devices:
             self.usb_report = "USB 层没看到 Apple 设备"
             return
+        if len(devices) > 1:
+            # 测绘结果里没有 udid，插了多台 Apple 设备时分不清哪条是这台：
+            # 以前直接取第一条，状态栏会显示成"第一台 iPhone"的 USB 配置。
+            self.usb_report = f"USB 层有 {len(devices)} 台 Apple 设备（未逐台核对配置）"
+            return
         device = devices[0]
         current = next((item for item in device.configurations if item.value == device.current), None)
         self.usb_report = f"USB 配置 {device.current}（{current.paths if current else '?'} 条通路）"
@@ -731,9 +1014,18 @@ class IosController(Controller):
 
     @property
     def resolution(self) -> Size:
+        if self._oriented_size:
+            return self._oriented_size
         if self._session is not None and self._session.size != (0, 0):
             return self._session.size
         return (0, 0)
+
+    def _present_frame(self, frame: np.ndarray) -> np.ndarray:
+        """按界面方向转正，并让 resolution 跟着转后的画面走。"""
+        orientation = effective_orientation(self._orientation, frame.shape[1], frame.shape[0])
+        oriented = orient_screenshot(frame, orientation)
+        self._oriented_size = (int(oriented.shape[1]), int(oriented.shape[0]))
+        return oriented
 
     @property
     def link_fps(self) -> float:
@@ -752,12 +1044,20 @@ class IosController(Controller):
         if self._session is not None:
             self._session.close()
             self._session = None
-        session = TunnelSession(self.udid, fps=self._fps)
-        session.start()
+        session = TunnelSession(self.udid, fps=self._fps, name=self._display_name)
+        # 和 connect() 一样：先挂上再 start，失败时这里能收干净（否则重连失败又漏一条隧道）
         self._session = session
-        bridge = HidBridge(self.udid)
-        bridge.attach(session)
-        bridge.connect()
+        try:
+            session.start()
+            bridge = HidBridge(self.udid)
+            bridge.attach(session)
+            bridge.connect()
+        except BaseException:
+            with contextlib_suppress():
+                session.close()
+            self._session = None
+            self._hid = None
+            raise
         self._hid = bridge
         self.link_note = f"DVT 采集（{session.size[0]}x{session.size[1]}，已重连）"
 
@@ -766,9 +1066,9 @@ class IosController(Controller):
             raise RuntimeError("iOS 采集未启动")
         size = self._session.size
         aspect = "landscape" if size[0] > size[1] else "portrait"
-        if aspect != self._last_aspect:
-            self._last_aspect = aspect
-            self._refresh_orientation(force=True)  # 旋转了：立刻更新方向
+        # DVT 常常不改像素宽高，不能只在「画面变横」时才问方向。
+        self._refresh_orientation(force=aspect != self._last_aspect)
+        self._last_aspect = aspect
         if self._stalled():
             # 卡住超过 6 秒：先重建 DVT，再不行就整套重连
             self._session.run(self._session._reopen_dvt())
@@ -778,9 +1078,10 @@ class IosController(Controller):
         if frame is None:
             frame = self._session.latest_frame(timeout=1.5)
         if frame is not None:
-            self._last_frame = frame
+            presented = self._present_frame(frame)
+            self._last_frame = presented
             self._frame_seq = self._session.frame_id
-            return frame
+            return presented
         if self._last_frame is not None:
             return self._last_frame
         raise RuntimeError(f"iOS 采集没有画面: {self._session.error or '未知原因'}")
@@ -811,8 +1112,7 @@ class IosController(Controller):
     def _with_hid(self, action: str, call: Any) -> Any:
         """执行一次 HID 操作。
 
-        断线时**立刻返回可读错误 + 后台重连**，绝不在请求里同步重连：
-        重连要几秒，界面 10 秒就超时了（踩过："引擎响应超时（>10s）"）。
+        断线时返回错误并在后台重连，不在 RPC 里同步重连以免超时。
         """
         try:
             return call(self._hid_or_raise())
@@ -854,23 +1154,41 @@ class IosController(Controller):
         if phase not in ("down", "move", "up"):
             raise ValueError(f"phase 必须是 down/move/up，收到: {phase}")
         self._refresh_orientation()
-        dx, dy = to_digitizer(x, y, self._orientation)
+        raw = self._session.size if self._session is not None else None
+        dx, dy = to_digitizer(x, y, self._orientation, raw)
         point = (round(dx * DIGITIZER_MAX), round(dy * DIGITIZER_MAX))
+        if phase == "down":
+            logger.info(
+                "iOS 触摸: 画面(%.3f,%.3f) 原始截图=%s 方向码=%s 画面=%s → HID(%.3f,%.3f)",
+                x,
+                y,
+                raw,
+                self._orientation,
+                self.resolution,
+                dx,
+                dy,
+            )
         self._with_hid("touch", lambda hid: hid.touch(phase, *point))
 
-    def click(self, x: float, y: float) -> None:
-        self.touch("down", x, y)
-        time.sleep(0.05)
-        self.touch("up", x, y)
+    def click(
+        self,
+        x: float,
+        y: float,
+        duration: float = 0.05,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
+        play_tap(self.touch, (x, y), duration, path)
 
-    def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
-        steps = max(4, int(duration / 0.02))
-        self.touch("down", x1, y1)
-        for index in range(1, steps + 1):
-            ratio = index / steps
-            self.touch("move", x1 + (x2 - x1) * ratio, y1 + (y2 - y1) * ratio)
-            time.sleep(max(0.005, duration / steps))
-        self.touch("up", x2, y2)
+    def swipe(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        duration: float = 0.3,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
+        play_swipe_path(self.touch, resolve_swipe_points((x1, y1), (x2, y2), duration, path), duration)
 
     def press(self, name: str) -> None:
         if name not in SUPPORTED_KEYS and name not in NAMED_BUTTONS:
@@ -887,4 +1205,5 @@ class IosController(Controller):
         if self._session is not None:
             self._session.close()
             self._session = None
+        _release_tunnel_slot(self.udid)
         super().close()

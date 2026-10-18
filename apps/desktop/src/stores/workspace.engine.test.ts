@@ -2,7 +2,7 @@
  * 工作区（v4：**工作区 › 工作流**）端到端：真实引擎子进程 + 真实临时目录，把契约 §4.4 走完。
  *
  * 为什么放在前端仓库里：这一串是"前端调用的 RPC + 磁盘结果"的联合验收 ——
- * `workspace.add` 的名字与幂等、空文件夹不被塞东西、`.trash` 的落点、重启后记得列表与当前工作流，
+ * `workspace.add` 的名字与幂等、空文件夹不被塞东西、删除是真删、重启后记得列表与当前工作流，
  * 任何一处对不上，界面在真机上就是坏的。所以它跑真引擎、不 mock。
  *
  * 隔离：每个用例自己起一个引擎进程，`GAMEPILOT_CONFIG_DIR` 一律指向临时目录
@@ -29,7 +29,6 @@ interface WorkspaceItem {
 interface WorkspaceList {
   active: string | null;
   recommended: string;
-  trashRoot: string;
   items: WorkspaceItem[];
 }
 
@@ -51,7 +50,7 @@ interface WorkspaceTree {
 interface WorkflowLibrary {
   created?: string;
   root?: string;
-  trashed?: string;
+  removed?: string;
   current: string;
   items: Workflow[];
 }
@@ -105,7 +104,7 @@ beforeAll(async () => {
 });
 
 describe('工作区 v4 端到端（真实引擎 + 临时目录）', () => {
-  it('空配置：workspace.list 的 active 为 null、items 为空，回收站指向配置目录', async ({ skip }) => {
+  it('空配置：workspace.list 的 active 为 null、items 为空', async ({ skip }) => {
     if (!engineV4) {
       skip();
       return;
@@ -116,8 +115,6 @@ describe('工作区 v4 端到端（真实引擎 + 临时目录）', () => {
     const list = await engine.call<WorkspaceList>('workspace.list');
     expect(list.active).toBeNull();
     expect(list.items.filter((item) => item.active)).toEqual([]);
-    // 回收站 = 配置目录下的 .trash（引擎给的绝对路径，界面要显示它）
-    expect(list.trashRoot).toBe(path.join(configDir, '.trash'));
     expect(list.recommended.endsWith(path.join('workspaces', '默认'))).toBe(true);
   });
 
@@ -186,9 +183,7 @@ describe('工作区 v4 端到端（真实引擎 + 临时目录）', () => {
     await expect(engine.call('workspace.add', { dir: './relative', name: 'x' })).rejects.toThrow(/绝对路径/);
   });
 
-  it('工作流全流程：建两个 → 切换 → 改名 → 复制 → 删（校验 .trash/）；删光后没有当前工作流', async ({
-    skip,
-  }) => {
+  it('工作流全流程：建两个 → 切换 → 改名 → 复制 → 删（真删除）；删光后没有当前工作流', async ({ skip }) => {
     if (!engineV4) {
       skip();
       return;
@@ -244,14 +239,13 @@ describe('工作区 v4 端到端（真实引擎 + 临时目录）', () => {
     );
     expect(tree.workflows[0]?.modified).toBeGreaterThan(0);
 
-    // 删工作流 → 当前工作区的 .trash/（可恢复）
+    // 删工作流 → **真删除**（没有回收站了）
     const removed = await engine.call<WorkflowLibrary>('workflow.delete', { dir: copyRoot });
     expect(removed.items.map((item) => item.name)).not.toContain('斗技2-副本');
     expect(existsSync(copyRoot)).toBe(false);
-    expect(removed.trashed?.startsWith(path.join(workspaceDir, '.trash'))).toBe(true);
+    expect(existsSync(removed.removed ?? '')).toBe(false);
+    expect(existsSync(path.join(workspaceDir, '.trash'))).toBe(false);
     expect(removed.items.map((item) => item.root)).toContain(removed.current);
-    const trash = path.join(workspaceDir, '.trash');
-    expect(readdirSync(trash).some((name) => name.includes('斗技2-副本'))).toBe(true);
 
     // 删光：没有当前工作流也不崩（root 空串）
     await engine.call('workflow.delete', { dir: path.join(workspaceDir, '斗技2') });
@@ -261,9 +255,7 @@ describe('工作区 v4 端到端（真实引擎 + 临时目录）', () => {
     expect((await engine.call<WorkspaceTree>('workspace.tree')).workflows).toEqual([]);
   });
 
-  it('workspace.remove deleteFiles:true → 目录进**全局回收站**；false → 磁盘一个字节不动', async ({
-    skip,
-  }) => {
+  it('workspace.remove deleteFiles:true → 目录**真删除**；false → 磁盘一个字节不动', async ({ skip }) => {
     if (!engineV4) {
       skip();
       return;
@@ -276,23 +268,23 @@ describe('工作区 v4 端到端（真实引擎 + 临时目录）', () => {
     await engine.call('workspace.add', { dir: dropDir, name: '移走' });
 
     // 只从列表移除：磁盘一个字节不动
-    const unlisted = await engine.call<{ items: WorkspaceItem[]; trashed: string }>('workspace.remove', {
+    const unlisted = await engine.call<{ items: WorkspaceItem[]; removed: string }>('workspace.remove', {
       dir: keepDir,
       deleteFiles: false,
     });
     expect(existsSync(keepDir)).toBe(true);
     expect(readdirSync(keepDir)).toEqual([]);
-    expect(unlisted.trashed).toBe('');
+    expect(unlisted.removed).toBe('');
     expect(unlisted.items.map((item) => item.root)).not.toContain(keepDir);
 
-    // 连文件一起删 = 移到全局回收站（不是 rm -rf）
-    const removed = await engine.call<WorkspaceList & { trashed: string; current: string }>(
+    // 连文件一起删 = **真删除**（没有回收站兜底，界面负责二次确认）
+    const removed = await engine.call<WorkspaceList & { removed: string; current: string }>(
       'workspace.remove',
       { dir: dropDir, deleteFiles: true },
     );
     expect(existsSync(dropDir)).toBe(false);
-    expect(removed.trashed.startsWith(path.join(configDir, '.trash'))).toBe(true);
-    expect(existsSync(removed.trashed)).toBe(true);
+    expect(existsSync(path.join(configDir, '.trash'))).toBe(false);
+    expect(existsSync(removed.removed)).toBe(false);
     // 列表空了 → active 归 null
     expect(removed.items).toEqual([]);
     expect(removed.active).toBeNull();

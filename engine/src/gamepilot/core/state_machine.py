@@ -19,6 +19,7 @@ from typing import Any
 
 from ..devices.base import Controller
 from .actions import Action
+from .bezier_trajectory import execute_swipe, execute_tap
 from .conditions import Condition, ConditionTimer
 from .frame import Detection, Frame
 from .graph import Edge, Graph
@@ -78,6 +79,9 @@ class Engine:
         self.paused_at: str | None = None
         # 本次访问在这个界面上已经停过的断点（避免恢复后又停在同一处）
         self._breakpoint_passed: set[str] = set()
+        # 单步：放行"刚才停住的那条边"，下一条边执行前再停
+        self._step_once = False
+        self._step_skip_edge: str | None = None
         # 进入当前界面的时间：none_of（"不在"）分支要等识别稳定后才允许走。
         # 必须初始化成"现在"：如果留 0，第一拍算出的时间差是无穷大，宽限期直接被绕过
         # （这就是"明明在却先走否则"的根因）
@@ -85,28 +89,27 @@ class Engine:
         self.stats = {"ticks": 0, "actions": 0, "transitions": 0, "failed": 0, "recoveries": 0}
         self._timeout_reported: set[str] = set()
         # 本次"进入节点"期间已经触发过的边（dst 为空的边默认只触发一次，
-        # 否则 14fps 下会每帧点一次 —— 实测会连点 5 次）
+        # 否则同一节点内 dst 为空的边会在每帧重复触发）
         self._fired_in_node: set[str] = set()
         self.seq = 0
         self._outbox: list[TraceEvent] = []
         self._last_fire: dict[str, float] = {}
         self._entered_at = time.time()
 
-    # ------------------------------------------------------------------ #
-    # 感知
-    # ------------------------------------------------------------------ #
-
     def perceive(self, frame: Frame) -> dict[str, Detection]:
         self.detections = perceive(self.graph.recognizers, frame, self.vote)
         return self.detections
 
-    # ------------------------------------------------------------------ #
-    # 一次 tick
-    # ------------------------------------------------------------------ #
-
     def resume(self) -> None:
         """恢复运行：清掉当前断点命中，下一拍继续（再走到同一个断点还会停）。"""
         self.paused_at = None
+        self._step_once = False
+
+    def step(self) -> None:
+        """单步：放行刚才停住的那条边，执行完、下一条边执行前再停下。"""
+        self._step_skip_edge = self.paused_at
+        self.paused_at = None
+        self._step_once = True
 
     @property
     def paused(self) -> bool:
@@ -168,10 +171,6 @@ class Engine:
                 return self._outbox
 
         return self._outbox
-
-    # ------------------------------------------------------------------ #
-    # 内部
-    # ------------------------------------------------------------------ #
 
     def locate(self) -> str | None:
         """当前在哪个界面。
@@ -244,9 +243,6 @@ class Engine:
         if cooldown <= 0:
             return True
         return time.time() - self._last_fire.get(edge.id, 0.0) >= cooldown
-
-    def _timeout_key(self, node_id: str | None, edge_id: str) -> str:
-        return f"{node_id}:{edge_id}"
 
     def _resolve(self) -> tuple[str | None, float]:
         best: tuple[str | None, float] = (None, 0.0)
@@ -352,10 +348,16 @@ class Engine:
 
     def _hit_breakpoint(self, edge: Edge) -> bool:
         """这条边是不是断点：是就暂停并返回 True（这一拍不执行动作）。"""
+        # 单步优先：放过"刚恢复的那条边"，等它执行完、下一条边再停
+        if self._step_once and edge.id != self._step_skip_edge:
+            self._step_once = False
+            self._step_skip_edge = None
+            self.paused_at = edge.id
+            self._emit("breakpoint_hit", node=self.current, edge=edge, message="单步：执行这条边之前暂停")
+            return True
         if edge.id not in self.breakpoints or edge.id in self._breakpoint_passed:
             return False
-        # 用单独的一个集合记"这次访问已经停过了"：绝不能动 _fired_in_node，
-        # 否则恢复后这条边会被当成"已执行"而永远不再执行（踩过）
+        # 断点经过记录与 _fired_in_node 分离，恢复后边仍可再次执行。
         self._breakpoint_passed.add(edge.id)
         self.paused_at = edge.id
         self._emit(
@@ -394,7 +396,17 @@ class Engine:
                     "action_failed", node=self.current, edge=edge, message=f"当前环境不支持运行子工作流: {script}"
                 )
                 return
-            self.on_call(script)
+            try:
+                self.on_call(script)
+            except Exception as exc:
+                self.stats["failed"] += 1
+                self._emit(
+                    "action_failed",
+                    node=self.current,
+                    edge=edge,
+                    message=f"运行子工作流「{script}」失败：{exc}",
+                )
+                return
             self.stats["actions"] += 1
             self._emit("action_executed", node=self.current, edge=edge, message=f"运行子工作流 {script}")
             return
@@ -444,8 +456,9 @@ class Engine:
                 return
 
             start_point = self._resolve_point(action, action.target, action.x, action.y)
+            defaults = dict(self.graph.defaults)
             if action.type == "click":
-                self.controller.click(start_point[0], start_point[1])
+                execute_tap(self.controller, start_point, spec if isinstance(spec, dict) else {}, defaults)
                 self.stats["actions"] += 1
                 self._emit(
                     "action_executed",
@@ -453,8 +466,29 @@ class Engine:
                     edge=edge,
                     message=f"click({start_point[0]:.3f},{start_point[1]:.3f})",
                 )
+            elif action.type == "double_click":
+                execute_tap(
+                    self.controller,
+                    start_point,
+                    spec if isinstance(spec, dict) else {},
+                    defaults,
+                    count=2,
+                )
+                self.stats["actions"] += 1
+                self._emit(
+                    "action_executed",
+                    node=self.current,
+                    edge=edge,
+                    message=f"double_click({start_point[0]:.3f},{start_point[1]:.3f})",
+                )
             elif action.type == "long_press":
-                self._long_press(start_point[0], start_point[1], action.duration_ms)
+                execute_tap(
+                    self.controller,
+                    start_point,
+                    spec if isinstance(spec, dict) else {},
+                    defaults,
+                    duration_ms=max(50, action.duration_ms),
+                )
                 self.stats["actions"] += 1
                 self._emit(
                     "action_executed",
@@ -464,17 +498,27 @@ class Engine:
                 )
             elif action.type == "swipe":
                 end_point = self._resolve_point(action, action.to_target, action.to_x, action.to_y, allow_auto=True)
-                self.controller.swipe(
-                    start_point[0], start_point[1], end_point[0], end_point[1], duration=action.duration_ms / 1000.0
+                execute_swipe(
+                    self.controller,
+                    start_point,
+                    end_point,
+                    max(0.05, action.duration_ms / 1000.0),
+                    spec if isinstance(spec, dict) else {},
+                    dict(self.graph.defaults),
+                    path=action.path,
+                    hold_ms=action.hold_ms,
                 )
                 self.stats["actions"] += 1
+                hold = f", hold {action.hold_ms}ms" if action.hold_ms else ""
+                shape = f"{len(action.path)} pts" if action.path else ""
                 self._emit(
                     "action_executed",
                     node=self.current,
                     edge=edge,
                     message=(
                         f"swipe({start_point[0]:.2f},{start_point[1]:.2f} → "
-                        f"{end_point[0]:.2f},{end_point[1]:.2f}, {action.duration_ms}ms)"
+                        f"{end_point[0]:.2f},{end_point[1]:.2f}, {action.duration_ms}ms"
+                        f"{', ' + shape if shape else ''}{hold})"
                     ),
                 )
         except Exception as exc:
@@ -498,6 +542,10 @@ class Engine:
         if target:
             detection = self.detections.get(target)
             if detection is not None:
+                if detection.ambiguous:
+                    raise ValueError(
+                        f"目标 {target} 有多个同分候选，无法确定点哪一个（提高阈值或把搜索范围改回原区域）"
+                    )
                 return detection.rect.center
             if not allow_auto:
                 raise ValueError(f"目标 {target} 当前没有命中，无法定位")
@@ -517,16 +565,6 @@ class Engine:
             controller.press(name)
         else:
             controller.key(name)
-
-    def _long_press(self, x: float, y: float, duration_ms: int) -> None:
-        """长按：有实时触控能力就按下-等待-抬起，否则退化成一次点击。"""
-        controller = self.controller
-        if hasattr(controller, "touch"):
-            controller.touch("down", x, y)
-            time.sleep(max(0.05, duration_ms / 1000.0))
-            controller.touch("up", x, y)
-        else:
-            controller.click(x, y)
 
     def _scores(self) -> dict[str, float]:
         """当前这一帧各识别器的相似度（给 $score 数据源用）。"""
@@ -588,11 +626,6 @@ def describe_action(spec: dict[str, Any]) -> str:
     if kind == CALL_ACTION:
         return f"运行子工作流 {spec.get('script')}"
     return Action.parse(spec).describe()
-
-
-def _rect_center(rect: list[Any]) -> tuple[float, float]:
-    x, y, w, h = (_as_float(item, 0.0) for item in rect[:4])
-    return (x + w / 2, y + h / 2)
 
 
 def _as_float(value: Any, fallback: float) -> float:

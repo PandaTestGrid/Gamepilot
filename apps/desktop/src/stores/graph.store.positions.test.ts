@@ -11,18 +11,9 @@ import { setPositionScope } from '@/lib/node-positions';
 import { toGraphData } from '@/lib/graph-adapter';
 import { useGraphStore } from '@/stores/graph.store';
 
-const graphNodeAdd = vi.fn((..._args: unknown[]): Promise<{ nodeId: string; graph: GraphPayload }> =>
-  Promise.resolve({ nodeId: '', graph: {} as GraphPayload }),
-);
 vi.mock('@/lib/rpc', () => ({
-  graphNodeAdd: (deviceId: string, params: unknown): Promise<unknown> => graphNodeAdd(deviceId, params),
   graphGet: (): Promise<unknown> => Promise.resolve({}),
   graphSave: (): Promise<unknown> => Promise.resolve({}),
-  graphNodeUpdate: (): Promise<unknown> => Promise.resolve({ graph: {} }),
-  graphNodeRemove: (): Promise<unknown> => Promise.resolve({ graph: {} }),
-  graphEdgeAdd: (): Promise<unknown> => Promise.resolve({ graph: {} }),
-  graphEdgeUpdate: (): Promise<unknown> => Promise.resolve({ graph: {} }),
-  graphEdgeRemove: (): Promise<unknown> => Promise.resolve({ graph: {} }),
   devLog: (): void => undefined,
 }));
 
@@ -47,8 +38,7 @@ describe('节点坐标记忆（store 层）', () => {
   beforeEach(() => {
     window.localStorage.clear();
     setPositionScope('/repo/workspaces/默认/斗技');
-    useGraphStore.setState({ graphs: {}, raws: {}, selectedNodeId: null, selectedEdgeId: null });
-    graphNodeAdd.mockReset();
+    useGraphStore.setState({ graphs: {}, raws: {}, selectedNodeId: null });
   });
 
   it('引擎回包不会把拖动后的坐标冲回网格', () => {
@@ -85,7 +75,7 @@ describe('节点坐标记忆（store 层）', () => {
     expect(nodeAt('n1')).toEqual({ x: 420, y: 300 });
   });
 
-  it('新建节点（引擎回包）不会让已有节点弹回网格', async () => {
+  it('引擎回包（带 raw）新增节点时不会让已有节点弹回网格', () => {
     useGraphStore.getState().setGraph(DEVICE, {
       deviceId: DEVICE,
       nodes: [{ id: 'n1', name: 'A', enter: [], x: 60, y: 40, visits: 0 }],
@@ -97,13 +87,11 @@ describe('节点坐标记忆（store 层）', () => {
     });
     useGraphStore.getState().moveNode(DEVICE, 'n1', 500, 360);
 
-    // createNode：引擎回包带两个节点（只有网格坐标）
-    graphNodeAdd.mockResolvedValueOnce({ nodeId: 'n2', graph: payload(['n1', 'n2']) });
-    const created = await useGraphStore.getState().createNode(DEVICE, '新界面');
+    const raw = payload(['n1', 'n2']);
+    useGraphStore.getState().setGraph(DEVICE, toGraphData(DEVICE, raw), raw);
 
-    expect(created).toBe('n2');
-    expect(nodeAt('n1')).toEqual({ x: 500, y: 360 }); // 老节点守住摆位
-    expect(nodeAt('n2')).toBeDefined(); // 新节点用引擎的网格坐标
+    expect(nodeAt('n1')).toEqual({ x: 500, y: 360 });
+    expect(nodeAt('n2')).toBeDefined();
   });
 
   it('「重新布局」显式丢弃摆位记忆', () => {

@@ -1,0 +1,752 @@
+/* ==========================================================================
+   GamePilot site · enhancements for the React build
+   CSS aurora / TechText / TiltedCard / Spotlight / Glare / StarBorder / ClickSpark.
+   ========================================================================== */
+
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+
+.lenis.lenis-stopped {
+  overflow: hidden;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- scroll progress ---- */
+
+.scroll-progress {
+  position: fixed;
+  inset: 0 0 auto;
+  height: 2px;
+  z-index: 300;
+  transform-origin: 0 50%;
+  background: linear-gradient(90deg, #3b7dff, #4da3ff 35%, #38d6f5 68%, #ffd15c);
+  box-shadow: 0 0 14px rgba(77, 163, 255, 0.55);
+  pointer-events: none;
+}
+
+/* ---- ambient aurora (pure CSS) ---- */
+
+.hero-aurora {
+  position: absolute;
+  left: -8%;
+  right: -8%;
+  top: -20%;
+  height: 86%;
+  opacity: 0.92;
+  pointer-events: none;
+  background:
+    radial-gradient(42% 50% at 30% 38%, rgba(77, 163, 255, 0.34), transparent 70%),
+    radial-gradient(34% 44% at 70% 30%, rgba(56, 214, 245, 0.2), transparent 72%),
+    radial-gradient(46% 54% at 52% 62%, rgba(139, 123, 255, 0.26), transparent 74%),
+    conic-gradient(
+      from 210deg at 50% 26%,
+      transparent 0deg,
+      rgba(77, 163, 255, 0.16) 44deg,
+      transparent 92deg,
+      rgba(56, 214, 245, 0.12) 160deg,
+      transparent 236deg,
+      rgba(139, 123, 255, 0.12) 300deg,
+      transparent 350deg
+    );
+  filter: blur(36px) saturate(1.18);
+  animation: auroraDrift 18s ease-in-out infinite alternate;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 62%, transparent 97%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 62%, transparent 97%);
+}
+
+@keyframes auroraDrift {
+  from {
+    transform: translate3d(-2%, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2%, 2%, 0) scale(1.07);
+  }
+}
+
+.hero-stars {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.85;
+  background-image:
+    radial-gradient(1px 1px at 24px 36px, rgba(255, 255, 255, 0.75) 50%, transparent 51%),
+    radial-gradient(1.4px 1.4px at 148px 96px, rgba(178, 214, 255, 0.6) 50%, transparent 51%),
+    radial-gradient(1px 1px at 232px 52px, rgba(255, 255, 255, 0.45) 50%, transparent 51%),
+    radial-gradient(1.6px 1.6px at 76px 168px, rgba(139, 123, 255, 0.5) 50%, transparent 51%);
+  background-size: 300px 240px, 360px 280px, 320px 320px, 420px 320px;
+  background-position: 0 0, 40px 60px, 120px 20px, 200px 120px;
+  mask-image: radial-gradient(ellipse 72% 58% at 50% 18%, #000 0%, transparent 76%);
+  -webkit-mask-image: radial-gradient(ellipse 72% 58% at 50% 18%, #000 0%, transparent 76%);
+  animation: starDrift 80s linear infinite;
+}
+
+@keyframes starDrift {
+  to {
+    background-position: 300px 240px, 400px 340px, 440px 340px, 620px 440px;
+  }
+}
+
+.cta-aurora {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0.7;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 120% at 18% 0%, rgba(77, 163, 255, 0.42), transparent 62%),
+    radial-gradient(52% 110% at 82% 6%, rgba(56, 214, 245, 0.26), transparent 66%),
+    radial-gradient(64% 130% at 50% 108%, rgba(139, 123, 255, 0.32), transparent 72%);
+  filter: blur(26px);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 40%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 40%);
+}
+
+.cta-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+.cta-card > .cta-aurora,
+.cta-card > .cta-glow {
+  position: absolute;
+  z-index: 0;
+}
+
+/* ---- BlurText ---- */
+
+.blur-text {
+  display: inline-block;
+}
+
+h1 .blur-text,
+h2 .blur-text {
+  vertical-align: baseline;
+}
+
+/* animated gradient text */
+
+.text-grad {
+  background-size: 180% 100%;
+  animation: gradShift 9s ease-in-out infinite alternate;
+}
+
+@keyframes gradShift {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 100% 50%;
+  }
+}
+
+/* ---- SpotlightCard ---- */
+
+.spotlight-card {
+  --spot-x: 50%;
+  --spot-y: 0px;
+  --spot-color: rgba(77, 163, 255, 0.16);
+}
+
+.spotlight-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    420px circle at var(--spot-x) var(--spot-y),
+    var(--spot-color),
+    transparent 68%
+  );
+  opacity: 0;
+  transition: opacity 0.45s ease;
+  pointer-events: none;
+}
+
+.spotlight-card:hover::before {
+  opacity: 1;
+}
+
+.spotlight-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* keep the lift on hover even though motion controls transform */
+
+.feature-card.spotlight-card:hover {
+  transform: translateY(-3px) !important;
+}
+
+.bento > div {
+  display: flex;
+  min-width: 0;
+}
+
+.bento > div > .bento-card {
+  flex: 1;
+}
+
+/* ---- GlareHover ---- */
+
+.glare-hover {
+  position: relative;
+  overflow: hidden;
+}
+
+.glare-hover::after {
+  content: "";
+  position: absolute;
+  top: -70%;
+  left: -80%;
+  z-index: 3;
+  width: 45%;
+  height: 240%;
+  background: linear-gradient(90deg, transparent, var(--glare-color, rgba(255, 255, 255, 0.16)), transparent);
+  transform: rotate(18deg) translateX(-60%);
+  transition: transform 0.95s var(--ease);
+  pointer-events: none;
+}
+
+.glare-hover:hover::after {
+  transform: rotate(18deg) translateX(520%);
+}
+
+/* ---- StarBorder ---- */
+
+.star-border {
+  position: relative;
+  display: block;
+  padding: 1px;
+  border-radius: 30px;
+  overflow: hidden;
+  isolation: isolate;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.star-border::before {
+  content: "";
+  position: absolute;
+  inset: -140%;
+  z-index: 0;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg 210deg,
+    rgba(77, 163, 255, 0.9) 258deg,
+    rgba(56, 214, 245, 0.95) 282deg,
+    rgba(255, 209, 92, 0.85) 300deg,
+    transparent 330deg 360deg
+  );
+  animation: starSpin var(--star-speed, 7s) linear infinite;
+}
+
+@keyframes starSpin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.star-border > .cta-card {
+  position: relative;
+  z-index: 1;
+  border-radius: 29px;
+}
+
+/* ---- ClickSpark ---- */
+
+.click-spark-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* ---- Marquee item wrapper ---- */
+
+.marquee-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 34px;
+}
+
+/* ---- form error ---- */
+
+.form-error {
+  margin-top: 9px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #fda4af;
+}
+
+/* ---- CTA star wrapper ---- */
+
+.cta-star {
+  border-radius: 30px;
+}
+
+/* ---- misc react build fixes ---- */
+
+.feature-grid > .spotlight-card {
+  min-width: 0;
+}
+
+.device-panels {
+  position: relative;
+}
+
+.device-panel {
+  min-height: 0;
+}
+
+.bento-wide > .bento-card {
+  height: 100%;
+}
+
+@media (max-width: 980px) {
+  .bento > div {
+    display: block;
+  }
+
+  .hero-aurora {
+    top: -12%;
+    height: 62%;
+    opacity: 0.68;
+  }
+}
+
+@media (max-width: 760px) {
+  .hero-aurora {
+    opacity: 0.55;
+  }
+
+  .cta-aurora {
+    opacity: 0.42;
+  }
+
+  .marquee-item {
+    gap: 22px;
+  }
+}
+
+@media (max-width: 380px) {
+  .hero h1 {
+    font-size: 33px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-grad {
+    animation: none;
+  }
+
+  .star-border::before {
+    animation: none;
+  }
+}
+
+/* ==========================================================================
+   Game library + TechText band
+   ========================================================================== */
+
+.game-section {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(58% 42% at 50% 0%, rgba(139, 123, 255, 0.09), transparent 72%),
+    radial-gradient(40% 30% at 88% 24%, rgba(56, 214, 245, 0.05), transparent 70%);
+}
+
+.game-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.game-cell {
+  min-width: 0;
+}
+
+.game-tilt {
+  width: 100%;
+  --tc-radius: 20px;
+  --tc-rim-color: rgba(255, 255, 255, 0.12);
+}
+
+.game-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 20px;
+  overflow: hidden;
+  border-radius: inherit;
+  color: #fff;
+  text-decoration: none;
+  isolation: isolate;
+}
+
+.game-art {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  transition: transform 0.9s cubic-bezier(0.2, 0.72, 0.2, 1);
+  will-change: transform;
+}
+
+.game-cover:hover .game-art {
+  transform: scale(1.055);
+}
+
+.game-cover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(
+    180deg,
+    rgba(4, 6, 12, 0.44) 0%,
+    rgba(4, 6, 12, 0.04) 30%,
+    rgba(4, 6, 12, 0.12) 54%,
+    rgba(3, 5, 10, 0.9) 100%
+  );
+  pointer-events: none;
+}
+
+.game-topline {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.game-badge {
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(5, 8, 16, 0.44);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.84);
+}
+
+.game-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: rgba(190, 235, 210, 0.9);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+}
+
+.game-auto .dot {
+  width: 5px;
+  height: 5px;
+}
+
+.game-bottom {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.game-en {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.26em;
+  color: #a9ccff;
+  text-transform: uppercase;
+}
+
+.game-title {
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.14;
+  letter-spacing: -0.02em;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.45);
+}
+
+.game-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.game-tags > span {
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.24);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.game-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  font-size: 12px;
+  color: #cfe4ff;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+
+.game-cta .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.game-cover:hover .game-cta,
+.game-cover:focus-visible .game-cta {
+  opacity: 1;
+  transform: none;
+}
+
+.game-note {
+  margin-top: 32px;
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: #6f7f99;
+}
+
+/* ---- TechText band ---- */
+
+.tech-band {
+  position: relative;
+  overflow: hidden;
+  padding: 92px 0 54px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background:
+    radial-gradient(72% 120% at 50% -14%, rgba(77, 163, 255, 0.16), transparent 64%),
+    radial-gradient(48% 80% at 82% 72%, rgba(139, 123, 255, 0.09), transparent 70%),
+    #05070e;
+}
+
+.tech-band-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse 72% 74% at 50% 50%, #000 0%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 72% 74% at 50% 50%, #000 0%, transparent 80%);
+}
+
+.tech-band-inner {
+  position: relative;
+  z-index: 1;
+}
+
+.tech-band-head {
+  text-align: center;
+}
+
+.tech-band-sub {
+  margin-top: 14px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.tech-band-word {
+  position: relative;
+  width: 100%;
+  height: 360px;
+  margin: 4px 0 10px;
+}
+
+.tech-band-word canvas {
+  display: block;
+}
+
+.tech-band-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 26px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.075);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  color: #687a98;
+}
+
+.tech-band-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: #9fc4f8;
+}
+
+.tech-band-hint .dot {
+  width: 5px;
+  height: 5px;
+}
+
+@media (max-width: 1120px) {
+  .nav > a {
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  .nav > a.is-active::after {
+    left: 10px;
+    right: 10px;
+  }
+}
+
+@media (max-width: 980px) {
+  .game-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .tech-band {
+    padding: 74px 0 44px;
+  }
+
+  .tech-band-word {
+    height: 280px;
+  }
+
+  .hero-aurora {
+    top: -14%;
+    height: 72%;
+    opacity: 0.78;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-topright {
+    display: none;
+  }
+
+  .game-grid {
+    gap: 14px;
+  }
+
+  .game-cover {
+    padding: 16px;
+  }
+
+  .game-title {
+    font-size: 23px;
+  }
+
+  .tech-band {
+    padding: 64px 0 38px;
+  }
+
+  .tech-band-word {
+    height: 196px;
+  }
+
+  .tech-band-sub {
+    font-size: 12.5px;
+    padding-inline: 12px;
+  }
+
+  .tech-band-foot {
+    justify-content: center;
+    text-align: center;
+    font-size: 8.5px;
+    letter-spacing: 0.14em;
+  }
+
+  .hero-aurora {
+    opacity: 0.62;
+  }
+
+  .cta-aurora {
+    opacity: 0.56;
+  }
+}
+
+@media (max-width: 640px) {
+  .game-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-aurora,
+  .hero-stars {
+    animation: none;
+  }
+}
+
+.hint-touch {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .hint-wide {
+    display: none;
+  }
+
+  .hint-touch {
+    display: inline;
+  }
+}
+
+@media (max-width: 980px) {
+  .nav {
+    background: #070a11;
+  }
+
+  .nav.is-open {
+    box-shadow: 0 30px 70px rgba(0, 0, 0, 0.55);
+  }
+}
+
+.game-cover:focus-visible {
+  outline: 2px solid #6db6ff;
+  outline-offset: -3px;
+}
+
+
+/* 原生 dialog 打开时锁定背景滚动 */
+body:has(dialog[open]) {
+  overflow: hidden;
+}

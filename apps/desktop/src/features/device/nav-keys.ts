@@ -14,8 +14,7 @@
  *   界面照搬 Android 那三个，用户按「返回」其实按的是「Home」，按钮名和实际动作对不上；
  * - **windows**（macOS 本机窗口走的就是这个 kind，见 `devices/macos.py`）：
  *   这些键一个都没有，`MAC_KEYS` 里只有键盘按键，点下去必然报"macOS 不支持的按键"；
- * - **mock / remote**：合成设备与未知来源，全给 —— 未知时宁可保留功能
- *   （报错文案是明确的），也不要悄悄把按钮藏掉。
+ * - **remote**：未知来源，全给 —— 报错文案明确，不悄悄藏按钮。
  *
  * 纯函数、可单测。
  */
@@ -56,7 +55,7 @@ export function navKeysFor(kind: DeviceKind): readonly NavKeySpec[] {
     case 'windows':
       return NO_KEYS;
     default:
-      // mock / remote：合成设备与未知来源，按 Android 那一套给
+      // remote 等未知来源，按 Android 那一套给
       return ANDROID_KEYS;
   }
 }

@@ -3,17 +3,16 @@
 全部在 `tmp_path` 上跑，**不碰仓库里的 `workspaces/`**：
 
 - library 层：名称校验、列举（跳过无 graph.json 的目录、排序、计数字段、modified）、
-  create / duplicate / rename / trash 的落盘行为；
+  create / duplicate / rename / delete（真删除）的落盘行为；
 - RPC 层：`RpcServer` + `io.StringIO`（不拉起子进程）跑通
   `workflow.create → workflow.duplicate → workflow.rename → workflow.delete`，
-  断言契约里的返回形状（`{created/root/trashed, current, items}`）与"当前工作流"的切换。
+  断言契约里的返回形状（`{created/root/removed, current, items}`）与"当前工作流"的切换。
 """
 
 from __future__ import annotations
 
 import io
 import json
-import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -145,17 +144,37 @@ def test_list_workflows_skips_trash_and_dirs_without_graph(tmp_path: Path) -> No
     _write_workflow(tmp_path, "beta", nodes=2, edges=1, recognizers=1, templates=3)
     _write_workflow(tmp_path, "alpha")
     (tmp_path / "no-graph").mkdir()  # 没有 graph.json：不是工作流
-    (tmp_path / library.TRASH_DIR / "old-20240101-000000").mkdir(parents=True)  # 回收站不算工作流
+    (tmp_path / ".trash" / "old-20240101-000000").mkdir(parents=True)  # 老版本留下的回收站：隐藏目录，不算工作流
     (tmp_path / "graph.json").write_text("{}", encoding="utf-8")  # 工作区根自己的文件更不算
     (tmp_path / "beta" / "templates" / "sub").mkdir()  # templates 只数文件，不数目录
 
     items = library.list_workflows(str(tmp_path))
 
     assert [item["name"] for item in items] == ["alpha", "beta"], "按 name 排序"
-    assert set(items[0]) == {"name", "root", "nodes", "edges", "recognizers", "templates", "modified"}
+    assert set(items[0]) == {
+        "name",
+        "root",
+        "nodes",
+        "edges",
+        "recognizers",
+        "templates",
+        "modified",
+        "trigger",
+    }
     assert (items[0]["nodes"], items[0]["edges"], items[0]["recognizers"], items[0]["templates"]) == (0, 0, 0, 0)
     assert (items[1]["nodes"], items[1]["edges"], items[1]["recognizers"], items[1]["templates"]) == (2, 1, 1, 3)
     assert items[1]["root"] == str(tmp_path / "beta")
+
+
+def test_list_workflows_reports_first_trigger_condition(tmp_path: Path) -> None:
+    root = _write_workflow(tmp_path, "beta")
+    graph = Graph.load(str(root / library.GRAPH_FILE))
+    graph.flow = {"steps": [{"id": "trigger", "type": "schedule", "params": {"at": "09:00"}}]}
+    graph.save(str(root / library.GRAPH_FILE))
+
+    item = next(entry for entry in library.list_workflows(str(tmp_path)) if entry["name"] == "beta")
+
+    assert item["trigger"] == {"type": "schedule", "params": {"at": "09:00"}}
 
 
 def test_list_workflows_on_missing_base_is_empty(tmp_path: Path) -> None:
@@ -170,7 +189,7 @@ def test_workflow_modified_is_int_and_counts_graph(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 新建 / 复制 / 改名 / 回收站
+# 新建 / 复制 / 改名 / 删除
 # --------------------------------------------------------------------------- #
 
 
@@ -181,6 +200,9 @@ def test_create_workflow_makes_empty_graph_and_templates(tmp_path: Path) -> None
     assert (tmp_path / "新工作流" / "templates").is_dir()
     graph = Graph.load(str(tmp_path / "新工作流" / library.GRAPH_FILE))
     assert graph.nodes == {} and graph.edges == [] and graph.specs == {}
+    assert graph.flow is not None
+    assert graph.flow["steps"][0]["type"] == "schedule"
+    assert graph.flow["steps"][0]["params"]["at"] == "09:00"
 
     listing = library.list_workflows(str(tmp_path))
     assert [item["name"] for item in listing] == ["新工作流"]
@@ -260,42 +282,21 @@ def test_rename_workflow_rejects_existing_target_and_missing_source(tmp_path: Pa
     assert library.rename_workflow(str(tmp_path / "alpha"), "alpha") == str(tmp_path / "alpha")
 
 
-def test_trash_into_moves_into_timestamped_trash_dir(tmp_path: Path) -> None:
+def test_remove_dir_deletes_for_real(tmp_path: Path) -> None:
+    """删除是真删除：目录连内容一起没了，也不留回收站。"""
     source = _write_workflow(tmp_path, "alpha", nodes=1, recognizers=1, templates=1)
 
-    target = library.trash_into(str(source), str(tmp_path / library.TRASH_DIR), "工作流目录")
+    removed = Path(library.remove_dir(str(source), "工作流目录"))
 
-    assert not source.exists(), "原目录必须消失（但没被真删除）"
-    assert Path(target).parent == tmp_path / library.TRASH_DIR
-    assert re.fullmatch(r"alpha-\d{8}-\d{6}", Path(target).name), f"回收站目录名要带时间戳: {target}"
-    assert (Path(target) / library.GRAPH_FILE).is_file(), "内容原样保留，用户能恢复"
-    assert (Path(target) / "templates" / "t0.png").is_file()
-    assert library.list_workflows(str(tmp_path)) == [], "回收站里的工作流不再出现在列表里"
+    assert not source.exists(), "目录真的删掉了"
+    assert removed.resolve() == source.resolve()
+    assert not (tmp_path / ".trash").exists(), "不再有回收站"
+    assert library.list_workflows(str(tmp_path)) == []
 
 
-def test_trash_into_twice_in_the_same_second_does_not_overwrite(tmp_path: Path) -> None:
-    trash = str(tmp_path / library.TRASH_DIR)
-    first = library.trash_into(str(_write_workflow(tmp_path, "alpha")), trash, "工作流目录")
-    second = library.trash_into(str(_write_workflow(tmp_path, "alpha")), trash, "工作流目录")
-
-    assert first != second
-    assert Path(first).is_dir() and Path(second).is_dir()
-
-
-def test_trash_into_rejects_missing_dir(tmp_path: Path) -> None:
+def test_remove_dir_rejects_missing_dir(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="不存在"):
-        library.trash_into(str(tmp_path / "nope"), str(tmp_path / library.TRASH_DIR), "工作流目录")
-
-
-def test_trash_into_puts_the_dir_in_the_given_trash(tmp_path: Path) -> None:
-    """`trash_into` 由调用方决定回收站在哪 —— 工作区里的工作流进 `<工作区>/.trash`。"""
-    source = _write_workflow(tmp_path, "alpha")
-
-    target = library.trash_into(str(source), str(tmp_path / "工作区" / library.TRASH_DIR), "工作流目录")
-
-    assert not source.exists()
-    assert Path(target).parent == tmp_path / "工作区" / library.TRASH_DIR
-    assert (Path(target) / library.GRAPH_FILE).is_file()
+        library.remove_dir(str(tmp_path / "nope"), "工作流目录")
 
 
 # --------------------------------------------------------------------------- #
@@ -330,7 +331,16 @@ def test_workflow_lifecycle_over_rpc(rpc: tuple[RpcServer, io.StringIO, Path]) -
     assert before != created["current"] and manager.project_info()["root"] == created["created"]
     assert (ws / "斗技" / library.GRAPH_FILE).is_file()
     assert (ws / "斗技" / "templates").is_dir()
-    assert set(created["items"][0]) == {"name", "root", "nodes", "edges", "recognizers", "templates", "modified"}
+    assert set(created["items"][0]) == {
+        "name",
+        "root",
+        "nodes",
+        "edges",
+        "recognizers",
+        "templates",
+        "modified",
+        "trigger",
+    }
 
     # project.set 切到别处后，workflow.create 仍然建在当前**工作区**根下
     _call(server, out, "project.set", {"dir": str(ws / "斗技")})
@@ -357,12 +367,13 @@ def test_workflow_lifecycle_over_rpc(rpc: tuple[RpcServer, io.StringIO, Path]) -
     assert renamed["current"] == str(ws / "百鬼")
     assert manager.project_info()["root"] == renamed["current"]
 
-    # workflow.delete 当前工作流：移进工作区 .trash/，并切到剩下的第一个
+    # workflow.delete 当前工作流：**真删除**，并切到剩下的第一个
     deleted = _call(server, out, "workflow.delete", {"dir": renamed["current"]})
     assert deleted["current"] == str(ws / "御魂"), "切到剩下的第一个（按 name 排序）"
     assert [item["name"] for item in deleted["items"]] == ["御魂", "斗技改"]
-    trashed = sorted(item.name for item in (ws / ".trash").iterdir())
-    assert len(trashed) == 1 and re.fullmatch(r"百鬼-\d{8}-\d{6}", trashed[0]), trashed
+    assert not (ws / "百鬼").exists(), "目录真的删掉了"
+    assert not (ws / ".trash").exists(), "不再有回收站"
+    assert Path(str(deleted["removed"])).name == "百鬼"
 
     # 全删掉：当前工作流变空串（不自动补建任何东西）
     for item in _call(server, out, "workspace.tree")["workflows"]:

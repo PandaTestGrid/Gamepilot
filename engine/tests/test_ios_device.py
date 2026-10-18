@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import stat
 import time
@@ -20,10 +21,19 @@ import pytest
 from gamepilot.devices import ios, ios_usb, macos
 
 
-def _fake_binary(directory: Path, name: str, body: str) -> str:
-    """造一个可执行的假命令，用来替代 pymobiledevice3 / ffmpeg。"""
+def _echo_binary(directory: Path, name: str, text: str) -> str:
+    """造一个"只会把 text 打到 stdout"的假命令，用来替代 pymobiledevice3。
+
+    Windows 跑不了 `#!/bin/sh` 脚本（CreateProcess 报"不是有效的 Win32 程序"），
+    那边写 `.cmd` —— 两边做的还是同一件事，所以子进程那一圈是真的在跑。
+    `text` 必须是 ASCII（JSON 用 `ensure_ascii=True` 生成即可）。
+    """
+    if os.name == "nt":
+        path = directory / f"{name}.cmd"
+        path.write_text(f"@echo off\necho {text}\n", encoding="utf-8")
+        return str(path)
     path = directory / name
-    path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    path.write_text(f"#!/bin/sh\necho '{text}'\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
     return str(path)
 
@@ -48,7 +58,7 @@ def test_list_devices_parses_usbmux_json(tmp_path: Path, monkeypatch: pytest.Mon
         {"Identifier": "00008101-00FFEEDDCCBB", "DeviceName": "老 iPhone", "ProductVersion": "16.7"},
         {"DeviceName": "坏数据，没有 udid"},
     ]
-    binary = _fake_binary(tmp_path, "pymobiledevice3", f"echo '{json.dumps(payload)}'\n")
+    binary = _echo_binary(tmp_path, "pymobiledevice3", json.dumps(payload))
     monkeypatch.setattr(shutil, "which", lambda name: binary if name == "pymobiledevice3" else None)
 
     devices = ios.list_devices()
@@ -59,33 +69,246 @@ def test_list_devices_parses_usbmux_json(tmp_path: Path, monkeypatch: pytest.Mon
 
 def test_discover_marks_unsupported_devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     payload = [{"Identifier": "A", "DeviceName": "iPhone 15", "ProductVersion": "18.1"}]
-    binary = _fake_binary(tmp_path, "pymobiledevice3", f"echo '{json.dumps(payload)}'\n")
+    binary = _echo_binary(tmp_path, "pymobiledevice3", json.dumps(payload))
     monkeypatch.setattr(shutil, "which", lambda name: binary if name == "pymobiledevice3" else None)
+
+    monkeypatch.setattr(ios, "screen_size", lambda udid: (1170, 2532))
 
     found = ios.discover()
     assert len(found) == 1
     assert found[0].id == "ios:A"
     assert found[0].status == "discovered"
+    # 发现在线设备时就带上分辨率（用户反馈："iOS 设备没有看到设备分辨率"）
+    assert found[0].resolution == (1170, 2532)
+
+
+def test_discover_skips_resolution_probe_for_unsupported_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不达标的系统（<17.4）连不上，没必要为它去开 lockdown 会话。"""
+    payload = [{"Identifier": "OLD", "DeviceName": "老 iPhone", "ProductVersion": "16.7"}]
+    binary = _echo_binary(tmp_path, "pymobiledevice3", json.dumps(payload))
+    monkeypatch.setattr(shutil, "which", lambda name: binary if name == "pymobiledevice3" else None)
+    probed: list[str] = []
+
+    def fake_screen_size(udid: str) -> tuple[int, int] | None:
+        probed.append(udid)
+        return None
+
+    monkeypatch.setattr(ios, "screen_size", fake_screen_size)
+
+    found = ios.discover()
+
+    assert found[0].status == "failed"
+    assert found[0].resolution is None
+    assert probed == []
+
+
+# ---------------------------------------------------------------- 屏幕尺寸
+
+
+def test_screen_size_reads_pixels_from_itunes_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`com.apple.mobile.iTunes` 的 ScreenWidth/ScreenHeight 是**像素**（1170×2532 = iPhone 13 Pro）。"""
+    monkeypatch.setattr(ios, "_SCREEN_SIZE_CACHE", {})
+    calls: list[str] = []
+
+    async def fake(udid: str) -> tuple[int, int] | None:
+        calls.append(udid)
+        return (1170, 2532)
+
+    monkeypatch.setattr(ios, "_read_screen_size", fake)
+
+    assert ios.screen_size("UDID-1") == (1170, 2532)
+    assert ios.screen_size("UDID-1") == (1170, 2532)  # 第二次走缓存
+    assert calls == ["UDID-1"], "一次扫描只该开一条 lockdown 会话"
+
+
+def test_screen_size_failure_is_none_not_an_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没配对 / 隧道被占：返回 None（列表照常出现、那一格显示 —），不能让扫描挂掉。"""
+    monkeypatch.setattr(ios, "_SCREEN_SIZE_CACHE", {})
+
+    async def boom(udid: str) -> tuple[int, int] | None:
+        raise RuntimeError("设备没配对")
+
+    monkeypatch.setattr(ios, "_read_screen_size", boom)
+
+    assert ios.screen_size("UDID-2") is None
+
+
+def test_screen_size_without_the_keys_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ios, "_SCREEN_SIZE_CACHE", {})
+
+    async def empty(udid: str) -> tuple[int, int] | None:
+        return None
+
+    monkeypatch.setattr(ios, "_read_screen_size", empty)
+
+    assert ios.screen_size("UDID-3") is None
 
 
 def test_ios_uses_tunnel_capture_not_quicktime() -> None:
-    """实测结论固化下来：不再有 ffmpeg/avfoundation 那条路（macOS 看不到 iPhone 采集设备）。"""
+    """macOS 无 ffmpeg/avfoundation iPhone 采集路径。"""
     assert not hasattr(ios, "find_capture_device")
     assert not hasattr(ios, "QuickTimeCapture")
     assert hasattr(ios, "TunnelSession"), "采集走隧道 + DVT 截图"
 
 
-def test_no_pymobiledevice3_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(shutil, "which", lambda name: None)
-    assert ios.list_devices() == []
-    assert ios.discover() == []
+# ---------------------------------------------------------------- 进程级隧道额度
+
+
+def test_second_ios_device_is_refused_with_the_owner_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    """用户态隧道是进程级单例：第二台 iPhone 要在碰隧道**之前**给出人话原因，
+    而不是把 pymobiledevice3 的英文异常糊到界面上。"""
+    previous = ios._TUNNEL_SLOT
+    ios._TUNNEL_SLOT = ("UDID-A", "iPhone A (iOS 26.6)")
+    monkeypatch.setattr(ios, "list_devices", lambda: [ios.IosDevice(udid="UDID-B", name="iPhone B", version="26.6")])
+    try:
+        with pytest.raises(RuntimeError, match="先断开「iPhone A"):
+            ios.IosController(udid="UDID-B").connect()
+        assert ios._TUNNEL_SLOT == ("UDID-A", "iPhone A (iOS 26.6)"), "额度不该被抢走"
+    finally:
+        ios._TUNNEL_SLOT = previous
+
+
+def test_ios_connect_releases_the_slot_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """连到一半失败（比如 HID 服务不可用）必须把额度还回去，否则这台设备再也连不上。"""
+    previous = ios._TUNNEL_SLOT
+    ios._TUNNEL_SLOT = None
+    monkeypatch.setattr(ios, "list_devices", lambda: [ios.IosDevice(udid="UDID-C", name="iPhone C", version="26.6")])
+    monkeypatch.setattr(ios.IosController, "_report_usb_config", lambda self: None)
+
+    class BoomSession:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("隧道炸了")
+
+    monkeypatch.setattr(ios, "TunnelSession", BoomSession)
+    try:
+        with pytest.raises(RuntimeError, match="隧道炸了"):
+            ios.IosController(udid="UDID-C").connect()
+        assert ios._TUNNEL_SLOT is None, "失败后必须把额度还回去"
+    finally:
+        ios._TUNNEL_SLOT = previous
+
+
+def test_ios_connect_closes_the_partial_tunnel_when_start_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`start()` 半路失败（没出帧/超时）必须把半开的隧道收掉。
+
+    以前要等 `start()` 成功才把 session 挂到 controller 上；失败时这个半开的隧道
+    根本没机会 `close()`，就留在 pymobiledevice3 的进程级单例里 —— 下一次连接
+    才会看到 "a userspace tunnel is already active in this process"。
+    """
+    previous = ios._TUNNEL_SLOT
+    ios._TUNNEL_SLOT = None
+    monkeypatch.setattr(ios, "list_devices", lambda: [ios.IosDevice(udid="UDID-D", name="iPhone D", version="26.6")])
+    monkeypatch.setattr(ios.IosController, "_report_usb_config", lambda self: None)
+
+    class HalfOpenSession:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self.udid = "UDID-D"
+            self.name = kwargs.get("name", "")
+            self.size = (0, 0)
+            self.error = None
+            self.closed = False
+            sessions.append(self)
+
+        def start(self, timeout: float = 25.0) -> None:
+            raise RuntimeError("iOS 采集没有出帧: 测试")
+
+        def close(self) -> None:
+            self.closed = True
+
+    sessions: list[HalfOpenSession] = []
+    monkeypatch.setattr(ios, "TunnelSession", HalfOpenSession)
+    try:
+        with pytest.raises(RuntimeError, match="没有出帧"):
+            ios.IosController(udid="UDID-D").connect()
+        assert sessions, "应该建过一条会话"
+        session = sessions[0]
+        assert session.closed is True, "start 失败的半开隧道必须被 close"
+        assert session.name == "iPhone D (iOS 26.6)", "报错信息要用人类可读的设备名"
+        assert ios._TUNNEL_SLOT is None, "失败后额度也要还回去"
+    finally:
+        ios._TUNNEL_SLOT = previous
+
+
+def test_tunnel_start_cleans_up_and_translates_the_singleton_error() -> None:
+    """库里的英文单例异常宁可翻成人话，也不能糊到界面上；失败时循环/会话都要收干净。"""
+    raw = (
+        "a userspace tunnel is already active in this process (PyTCP's stack is a "
+        "process-global singleton; only one userspace tunnel per process is supported)"
+    )
+    session = ios.TunnelSession("UDID-E", name="iPhone E")
+
+    async def boom() -> None:
+        raise RuntimeError(raw)
+
+    session._astart = boom  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="同时只能带一台 iPhone") as info:
+            session.start(timeout=3)
+        assert raw not in str(info.value)
+    finally:
+        session.close()
+    assert session._loop is None, "失败后事件循环线程要停掉"
+    assert ios._LIVE_SESSION is None, "失败后不能还挂着'谁握着隧道'"
+
+
+def test_claim_tunnel_slot_reports_a_stale_library_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """额度还了、库里的隧道却还活着：给「先断开/重启」的人话，别让英文异常上去。"""
+    previous = ios._TUNNEL_SLOT
+    ios._TUNNEL_SLOT = None
+    monkeypatch.setattr(ios, "_userspace_tunnel_active", lambda: True)
+    monkeypatch.setattr(ios, "_wait_userspace_released", lambda _timeout: False)
+    try:
+        with pytest.raises(RuntimeError, match="还留着上一次"):
+            ios._claim_tunnel_slot("UDID-F", "iPhone F")
+        assert ios._TUNNEL_SLOT is None, "报错时不能占额度"
+    finally:
+        ios._TUNNEL_SLOT = previous
+
+
+def test_claim_tunnel_slot_allows_handover_for_the_same_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一台设备的残留交给 TunnelSession.start() 接管，不能在额度这一层就被挡下。"""
+    previous_slot = ios._TUNNEL_SLOT
+    previous_live = ios._LIVE_SESSION
+    ios._TUNNEL_SLOT = ("UDID-G", "iPhone G")
+    ios._LIVE_SESSION = ios.TunnelSession("UDID-G", name="iPhone G")  # 只当"谁握着隧道"的句柄
+    monkeypatch.setattr(ios, "_userspace_tunnel_active", lambda: True)
+    monkeypatch.setattr(ios, "_wait_userspace_released", lambda _timeout: False)
+    try:
+        ios._claim_tunnel_slot("UDID-G", "iPhone G")
+        assert ios._TUNNEL_SLOT == ("UDID-G", "iPhone G")
+    finally:
+        ios._TUNNEL_SLOT = previous_slot
+        ios._LIVE_SESSION = previous_live
+
+
+def test_tunnel_close_releases_the_tunnel_handle_and_its_loop() -> None:
+    """close() 真的要在隧道自己的事件循环里 aclose()，不能只是把线程停掉。"""
+    session = ios.TunnelSession("UDID-H", name="iPhone H")
+    closed: list[str] = []
+
+    class FakeTunnel:
+        serial = "UDID-H"
+
+        async def aclose(self) -> None:
+            closed.append(self.serial)
+
+    session._tunnel = FakeTunnel()
+    ios._set_live_session(session)
+    session._ensure_loop()
+    session.close()
+
+    assert closed == ["UDID-H"]
+    assert session._loop is None and session._thread is None
+    assert ios._LIVE_SESSION is None
 
 
 # ---------------------------------------------------------------- USB 配置测绘
 
 
 def test_usb_configuration_paths_counted() -> None:
-    """配置的"通路数"就是接口数：配置 2 只有 3 条、配置 6 有 11 条（实测机型）。"""
+    """USB 配置编号对应接口数量（如配置 2→3 条、配置 6→11 条）。"""
     config2 = ios_usb.UsbConfiguration(value=2, interfaces=[(0, 0, 0x06), (1, 0, 0x01), (1, 1, 0x01), (2, 0, 0x03)])
     # 同号接口的多个备用设置只算一条通路
     config6 = ios_usb.UsbConfiguration(
@@ -378,18 +601,100 @@ def test_ios_controller_detects_stall() -> None:
 
 
 def test_digitizer_transform_per_orientation() -> None:
-    """iOS 触摸注入是硬件竖屏坐标系：横屏必须做旋转变换（实机测出来的）。"""
+    """digitizer 固定在物理竖屏玻璃上：横屏必须按 Home 位置旋回。"""
     # 竖屏：原样
     assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_PORTRAIT) == (0.25, 0.75)
     # 竖屏倒置：180°
     assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_PORTRAIT_UPSIDE_DOWN) == (0.75, 0.25)
-    # 横屏（右）：实测方向码 4 → (x,y) ↦ (y, 1-x)（计算器探针 Δ=6060 验证）
-    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_RIGHT) == (0.75, 0.75)
-    assert ios.to_digitizer(0.155, 0.492, ios.ORIENT_LANDSCAPE_RIGHT) == (0.492, 0.845)
-    # 横屏（左）：反方向
-    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_LEFT) == (0.25, 0.25)
+    # 方向码 3 = LandscapeRight（Home 在右，画面逆时针 90°）：(x,y) ↦ (1-y, x)
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_RIGHT) == (0.25, 0.25)
+    assert ios.to_digitizer(0.155, 0.492, ios.ORIENT_LANDSCAPE_RIGHT) == (0.508, 0.155)
+    # 方向码 4 = LandscapeLeft（Home 在左，画面顺时针 90°）：(x,y) ↦ (y, 1-x)
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_LEFT) == (0.75, 0.75)
     # 未知方向按竖屏处理（至少不错得离谱）
     assert ios.to_digitizer(0.3, 0.4, 99) == (0.3, 0.4)
+
+
+def test_digitizer_rotates_even_when_buffer_is_landscape() -> None:
+    """缓冲已经是横屏也要旋 —— 这就是"横屏点下去还是竖屏位置"的根因。
+
+    HID 的 mainTouchscreen 用物理竖屏玻璃坐标，和 DVT 这一帧的宽高无关。
+    之前按"缓冲宽>高就不旋"处理，横屏时等于把横屏画面坐标原样当竖屏送了。
+    """
+    # 横屏缓冲 + 横屏方向码：照旋（不是恒等）
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_RIGHT, (2796, 1290)) == (0.25, 0.25)
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_LEFT, (2796, 1290)) == (0.75, 0.75)
+    # 竖屏缓冲 + 横屏方向码：投屏会转正，点击同样旋回
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_LANDSCAPE_RIGHT, (1290, 2796)) == (0.25, 0.25)
+    # 方向码还没刷新（停在竖屏 / 不认识）+ 画面已经横了：按最常见的 Home 在右兜底
+    assert ios.effective_orientation(ios.ORIENT_PORTRAIT, 2796, 1290) == ios.ORIENT_LANDSCAPE_RIGHT
+    assert ios.effective_orientation(ios.ORIENT_PORTRAIT_UPSIDE_DOWN, 2796, 1290) == ios.ORIENT_LANDSCAPE_RIGHT
+    assert ios.effective_orientation(99, 2796, 1290) == ios.ORIENT_LANDSCAPE_RIGHT
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_PORTRAIT, (2796, 1290)) == (0.25, 0.25)
+    # 横屏方向码原样保留（不能被兜底改成 Home 在右）
+    assert ios.effective_orientation(ios.ORIENT_LANDSCAPE_LEFT, 2796, 1290) == ios.ORIENT_LANDSCAPE_LEFT
+    assert ios.effective_orientation(ios.ORIENT_LANDSCAPE_RIGHT, 2796, 1290) == ios.ORIENT_LANDSCAPE_RIGHT
+    # 真竖屏：不旋
+    assert ios.effective_orientation(ios.ORIENT_PORTRAIT, 1290, 2796) == ios.ORIENT_PORTRAIT
+    assert ios.to_digitizer(0.25, 0.75, ios.ORIENT_PORTRAIT, (1290, 2796)) == (0.25, 0.75)
+
+
+def test_orient_screenshot_rotates_portrait_capture_to_landscape() -> None:
+    import numpy as np
+
+    # 2×3 竖图，每格一个值，用来确认旋转方向
+    image = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.uint8)
+    home_right = ios.orient_screenshot(image, ios.ORIENT_LANDSCAPE_RIGHT)
+    assert home_right.shape[:2] == (2, 3)
+    assert [int(item) for item in home_right.reshape(-1)] == [2, 4, 6, 1, 3, 5]
+    home_left = ios.orient_screenshot(image, ios.ORIENT_LANDSCAPE_LEFT)
+    assert home_left.shape[:2] == (2, 3)
+    assert [int(item) for item in home_left.reshape(-1)] == [5, 3, 1, 6, 4, 2]
+    # 已经是横图不再转第二次
+    assert ios.orient_screenshot(home_right, ios.ORIENT_LANDSCAPE_RIGHT).shape[:2] == (2, 3)
+
+
+def test_digitizer_is_inverse_of_screenshot_rotation() -> None:
+    """点在转正后的画面上，必须回到原始缓冲里的同一个像素。"""
+    import numpy as np
+
+    raw = np.zeros((4, 2), np.uint8)  # 高 4、宽 2 的竖屏缓冲
+    raw[1, 0] = 7  # 硬件像素 (x=0, y=1)
+    raw_x, raw_y = 0.5 / 2, 1.5 / 4
+
+    for orientation in (ios.ORIENT_LANDSCAPE_LEFT, ios.ORIENT_LANDSCAPE_RIGHT):
+        shown = ios.orient_screenshot(raw, orientation)
+        ys, xs = np.where(shown == 7)
+        shown_x = (float(xs[0]) + 0.5) / shown.shape[1]
+        shown_y = (float(ys[0]) + 0.5) / shown.shape[0]
+        back_x, back_y = ios.to_digitizer(shown_x, shown_y, orientation, (raw.shape[1], raw.shape[0]))
+        assert back_x == raw_x and back_y == raw_y, (orientation, back_x, back_y)
+
+
+def test_digitizer_lands_on_same_glass_pixel_for_both_buffer_shapes() -> None:
+    """DVT 交竖屏缓冲还是已经转好的横屏缓冲，点同一物理位置要落到同一玻璃像素。
+
+    这就是用户报的"横屏坐标还是竖屏的"：DVT 在横屏时交的已经是横屏缓冲，
+    旧逻辑看到宽>高就把旋转省了 → 点哪都偏 90°。
+    """
+    import numpy as np
+
+    raw = np.zeros((4, 2), np.uint8)  # 竖屏缓冲：高 4、宽 2
+    raw[1, 0] = 7
+    raw_x, raw_y = 0.5 / 2, 1.5 / 4
+
+    for orientation, turns in ((ios.ORIENT_LANDSCAPE_RIGHT, 1), (ios.ORIENT_LANDSCAPE_LEFT, 3)):
+        # 横屏时 DVT 直接交出转好的横屏缓冲（np.rot90 的 1 = 逆时针、3 = 顺时针）
+        shown = np.rot90(raw, turns)
+        assert np.array_equal(shown, ios.orient_screenshot(raw, orientation))
+        ys, xs = np.where(shown == 7)
+        shown_x = (float(xs[0]) + 0.5) / shown.shape[1]
+        shown_y = (float(ys[0]) + 0.5) / shown.shape[0]
+
+        portrait_buffer = ios.to_digitizer(shown_x, shown_y, orientation, (raw.shape[1], raw.shape[0]))
+        landscape_buffer = ios.to_digitizer(shown_x, shown_y, orientation, (shown.shape[1], shown.shape[0]))
+        assert portrait_buffer == (raw_x, raw_y), (orientation, portrait_buffer)
+        assert landscape_buffer == (raw_x, raw_y), (orientation, landscape_buffer)
 
 
 def test_digitizer_transform_keeps_corners_in_range() -> None:
@@ -404,16 +709,43 @@ def test_digitizer_transform_keeps_corners_in_range() -> None:
             assert 0.0 <= dx <= 1.0 and 0.0 <= dy <= 1.0, f"{orientation} {x},{y} → {dx},{dy}"
 
 
+def test_controller_screenshot_follows_interface_orientation() -> None:
+    """横屏时投屏必须转成宽>高，分辨率跟着变，不能继续按竖屏控。"""
+    import numpy as np
+
+    controller, _ = _controller_with_fake_hid()
+    session = ios.TunnelSession("UDID-TEST")
+    portrait = np.zeros((6, 4, 3), np.uint8)
+    session.size = (4, 6)
+    session._frame = portrait
+    session.last_frame_at = time.time()
+    controller._session = session
+    controller._orientation = ios.ORIENT_LANDSCAPE_RIGHT
+    controller._last_aspect = "portrait"
+    controller._orientation_at = float("inf")
+
+    frame = controller.screenshot()
+    assert frame.shape[:2] == (4, 6)
+    assert controller.resolution == (6, 4)
+
+
 def test_controller_applies_orientation_to_touch() -> None:
-    """控制器要按缓存的界面方向做变换后再送 HID。"""
+    """控制器要按缓存的界面方向做变换后再送 HID（横屏缓冲也一样旋）。"""
     controller, fake = _controller_with_fake_hid()
     controller._orientation = ios.ORIENT_LANDSCAPE_RIGHT
     controller.touch("down", 0.25, 0.75)
-    assert fake.calls == [("down", round(0.75 * 65535), round(0.75 * 65535))], fake.calls
+    assert fake.calls == [("down", round(0.25 * 65535), round(0.25 * 65535))], fake.calls
 
+    session = ios.TunnelSession("UDID-TEST")
+    session.size = (2796, 1290)  # 缓冲已经是横屏：仍要旋回物理竖屏玻璃
+    controller._session = session
+    controller.touch("down", 0.2, 0.8)
+    assert fake.calls[-1] == ("down", round(0.2 * 65535), round(0.2 * 65535))
+
+    # 方向码停在竖屏但画面已经横了：兜底成 Home 在右，不能原样送
     controller._orientation = ios.ORIENT_PORTRAIT
-    controller.touch("down", 0.25, 0.75)
-    assert fake.calls[-1] == ("down", round(0.25 * 65535), round(0.75 * 65535))
+    controller.touch("down", 0.2, 0.8)
+    assert fake.calls[-1] == ("down", round(0.2 * 65535), round(0.2 * 65535))
 
 
 # ---------------------------------------------------------------- 控制通道断线自愈

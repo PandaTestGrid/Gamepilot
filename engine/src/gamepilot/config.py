@@ -20,8 +20,7 @@ config.json 形状：
 - `names` 是**列表显示名**（`workspace.add { name }` 输的那个），加法式扩展：
   老配置（v3）没有这个键就按目录名退化，读得动、不报错；
 - `active` 可以不在 `workspaces` 里（有人手改过配置）→ 载入时并进列表；
-- 文件损坏 / 字段缺失 → 当空配置，**绝不因为一个坏 config.json 让 App 起不来**；
-- 全局回收站：`<配置目录>/.trash/`（删整个工作区时用它，可恢复，不做真删除）。
+- 文件损坏 / 字段缺失 → 当空配置，**绝不因为一个坏 config.json 让 App 起不来**。
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ from dataclasses import dataclass, field
 CONFIG_FILE = "config.json"
 CONFIG_DIR_ENV = "GAMEPILOT_CONFIG_DIR"
 WORKSPACE_DIR_ENV = "GAMEPILOT_WORKSPACE_DIR"
-TRASH_DIR = ".trash"
 APP_DIR_NAME = "gamepilot"
 
 # 逃生口模式下的进程内配置：`(GAMEPILOT_WORKSPACE_DIR, 配置)`。
@@ -79,8 +77,8 @@ def default_config_dir() -> str:
 def config_dir() -> str:
     """配置目录：`GAMEPILOT_CONFIG_DIR` 优先，否则平台默认。
 
-    保留调用方给的写法（只展开 `~`、绝对化，**不解析符号链接**）：契约说回收站就是
-    `<配置目录>/.trash`，把 `/var/...` 偷偷换成 `/private/var/...` 会让前端/验收对不上。
+    保留调用方给的写法（只展开 `~`、绝对化，**不解析符号链接**）：路径是要报给界面/验收的，
+    把 `/var/...` 偷偷换成 `/private/var/...` 两边就会对不上。
     """
     override = os.environ.get(CONFIG_DIR_ENV)
     return os.path.abspath(os.path.expanduser(override)) if override else default_config_dir()
@@ -88,11 +86,6 @@ def config_dir() -> str:
 
 def config_path() -> str:
     return os.path.join(config_dir(), CONFIG_FILE)
-
-
-def global_trash_root() -> str:
-    """全局回收站：`<配置目录>/.trash`（删整个工作区时用；前端显示它告诉用户文件去哪了）。"""
-    return os.path.join(config_dir(), TRASH_DIR)
 
 
 def pinned_workspace() -> str | None:
@@ -219,14 +212,12 @@ __all__ = [
     "APP_DIR_NAME",
     "CONFIG_DIR_ENV",
     "CONFIG_FILE",
-    "TRASH_DIR",
     "WORKSPACE_DIR_ENV",
     "Config",
     "config_dir",
     "config_path",
     "default_config_dir",
     "display_name",
-    "global_trash_root",
     "load",
     "pinned_workspace",
     "save",

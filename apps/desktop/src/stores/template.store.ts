@@ -1,17 +1,4 @@
-/**
- * 模板截图缓存：**一张模板只取一次，取到就一直留着**。
- *
- * 为什么需要它（真踩过 + 用户反馈"拖动后模板突然都没了"）：
- *   1. 以前每个 `TemplateThumb` 各自 `useState` + 各自发 `template.image`：
- *      组件一被重新挂载（切节点、坞收起再展开、面板重挂）就重新取图 ——
- *      期间是"…"，失败就是"×"，而且**失败会一直锁死**（没有重试路径）。
- *   2. 引擎每次保存 `graph.json` 都要重载状态图，这一瞬间的取图 RPC 可能失败；
- *      所有缩略图会同时变成"×" —— 看起来就是"模板全消失了"。
- *
- * 现在的约定：缓存是**进程级**的（模块 Map + zustand 只用来通知刷新），
- * 命中就同步拿到图；失败只在**从没成功过**时才算失败，并且可以被点一下重试。
- * 画布上要同时显示很多张缩略图，这个缓存也是前提（不能每张各发一次 RPC）。
- */
+/** 模板截图进程级缓存：避免组件重挂重复 RPC，失败可重试且保留上次成功的图。 */
 import { create } from 'zustand';
 
 import { devLog, templateImage } from '@/lib/rpc';
@@ -87,8 +74,7 @@ export const useTemplateStore = create<TemplateState>()((set, get) => {
         if (generation.get(key) !== ticket) {
           return; // 已经有更新的一次请求了，旧结果丢掉
         }
-        // 引擎返回 { label, mode, width, height, png }：png 是**裸 base64**（不是 data URL！），
-        // 直接塞进 <img src> 浏览器识别不了 → 必须补前缀。踩过两次，别再删这段。
+        // png 为裸 base64，需补 data URL 前缀。
         const raw = typeof data === 'string' ? data : String((data as { png?: string })?.png ?? '');
         const url = !raw ? '' : raw.startsWith('data:') ? raw : `data:image/png;base64,${raw}`;
         if (!url) {

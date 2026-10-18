@@ -14,8 +14,8 @@
   2. workspace.add 一个空文件夹 + 名字 → 磁盘**一个文件都没有**，列表用显示名
   3. 同目录再 add + 新名字 → 幂等且改名
   4. workflow.create { name } → 目录 + graph.json 出现并切过去
-  5. 再建一个、切换、改名、复制、删（校验 .trash/）
-  6. workspace.remove { deleteFiles: true } → 全局回收站
+  5. 再建一个、切换、改名、复制、删（校验目录真的没了）
+  6. workspace.remove { deleteFiles: true } → 真删（目录真的没了）
   7. 重启引擎进程 → 列表 / 名字 / active / 当前工作流都记得
   8. 删掉最后一个工作流 → project.get().root == ""
 """
@@ -128,7 +128,7 @@ def main() -> int:
         listing = engine.call("workspace.list")
         check("active 为 null", listing["active"] is None, repr(listing["active"]))
         check("items 为空", listing["items"] == [], repr(listing["items"]))
-        check("带 trashRoot", isinstance(listing.get("trashRoot"), str) and listing["trashRoot"], "")
+        check("没有 trashRoot（回收站没了）", "trashRoot" not in listing, repr(sorted(listing)))
         check("带 recommended", isinstance(listing.get("recommended"), str), "")
 
         # ---------------------------------------------------------------- 2
@@ -170,7 +170,7 @@ def main() -> int:
         copy = engine.call("workflow.duplicate", {"dir": renamed["root"]})
         check("复制出副本", Path(copy["created"]).is_dir(), copy["created"])
         deleted = engine.call("workflow.delete", {"dir": copy["created"]})
-        check("删除进 .trash/", ".trash" in deleted["trashed"], deleted["trashed"])
+        check("目录真的删掉了", not script.exists(), str(script))
         check("删掉的是当前 → 切到剩下的", engine.call("project.get")["root"] != "", "")
         tree = engine.call("workspace.tree")
         names = [item["name"] for item in tree.get("workflows", [])]
@@ -190,11 +190,11 @@ def main() -> int:
         check("project.get().root 为空串", engine.call("project.get")["root"] == "", "")
 
         # ---------------------------------------------------------------- 6（remove 工作区）
-        print("[7] workspace.remove deleteFiles=true → 全局回收站")
+        print("[7] workspace.remove deleteFiles=true → 真删")
         removed = engine.call("workspace.remove", {"dir": str(ws_b), "deleteFiles": True})
         check("目录从原位置消失", not ws_b.exists(), str(ws_b))
-        check("回传 trashed", isinstance(removed.get("trashed"), str) and removed["trashed"], "")
-        check("落在全局回收站里", Path(removed["trashed"]).parent == config / ".trash", removed["trashed"])
+        check("回传 removed", Path(str(removed.get("removed"))).name == ws_b.name, str(removed.get("removed")))
+        check("没有留下回收站", not (config / ".trash").exists(), str(config / ".trash"))
         check("当前工作区切回 A", removed["active"] == str(ws_a.resolve()), str(removed["active"]))
     finally:
         engine.close()

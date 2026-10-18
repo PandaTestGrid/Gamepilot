@@ -15,5 +15,5 @@ export const DOCK_TABS: readonly DockTabSpec[] = [
   { id: 'events', label: '事件流', hint: '状态机每一步：进节点 / 命中边 / 执行动作 / 失败与中断' },
   { id: 'logs', label: '日志', hint: '引擎与界面的原始日志（排查"引擎说了什么"）' },
   { id: 'console', label: '控制台', hint: '手发一条 RPC 看返回值（排查是哪一层坏了）' },
-  { id: 'timeline', label: '时间轴', hint: '最近 60s 的帧与识别结果（M4 接真实环形缓冲）' },
+  { id: 'timeline', label: '运行记录', hint: '最近一次运行：每一步的截图、实际参数、识别分数与耗时' },
 ];

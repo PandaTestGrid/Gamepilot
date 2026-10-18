@@ -3,7 +3,7 @@
 跑的是真实 `RpcServer` + `io.StringIO`（不拉子进程）；工作区与配置目录都在 `tmp_path` 下：
 **不碰仓库里的 `workspaces/`，也不碰用户真实配置**。
 
-覆盖：工作区 list/add/remove 的形状与幂等、显示名（含再 add 改名）、`trashRoot`/`trashed` 回传、
+覆盖：工作区 list/add/remove 的形状与幂等、显示名（含再 add 改名）、`removed` 回传、
 **接入空文件夹不落任何文件**、工作流层的建·改·删·复制（`name` 必填）、`current` 在各处的落点、
 `modified`、树的两层形状、"没有当前工作区 / 没有当前工作流"的一等状态，以及全中文错误文案。
 """
@@ -13,7 +13,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import re
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,7 +21,7 @@ from typing import Any
 import pytest
 
 from gamepilot import config, library, workspace
-from gamepilot.devices.mock import MockController
+from gamepilot.devices.synthetic_test import SyntheticController
 from gamepilot.rpc.stdio import RpcServer
 from gamepilot.session import DeviceSession
 
@@ -89,16 +88,15 @@ def rpc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[RpcSe
 
 
 def test_workspace_list_starts_empty(rpc: tuple[RpcServer, io.StringIO, Path]) -> None:
-    """空配置：`active` 为 null、`items` 为空（不自动设成当前），但仍给出推荐目录与回收站。"""
+    """空配置：`active` 为 null、`items` 为空（不自动设成当前），但仍给出推荐目录。"""
     server, out, cfg_dir = rpc
 
     listing = _call(server, out, "workspace.list")
 
-    assert set(listing) == {"active", "recommended", "items", "trashRoot"}
+    assert set(listing) == {"active", "recommended", "items"}
     assert listing["active"] is None
     assert listing["items"] == []
     assert listing["recommended"] == workspace.recommended_root()
-    assert listing["trashRoot"] == os.path.join(str(cfg_dir), ".trash")
     assert not cfg_dir.exists(), "只读的 list 不该写配置"
 
 
@@ -106,12 +104,12 @@ def test_workspace_add_empty_dir_writes_nothing_and_uses_the_display_name(
     rpc: tuple[RpcServer, io.StringIO, Path], tmp_path: Path
 ) -> None:
     """接入空文件夹：**磁盘一个文件都没有**；列表用界面输的显示名，不是目录名。"""
-    server, out, cfg_dir = rpc
+    server, out, _cfg_dir = rpc
     root = tmp_path / "dir-name"
 
     added = _call(server, out, "workspace.add", {"dir": str(root), "name": "我的工作区"})
 
-    assert set(added) == {"root", "name", "tree", "current", "items", "trashRoot"}
+    assert set(added) == {"root", "name", "tree", "current", "items"}
     assert added["root"] == str(root)
     assert added["name"] == "我的工作区"
     assert list(root.iterdir()) == [], "接入一个空文件夹时什么都不建"
@@ -119,7 +117,6 @@ def test_workspace_add_empty_dir_writes_nothing_and_uses_the_display_name(
     assert added["tree"] == {"root": str(root), "workflows": []}
     assert added["current"] == "", "没有工作流 → 没有当前工作流（一等状态）"
     assert added["items"] == [{"name": "我的工作区", "root": str(root), "active": True, "exists": True}]
-    assert added["trashRoot"] == os.path.join(str(cfg_dir), ".trash")
     assert server.sessions.project.root == ""
 
 
@@ -199,6 +196,7 @@ def test_workspace_add_accepts_tilde_path(
     rpc: tuple[RpcServer, io.StringIO, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows 的 `~` 看这个
     server, out, _cfg_dir = rpc
 
     added = _call(server, out, "workspace.add", {"dir": "~/我的游戏", "name": "家目录的工作区"})
@@ -217,10 +215,8 @@ def test_workspace_add_create_false_needs_an_existing_dir(
     assert "工作区目录不存在" in error["message"]
 
 
-def test_workspace_remove_moves_files_to_the_global_trash(
-    rpc: tuple[RpcServer, io.StringIO, Path], tmp_path: Path
-) -> None:
-    """`deleteFiles` 默认 true：整个目录进全局回收站；当前工作区没了就清空状态。"""
+def test_workspace_remove_deletes_files_for_real(rpc: tuple[RpcServer, io.StringIO, Path], tmp_path: Path) -> None:
+    """`deleteFiles` 默认 true：整个目录**真删除**；当前工作区没了就清空状态。"""
     server, out, cfg_dir = rpc
     root = tmp_path / "我的游戏"
     _call(server, out, "workspace.add", {"dir": str(root), "name": "我的工作区"})
@@ -228,20 +224,17 @@ def test_workspace_remove_moves_files_to_the_global_trash(
 
     removed = _call(server, out, "workspace.remove", {"dir": str(root)})
 
-    assert set(removed) == {"active", "items", "tree", "current", "trashed", "trashRoot"}
+    assert set(removed) == {"active", "items", "tree", "current", "removed"}
     assert removed["active"] is None
     assert removed["items"] == []
     assert removed["tree"] == {"root": "", "workflows": []}
     assert removed["current"] == ""
-    assert removed["trashRoot"] == os.path.join(str(cfg_dir), ".trash")
-    trashed = Path(str(removed["trashed"]))
-    assert trashed.parent == cfg_dir / ".trash"
-    assert re.fullmatch(r"我的游戏-\d{8}-\d{6}", trashed.name)
-    assert (trashed / "斗技" / library.GRAPH_FILE).is_file(), "工作流跟着工作区进回收站，能捞回来"
-    assert not root.exists()
+    assert Path(str(removed["removed"])).name == "我的游戏", "返回被删掉的目录"
+    assert not root.exists(), "目录真的删掉了（连里面的工作流）"
+    assert not (cfg_dir / ".trash").exists(), "不再有全局回收站"
 
 
-def test_workspace_remove_without_files_keeps_disk_and_returns_empty_trash(
+def test_workspace_remove_without_files_keeps_disk_and_returns_empty_removed(
     rpc: tuple[RpcServer, io.StringIO, Path], tmp_path: Path
 ) -> None:
     server, out, _cfg_dir = rpc
@@ -251,7 +244,7 @@ def test_workspace_remove_without_files_keeps_disk_and_returns_empty_trash(
 
     removed = _call(server, out, "workspace.remove", {"dir": str(root), "deleteFiles": False})
 
-    assert removed["trashed"] == "", "只移出列表：没有回收站路径（空串，前端类型是 string）"
+    assert removed["removed"] == "", "只移出列表：没删任何东西（空串）"
     assert (root / "斗技" / library.GRAPH_FILE).is_file(), "磁盘一个字节不动"
     assert removed["items"] == [] and removed["active"] is None
 
@@ -336,7 +329,16 @@ def test_workflow_create_lands_in_the_workspace_root_and_switches(
     assert (root / "斗技" / "templates").is_dir()
     assert created["current"] == created["created"], "建完切过去"
     assert server.sessions.project.root == created["created"]
-    assert set(created["items"][0]) == {"name", "root", "nodes", "edges", "recognizers", "templates", "modified"}
+    assert set(created["items"][0]) == {
+        "name",
+        "root",
+        "nodes",
+        "edges",
+        "recognizers",
+        "templates",
+        "modified",
+        "trigger",
+    }
 
 
 def test_workflow_items_and_tree_carry_modified(rpc: tuple[RpcServer, io.StringIO, Path], tmp_path: Path) -> None:
@@ -353,7 +355,16 @@ def test_workflow_items_and_tree_carry_modified(rpc: tuple[RpcServer, io.StringI
     assert set(tree) == {"root", "workflows"}
     assert tree["root"] == str(root)
     assert _workflows(tree) == ["御魂"], "工作流是工作区根的直接子目录"
-    assert set(tree["workflows"][0]) == {"name", "root", "nodes", "edges", "recognizers", "templates", "modified"}
+    assert set(tree["workflows"][0]) == {
+        "name",
+        "root",
+        "nodes",
+        "edges",
+        "recognizers",
+        "templates",
+        "modified",
+        "trigger",
+    }
     assert isinstance(tree["workflows"][0]["modified"], int) and tree["workflows"][0]["modified"] > 0
     assert items[0]["templates"] == 1
     assert items[0]["modified"] == tree["workflows"][0]["modified"]
@@ -414,9 +425,9 @@ def test_workflow_delete_current_switches_to_the_next(rpc: tuple[RpcServer, io.S
 
     deleted = _call(server, out, "workflow.delete", {"dir": doomed["created"]})
 
-    assert set(deleted) == {"trashed", "current", "items"}
-    assert Path(str(deleted["trashed"])).parent == root / ".trash"
-    assert re.fullmatch(r"斗技-\d{8}-\d{6}", Path(str(deleted["trashed"])).name)
+    assert set(deleted) == {"removed", "current", "items"}
+    assert Path(str(deleted["removed"])).name == "斗技", "返回被真删掉的目录"
+    assert not (root / ".trash").exists(), "不再有回收站"
     assert deleted["current"] == keeper["created"], "删当前工作流 → 切到剩下的第一个"
     assert [item["name"] for item in deleted["items"]] == ["御魂"]
     assert not Path(doomed["created"]).exists()
@@ -442,7 +453,7 @@ def test_workflow_delete_all_keeps_the_empty_state(rpc: tuple[RpcServer, io.Stri
         "recognizers": 0,
         "templates": 0,
     }
-    assert sorted(item.name for item in root.iterdir()) == [".trash"], "只剩回收站，不自动补建任何东西"
+    assert list(root.iterdir()) == [], "删干净了，不自动补建任何东西"
 
 
 def test_workflow_delete_other_keeps_current(rpc: tuple[RpcServer, io.StringIO, Path], tmp_path: Path) -> None:
@@ -484,9 +495,9 @@ def test_graph_writes_without_a_workflow_report_chinese(rpc: tuple[RpcServer, io
     """写盘类调用在没有当前工作流时要报中文错误，不能往 cwd 里写东西、也不能崩。"""
     server, _out, _cfg_dir = rpc
     manager = server.sessions
-    controller = MockController()
+    controller = SyntheticController()
     controller.connect()
-    session = DeviceSession("mock:test", controller, manager.project, manager.emit)
+    session = DeviceSession("synthetic:test", controller, manager.project, manager.emit)
     try:
         with pytest.raises(ValueError, match="还没有选择工作流"):
             session.save_graph({"nodes": [], "edges": []})
@@ -498,9 +509,14 @@ def test_graph_writes_without_a_workflow_report_chinese(rpc: tuple[RpcServer, io
 
 
 def test_set_project_then_get(rpc: tuple[RpcServer, io.StringIO, Path], tmp_path: Path) -> None:
-    """`project.set` 语义不变（不存在就建），`project.get` 回显。"""
+    """`project.set` 语义不变（不存在就建），`project.get` 回显；`create=False` 时拒绝建空目录。"""
     server, out, _cfg_dir = rpc
     target = tmp_path / "手动选的工作流"
+
+    missing = tmp_path / "已删除的工作流"
+    err = _call_error(server, out, "project.set", {"dir": str(missing), "create": False})
+    assert "工作流目录不存在" in err["message"]
+    assert not missing.exists()
 
     switched = _call(server, out, "project.set", {"dir": str(target)})
     assert switched["root"] == str(target)

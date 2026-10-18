@@ -171,7 +171,9 @@ def resolve_value(value: object, store: VariableStore, scores: dict[str, float] 
             return found
         if "$expr" in value:
             return evaluate_expr(str(value["$expr"]), store)
-        return {key: resolve_value(item, store) for key, item in value.items()}
+        return {key: resolve_value(item, store, scores) for key, item in value.items()}
+    if isinstance(value, list):
+        return [resolve_value(item, store, scores) for item in value]
     return value
 
 

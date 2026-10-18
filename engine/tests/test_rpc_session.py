@@ -20,8 +20,8 @@ from typing import Any
 import pytest
 
 MODULE = "gamepilot.rpc"
-DEVICE_URI = "Mock:///?width=640&height=360"
-DEVICE_ID = "mock:mock-1"
+DEVICE_URI = "Synthetic:///?serial=test-1&width=640&height=360"
+DEVICE_ID = "synthetic:test-1"
 
 
 class EngineProcess:
@@ -40,6 +40,7 @@ class EngineProcess:
                 # 工作区也指到临时目录：project.* / script.* 一个字节都不碰仓库
                 "GAMEPILOT_WORKSPACE_DIR": workspace_dir or os.path.join(project_dir, "workspaces", "默认"),
                 "GAMEPILOT_CONFIG_DIR": os.path.join(project_dir, "config"),
+                "GAMEPILOT_TEST_SYNTHETIC": "1",
             },
         )
         self.next_id = 0
@@ -105,6 +106,41 @@ def engine(tmp_path: Path) -> Any:
     assert ready["method"] == "engine.ready"
     yield instance
     instance.close()
+
+
+def test_record_ocr_over_stdio(engine: EngineProcess, tmp_path: Path) -> None:
+    """`record.ocr` 走完整 RPC：落一句"要认的字"，而不是裁一张模板图。"""
+    engine.call("device.connect", {"uri": DEVICE_URI})
+    engine.call("device.stream", {"deviceId": DEVICE_ID, "fps": 15})
+    engine.wait_for(lambda message: message.get("method") == "engine.frame")
+
+    recorded = engine.call(
+        "record.ocr",
+        {
+            "deviceId": DEVICE_ID,
+            "rect": [0.1, 0.1, 0.3, 0.1],
+            "label": "金币",
+            "text": "金币",
+            "mode": "contains",
+            "nodeId": "main",
+            "nodeName": "主界面",
+        },
+    )
+    assert recorded["mode"] == "ocr"
+    spec = recorded["graph"]["recognizers"]["金币"]
+    assert spec["type"] == "ocr"
+    assert spec["text"] == "金币"
+    assert os.path.exists(os.path.join(str(tmp_path), "templates", "金币.png"))
+    # 界面的模板缩略图走 template.image：OCR 的证据截图也必须能从这条 RPC 取到，
+    # 否则模块卡片只能显示一个「…」占位（曾经就是这样，用户看不出它在认什么）
+    image = engine.call("template.image", {"label": "金币"})
+    assert image["png"], "OCR 识别器的证据截图必须能取到"
+
+    with pytest.raises(AssertionError, match="要识别的文字"):
+        engine.call(
+            "record.ocr",
+            {"deviceId": DEVICE_ID, "rect": [0.1, 0.1, 0.3, 0.1], "label": "空", "text": " "},
+        )
 
 
 def test_full_loop_over_stdio(engine: EngineProcess, tmp_path: Path) -> None:
@@ -305,7 +341,7 @@ def test_project_directory_switch_and_template_image(engine: EngineProcess, tmp_
     assert Path(tree["root"]).name == "默认", "树根就是当前工作区目录"
     assert tree["workflows"] == [], "这个临时工作区里还没有工作流"
     workspaces = engine.call("workspace.list")
-    assert set(workspaces) == {"active", "recommended", "items", "trashRoot"}
+    assert set(workspaces) == {"active", "recommended", "items"}
     assert workspaces["items"] == [{"name": "默认", "root": str(Path(tree["root"])), "active": True, "exists": False}]
 
     # 不存在的识别器要报错
@@ -446,7 +482,7 @@ def test_device_id_uses_type_specific_keys() -> None:
     assert device_id_for("iOS", {"udid": "00008120-000648403C78C01E"}) == "ios:00008120-000648403C78C01E"
     assert device_id_for("Mac", {"window": "89"}) == "mac:89"
     assert device_id_for("Mac", {"app": "访达"}) == "mac:访达"
-    assert device_id_for("Mock", {"width": "640"}) == "mock:mock-1"
+    assert device_id_for("Synthetic", {"serial": "test-1"}) == "synthetic:test-1"
     assert device_id_for("Mac", {}) == "mac:default"  # 兜底仍可用
     # 两个不同窗口不能撞成同一个 id
     assert device_id_for("Mac", {"window": "89"}) != device_id_for("Mac", {"window": "90"})
@@ -472,3 +508,36 @@ def test_action_run_rejects_bad_action(engine: EngineProcess, tmp_path: Path) ->
     request_id = engine.send("action.run", {"deviceId": DEVICE_ID, "action": {"type": "click"}})
     error = engine.wait_for(lambda item: item.get("id") == request_id)
     assert "error" in error, error  # 点击必须给目标或坐标
+
+
+def test_recognizer_search_switch_over_stdio(engine: EngineProcess, tmp_path: Path) -> None:
+    """record.template 的 search 与 recognizer.search 走完整 RPC：落盘、热重载、非法值报错。"""
+    engine.call("device.connect", {"uri": DEVICE_URI})
+    engine.call("device.stream", {"deviceId": DEVICE_ID, "fps": 15})
+    engine.wait_for(lambda message: message.get("method") == "engine.frame")
+
+    recorded = engine.call(
+        "record.template",
+        {
+            "deviceId": DEVICE_ID,
+            "rect": [0.60, 0.30, 0.16, 0.12],
+            "label": "logo",
+            "threshold": 0.8,
+            "nodeId": "main",
+            "nodeName": "主界面",
+            "search": "full",
+        },
+    )
+    assert recorded["search"] == "full"
+    assert recorded["graph"]["recognizers"]["logo"]["search"] == "full"
+
+    region = engine.call("recognizer.search", {"deviceId": DEVICE_ID, "label": "logo", "search": "region"})
+    assert region == {"label": "logo", "search": "region"}
+
+    request_id = engine.send(
+        "recognizer.search",
+        {"deviceId": DEVICE_ID, "label": "logo", "search": "everywhere"},
+    )
+    error = engine.wait_for(lambda item: item.get("id") == request_id)
+    assert "error" in error
+    assert "搜索范围" in json.dumps(error, ensure_ascii=False)

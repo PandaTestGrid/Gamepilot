@@ -7,18 +7,19 @@
 - **中间那层「项目」没有了**：项目层那四个 RPC（list / create / rename / delete）全部下线；
 - 保留 `project.get` / `project.set`：它们是"当前工作流"的读取/切换，`{dir}` 语义不变；
 - **没有当前工作区 / 没有当前工作流**都是一等状态：报中文错误或回空，不猜、不偷偷建目录；
-- 删除：工作区里的工作流进**该工作区**的 `.trash/`；整个工作区进**全局回收站**
-  `<配置目录>/.trash/`（可恢复，不做真删除）。
+- 删除一律是**真删除**（`workflow.delete`；`workspace.remove {deleteFiles:true}` 连目录一起），
+  删了就没了 —— 不可恢复，界面负责二次确认。
 
 返回形状（契约 §2.1 / §2.2）：
 
-- 工作区层：`workspace.list → {active, recommended, items, trashRoot}`、
-  `workspace.add → {root, name, tree, current, items, trashRoot}`、
-  `workspace.remove → {active, items, tree, current, trashed, trashRoot}`；
+- 工作区层：`workspace.list → {active, recommended, items}`、
+  `workspace.add → {root, name, tree, current, items}`、
+  `workspace.remove → {active, items, tree, current, removed}`；
   `items` 三项统一是 `[{name, root, active, exists}]`（`name` = 显示名，最近使用排序）；
 - `workspace.tree → {root, workflows: [{name, root, nodes, edges, recognizers, templates, modified}]}`；
 - 工作流层：`workflow.create/duplicate → {created, current, items}`、
-  `workflow.rename → {root, current, items}`、`workflow.delete → {trashed, current, items}`。
+  `workflow.rename → {root, current, items}`、`workflow.delete → {removed, current, items}`
+  （`removed` = 被真删掉的目录路径）。
 """
 
 from __future__ import annotations
@@ -120,13 +121,9 @@ def _items(base: str) -> list[dict[str, Any]]:
 def register(server: RpcServer, manager: SessionManager) -> None:
     """注册 `workspace.*` / `workflow.*` / `project.get|set`（显式接收 manager，不做隐式全局）。"""
 
-    # ------------------------------------------------------------------ #
-    # 工作区层
-    # ------------------------------------------------------------------ #
-
     @server.method(METHOD_WORKSPACE_LIST)
     def _workspace_list(params: dict[str, Any]) -> dict[str, Any]:
-        """工作区列表（最近使用排序，`name` 是显示名）+ 当前工作区 + 推荐目录 + 全局回收站。
+        """工作区列表（最近使用排序，`name` 是显示名）+ 当前工作区 + 推荐目录。
 
         没选过任何工作区时 `active` 是 `null`、`items` 为空（一等状态，不自动设成当前）。
         """
@@ -135,7 +132,6 @@ def register(server: RpcServer, manager: SessionManager) -> None:
             "active": manager.workspaces.active,
             "recommended": workspace.recommended_root(),
             "items": manager.workspaces.items(),
-            "trashRoot": workspace.global_trash_root(),
         }
 
     @server.method(METHOD_WORKSPACE_ADD)
@@ -160,16 +156,15 @@ def register(server: RpcServer, manager: SessionManager) -> None:
             "tree": workspace.tree(),
             "current": manager.project.root,
             "items": manager.workspaces.items(),
-            "trashRoot": workspace.global_trash_root(),
         }
 
     @server.method(METHOD_WORKSPACE_REMOVE)
     def _workspace_remove(params: dict[str, Any]) -> dict[str, Any]:
-        """把一个工作区移出列表；`deleteFiles`（默认 `true`）时整个目录移到**全局回收站**。
+        """把一个工作区移出列表；`deleteFiles`（默认 `true`）时整个目录**真删除**。
 
         移掉的是当前工作区 → 自动切到列表里下一个还存在的；列表空了 `active` 为 `null`。
-        `deleteFiles: false` 只移出列表，磁盘一个字节不动。返回里的 `trashed` 是这次实际
-        落进回收站的路径（没删文件时是空串），前端拿它告诉用户"文件去哪了"。
+        `deleteFiles: false` 只移出列表，磁盘一个字节不动。返回里的 `removed` 是这次实际
+        删掉的目录路径（没删文件时是空串）。
         """
         removal = manager.workspaces.remove(
             _require_str(params, "dir"), delete_files=_flag(params, "deleteFiles", default=True)
@@ -180,13 +175,14 @@ def register(server: RpcServer, manager: SessionManager) -> None:
             if following:
                 manager.workspaces.activate(following)
             manager.switch_workspace(following)
+        elif manager.project.root and not os.path.isfile(manager.project.graph_path):
+            manager.reselect_workflow()
         return {
             "active": manager.workspaces.active,
             "items": manager.workspaces.items(),
             "tree": workspace.tree(),
             "current": manager.project.root,
-            "trashed": removal.trashed or "",
-            "trashRoot": workspace.global_trash_root(),
+            "removed": removal.removed or "",
         }
 
     @server.method(METHOD_WORKSPACE_TREE)
@@ -194,10 +190,6 @@ def register(server: RpcServer, manager: SessionManager) -> None:
         """当前工作区的整棵树：`{root, workflows: [{...摘要, modified}]}`。"""
         _ = params
         return workspace.tree()
-
-    # ------------------------------------------------------------------ #
-    # 当前工作流：读取 / 切换（RPC 名字按契约保留 project.*）
-    # ------------------------------------------------------------------ #
 
     @server.method(METHOD_PROJECT_GET)
     def _project_get(params: dict[str, Any]) -> dict[str, Any]:
@@ -207,13 +199,12 @@ def register(server: RpcServer, manager: SessionManager) -> None:
 
     @server.method(METHOD_PROJECT_SET)
     def _project_set(params: dict[str, Any]) -> dict[str, Any]:
-        """切换当前工作流目录（不存在就创建），并热重载所有已连接设备的状态图。"""
-        manager.use_project(_require_str(params, "dir"))
+        """切换当前工作流目录（`create: false` 时要求目录已存在），并热重载所有已连接设备的状态图。"""
+        manager.use_project(
+            _require_str(params, "dir"),
+            create=_flag(params, "create", default=True),
+        )
         return manager.project_info()
-
-    # ------------------------------------------------------------------ #
-    # 工作流层
-    # ------------------------------------------------------------------ #
 
     @server.method(METHOD_WORKFLOW_CREATE)
     def _workflow_create(params: dict[str, Any]) -> dict[str, Any]:
@@ -254,21 +245,21 @@ def register(server: RpcServer, manager: SessionManager) -> None:
 
     @server.method(METHOD_WORKFLOW_DELETE)
     def _workflow_delete(params: dict[str, Any]) -> dict[str, Any]:
-        """把工作流移进**它所属工作区**的 `.trash/`（可恢复）。
+        """**真删除**一个工作流目录（不可恢复）。
 
         删的是当前工作流时：切到剩下的第一个；一个都不剩 → 保持"没有当前工作流"。
         """
         source = _require_workflow(_require_str(params, "dir"))
         base = os.path.dirname(source)
         was_current = _is_current(manager, source)
-        trashed = workspace.delete_workflow(source)
+        removed = workspace.delete_workflow(source)
         items = _items(base)
         if was_current:
             if items:
                 manager.use_project(str(items[0]["root"]))
             else:
                 manager.reselect_workflow()
-        return {"trashed": trashed, "current": manager.project.root, "items": items}
+        return {"removed": removed, "current": manager.project.root, "items": items}
 
 
 __all__ = ["register"]

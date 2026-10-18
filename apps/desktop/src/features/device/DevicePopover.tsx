@@ -225,6 +225,12 @@ export function DevicePopover(): ReactNode {
                   onDisconnect={() => void disconnectSession(device.id)}
                 />
               ))}
+              {(tab === 'all' || tab === 'emulator') &&
+                devices.some((device) => device.kind === 'emulator') && (
+                  <p className="px-3 py-2 text-badge text-faint">
+                    已打开的应用窗口会单独成行；之后新开的标签页可在画面上方点「添加屏幕」。
+                  </p>
+                )}
               {rows.length === 0 && (
                 <div className="px-3 py-6 text-center text-badge text-faint">
                   {query ? '没有匹配的设备' : '这一类还没有设备 · 点下面的「刷新」重新扫描'}

@@ -1,10 +1,28 @@
 import { describe, expect, it } from 'vitest';
 
-import { containBox, pointToCanvas, canvasPointToPixels, canvasRectToPixels } from '@/lib/canvas';
+import {
+  containBox,
+  pointToCanvas,
+  canvasPointToPixels,
+  canvasRectToPixels,
+  screenImageSize,
+} from '@/lib/canvas';
 
 describe('画面坐标换算', () => {
+  it('转横屏后优先用帧分辨率，不沿用旧竖屏 naturalWidth', () => {
+    expect(screenImageSize([2796, 1290], { naturalWidth: 1290, naturalHeight: 2796 })).toEqual({
+      width: 2796,
+      height: 1290,
+    });
+    expect(screenImageSize(null, { naturalWidth: 1290, naturalHeight: 2796 })).toEqual({
+      width: 1290,
+      height: 2796,
+    });
+    expect(screenImageSize(undefined, { naturalWidth: 0, naturalHeight: 0 })).toBeNull();
+  });
+
   it('竖屏画面放进横容器：两侧留黑边，画面矩形居中', () => {
-    // 720x1280 的手机画面放进 615x557 的面板（和真机实测尺寸一致）
+    // 720×1280 画面置于 615×557 面板（letterbox）
     const box = containBox({ width: 615, height: 557 }, { width: 720, height: 1280 });
 
     expect(box).not.toBeNull();

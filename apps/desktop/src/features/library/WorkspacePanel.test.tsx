@@ -1,14 +1,14 @@
 /**
  * 工作区面板（浮层）的交互 —— 契约 v4 §3.2。
  *
- * 形态是「工作区（文件夹）› 会话（= 一张状态图）」：
+ * 形态是「工作区（文件夹）› 工作流（= 一张状态图）」：
  * 1. **添加工作区是一步**：挑中文件夹 → 直接 `workspace.add`（显示名默认取文件夹名，之后可改）；
  *    从 Finder 拖文件夹进来走同一条路（webview 拖拽事件给的是真实路径）；
  * 2. **挑文件夹有手输兜底**：原生对话框在 vitest 里必然拿不到（没有 Tauri），
  *    所以这里不 mock `native-dialog`，验证"退回手输绝对路径 + 添加这个工作区"真的能用；
  * 3. **点工作区名字 = 切过去**（幂等 `workspace.add`），不再是那个叫「打开」的按钮；
- *    **行尾的 ＋ = 在这个工作区里新建会话**（自动命名，不弹输入框）；
- * 4. **移除两个入口都有**：`deleteFiles:true`（移到回收站，可恢复，文案显示回收站路径）
+ *    **行尾的 ＋ = 在这个工作区里新建工作流**（先起名，提交了才建）；
+ * 4. **移除两个入口都有**：`deleteFiles:true`（真删除，不可恢复，确认文案要写明）
  *    与 `deleteFiles:false`（只从列表移除，不动文件），都走行内二次确认；
  * 5. ⌘O 触发同一个添加流程；列表/搜索/相对时间按截图走，全程没有 原生 prompt。
  */
@@ -28,16 +28,16 @@ import {
   workspaceList,
   workspaceRemove,
 } from '@/lib/rpc';
+import { useDeviceStore } from '@/stores/device.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
 
-const { WS_A, WS_B, WS_GONE, RECOMMENDED, TRASH, WORKFLOWS, WORKSPACES, replies } = vi.hoisted(() => {
+const { WS_A, WS_B, WS_GONE, RECOMMENDED, WORKFLOWS, WORKSPACES, replies } = vi.hoisted(() => {
   const NOW = Math.floor(Date.now() / 1000);
   const WS_A = '/Users/me/game-a';
   const WS_B = '/Users/me/game-b';
   const WS_GONE = '/Users/me/gone';
   const RECOMMENDED = '/repo/workspaces/默认';
-  const TRASH = '/config/gamepilot/.trash';
 
   const WORKFLOWS = [
     {
@@ -88,12 +88,11 @@ const { WS_A, WS_B, WS_GONE, RECOMMENDED, TRASH, WORKFLOWS, WORKSPACES, replies 
     list: {
       active: WS_A as string | null,
       recommended: RECOMMENDED,
-      trashRoot: TRASH,
       items: WORKSPACES as unknown[],
     },
   };
 
-  return { WS_A, WS_B, WS_GONE, RECOMMENDED, TRASH, WORKFLOWS, WORKSPACES, replies };
+  return { WS_A, WS_B, WS_GONE, RECOMMENDED, WORKFLOWS, WORKSPACES, replies };
 });
 
 vi.mock('@/lib/rpc', async () => {
@@ -105,26 +104,23 @@ vi.mock('@/lib/rpc', async () => {
     workspaceList: vi.fn(() => Promise.resolve(replies.list)),
     workspaceTree: vi.fn(() => Promise.resolve(tree)),
     workspaceAdd: vi.fn(() =>
-      Promise.resolve({ root: WS_B, name: 'game-b', current: '', tree, trashRoot: TRASH, items: WORKSPACES }),
+      Promise.resolve({ root: WS_B, name: 'game-b', current: '', tree, items: WORKSPACES }),
     ),
     workspaceRemove: vi.fn(() =>
       Promise.resolve({
         active: WS_A,
         current: '',
         tree,
-        trashRoot: TRASH,
-        trashed: `${TRASH}/game-b-1`,
+        removed: WS_B,
         items: [WORKSPACES[0]],
       }),
     ),
     workflowCreate: vi.fn(() =>
-      Promise.resolve({ created: `${WS_A}/新会话`, current: `${WS_A}/新会话`, items: WORKFLOWS }),
+      Promise.resolve({ created: `${WS_A}/新工作流`, current: `${WS_A}/新工作流`, items: WORKFLOWS }),
     ),
     workflowRename: vi.fn(() => Promise.resolve({ root: `${WS_A}/x`, current: '', items: WORKFLOWS })),
     workflowDuplicate: vi.fn(() => Promise.resolve({ created: `${WS_A}/x`, current: '', items: WORKFLOWS })),
-    workflowDelete: vi.fn(() =>
-      Promise.resolve({ trashed: `${WS_A}/.trash/x`, current: '', items: WORKFLOWS }),
-    ),
+    workflowDelete: vi.fn(() => Promise.resolve({ removed: `${WS_A}/斗技`, current: '', items: WORKFLOWS })),
     projectGet: vi.fn(() =>
       Promise.resolve({ root: '', graphPath: '', nodes: 0, edges: 0, recognizers: 0, templates: 0 }),
     ),
@@ -150,26 +146,27 @@ function Harness(): ReactNode {
   return <WorkspacePanel />;
 }
 
-const switchProject = vi.fn((): Promise<void> => Promise.resolve());
+const switchWorkflow = vi.fn((): Promise<void> => Promise.resolve());
 
 describe('工作区区域（右栏 Tab 的本体内容）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    replies.list = { active: WS_A, recommended: RECOMMENDED, trashRoot: TRASH, items: WORKSPACES };
+    replies.list = { active: WS_A, recommended: RECOMMENDED, items: WORKSPACES };
     useLibraryStore.setState({
       workspaceRoot: WS_A,
       workflows: WORKFLOWS,
       workspaces: WORKSPACES,
       recommendedWorkspace: RECOMMENDED,
-      trashRoot: TRASH,
       error: null,
     });
     // 区域要标出"当前这一条"工作流（点线 + 深灰底那条）
-    switchProject.mockClear();
+    switchWorkflow.mockClear();
     useSessionStore.setState({
-      project: { root: `${WS_A}/斗技` } as never,
-      switchProject,
-      applyProjectChange: () => Promise.resolve(),
+      currentWorkflow: { root: `${WS_A}/斗技` } as never,
+      switchWorkflow,
+      syncCurrentWorkflow: () => Promise.resolve(),
+      running: {},
+      runningWorkflowRoots: {},
     } as never);
   });
 
@@ -183,7 +180,7 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     // 头部四件套：标题 / 搜索 / 设置 / ＋（添加工作区 ⌘O）
     expect(screen.getByText('工作区')).toBeInTheDocument();
     expect(screen.getByTitle('搜索工作区与工作流（⌘F）')).toBeInTheDocument();
-    expect(screen.getByTitle('设置（移除当前工作区）')).toBeInTheDocument();
+    expect(screen.getByTitle('工作区设置（路径、重命名、刷新列表）')).toBeInTheDocument();
     expect(screen.getByTestId('workspace-add')).toBeInTheDocument();
 
     // 列表：当前（我的工作区，名字是用户输的）+ 其他（game-b）
@@ -342,10 +339,10 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     // 但**还没建**：起名表单出来了，输名字之前一个都不建
     expect(workflowCreate).not.toHaveBeenCalled();
     const input = await screen.findByPlaceholderText('例如 斗技');
-    await user.type(input, '新会话甲');
+    await user.type(input, '新工作流甲');
     await user.click(screen.getByRole('button', { name: '创建' }));
 
-    await waitFor(() => expect(workflowCreate).toHaveBeenCalledWith('新会话甲'));
+    await waitFor(() => expect(workflowCreate).toHaveBeenCalledWith('新工作流甲'));
   });
 
   it('当前工作区行尾的 ＋：不重复切工作区，同样先起名再建；取消则什么都不建', async () => {
@@ -366,7 +363,7 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     expect(screen.queryByPlaceholderText('例如 斗技')).not.toBeInTheDocument();
   });
 
-  it('折叠：点**当前**工作区的名字收起它的会话，再点展开（点别的工作区名字 = 切过去）', async () => {
+  it('折叠：点**当前**工作区的名字收起它的工作流，再点展开（点别的工作区名字 = 切过去）', async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
@@ -404,12 +401,12 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     expect(screen.getByText('斗技')).toBeInTheDocument();
   });
 
-  it('移除工作区之一：只从列表移除（不动文件）—— 行内二次确认，deleteFiles:false', async () => {
+  it('移除工作区之一：工作区目录行上「只从列表移除（不动文件）」—— 行内二次确认，deleteFiles:false', async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    await user.click(screen.getByTitle('设置（移除当前工作区）'));
-    await user.click(screen.getByText('只从列表移除（不动文件）'));
+    const [firstRow] = await screen.findAllByTestId('workspace-row');
+    await user.click(within(firstRow as HTMLElement).getByTestId('workspace-row-unlist'));
 
     expect(screen.getByText(/磁盘上的文件一个都不会动/)).toBeInTheDocument();
     expect(workspaceRemove).not.toHaveBeenCalled();
@@ -418,21 +415,20 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     expect(workspaceRemove).toHaveBeenCalledWith(WS_A, false);
   });
 
-  it('移除工作区之二：移到回收站（可恢复）—— 文案显示回收站路径，绝不出现"永久删除"', async () => {
+  it('移除工作区之二：工作区目录行上「真删除（不可恢复）」—— 确认文案写明不可恢复，且不弹原生 prompt', async () => {
     const prompt = vi.fn();
     vi.stubGlobal('prompt', prompt);
     const user = userEvent.setup();
     const { container } = render(<Harness />);
 
-    await user.click(screen.getByTitle('设置（移除当前工作区）'));
-    await user.click(screen.getByText('移到回收站（可以恢复）'));
+    const [firstRow] = await screen.findAllByTestId('workspace-row');
+    await user.click(within(firstRow as HTMLElement).getByTestId('workspace-row-delete'));
 
-    expect(screen.getByText(new RegExp(TRASH.replace(/[.\\/]/g, '\\$&')))).toBeInTheDocument();
-    expect(screen.getByText(/可以恢复/)).toBeInTheDocument();
-    expect(container.textContent ?? '').not.toContain('永久删除');
+    expect(screen.getByText('删除后不可恢复。')).toBeInTheDocument();
+    expect(container.textContent ?? '').not.toContain('回收站');
     expect(workspaceRemove).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole('button', { name: '确认移入回收站' }));
+    await user.click(screen.getByRole('button', { name: '确认删除' }));
     expect(workspaceRemove).toHaveBeenCalledWith(WS_A, true);
     expect(prompt).not.toHaveBeenCalled();
   });
@@ -441,7 +437,6 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     replies.list = {
       active: WS_A,
       recommended: RECOMMENDED,
-      trashRoot: TRASH,
       items: [...WORKSPACES, { name: 'gone', root: WS_GONE, active: false, exists: false }],
     };
     useLibraryStore.setState({
@@ -458,7 +453,7 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
   });
 
   it('一个工作区都没有（active null）：列表为空 + 主按钮「添加工作区…」+ 次按钮「默认工作区」', async () => {
-    replies.list = { active: null, recommended: RECOMMENDED, trashRoot: TRASH, items: [] };
+    replies.list = { active: null, recommended: RECOMMENDED, items: [] };
     useLibraryStore.setState({ workspaceRoot: '', workspaces: [], workflows: [] });
     render(<Harness />);
 
@@ -468,13 +463,81 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     expect(screen.queryByText('默认工作区')).not.toBeInTheDocument();
   });
 
-  it('点工作流名字 = 切过去（走 switchProject）', async () => {
+  it('还在跑的工作流行：运行点 + 设备名，切走之后也看得见', async () => {
+    useDeviceStore.setState({
+      devices: [
+        {
+          id: 'dev-1',
+          name: 'MuMu',
+          kind: 'emulator',
+          uri: 'Android://127.0.0.1:7555/dev-1',
+          resolution: [1080, 1920],
+          fps: 20,
+          status: 'connected',
+        },
+      ],
+      activeId: 'other',
+    });
+    useSessionStore.setState({
+      currentWorkflow: { root: `${WS_A}/御魂` } as never,
+      running: { 'dev-1': true },
+      runningWorkflowRoots: { 'dev-1': [`${WS_A}/斗技`] },
+    });
+    render(<Harness />);
+
+    const [liveRow] = await screen.findAllByTestId('workspace-workflow-row');
+    expect(within(liveRow as HTMLElement).getByText('斗技')).toBeInTheDocument();
+    expect(within(liveRow as HTMLElement).getByTestId('workflow-run-toggle')).toHaveTextContent('MuMu');
+    expect(within(liveRow as HTMLElement).queryByText('运行中')).not.toBeInTheDocument();
+    expect(within(liveRow as HTMLElement).getByTestId('run-live-dot')).toBeInTheDocument();
+    expect(within(liveRow as HTMLElement).queryByTestId('run-busy-spinner')).not.toBeInTheDocument();
+    expect(within(liveRow as HTMLElement).queryByTestId('workflow-dot')).not.toBeInTheDocument();
+  });
+
+  it('展开运行中的工作流：点设备名跳转且列表不收起，也可以直接停', async () => {
+    const user = userEvent.setup();
+    const stopRun = vi.fn(() => Promise.resolve());
+    useDeviceStore.setState({
+      devices: [
+        {
+          id: 'dev-1',
+          name: 'MuMu',
+          kind: 'emulator',
+          uri: 'Android://127.0.0.1:7555/dev-1',
+          resolution: [1080, 1920],
+          fps: 20,
+          status: 'connected',
+        },
+      ],
+      activeId: 'other',
+    });
+    useSessionStore.setState({
+      currentWorkflow: { root: `${WS_A}/御魂` } as never,
+      running: { 'dev-1': true },
+      runningWorkflowRoots: { 'dev-1': [`${WS_A}/斗技`] },
+      stopRun,
+    });
+    render(<Harness />);
+
+    await user.click(await screen.findByTestId('workflow-run-toggle'));
+    expect(screen.getByTestId('workflow-run-targets')).toBeInTheDocument();
+
+    await user.click(within(screen.getByTestId('run-target-dev-1')).getByText('MuMu'));
+    expect(useDeviceStore.getState().activeId).toBe('dev-1');
+    expect(switchWorkflow).toHaveBeenCalledWith(`${WS_A}/斗技`);
+    expect(screen.getByTestId('workflow-run-targets')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('run-target-stop-dev-1'));
+    expect(stopRun).toHaveBeenCalledWith('dev-1', `${WS_A}/斗技`);
+  });
+
+  it('点工作流名字 = 切过去（走 switchWorkflow）', async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
     await user.click(await screen.findByText('御魂'));
 
-    expect(switchProject).toHaveBeenCalledWith(`${WS_A}/御魂`);
+    expect(switchWorkflow).toHaveBeenCalledWith(`${WS_A}/御魂`);
   });
 
   it('工作流行悬停「重命名」：内联表单预填当前名字，提交才 renameWorkflow', async () => {
@@ -512,7 +575,7 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     render(<Harness />);
     const [row] = await screen.findAllByTestId('workspace-workflow-row');
 
-    await user.click(within(row as HTMLElement).getByTitle(/移到工作区根的 .trash/));
+    await user.click(within(row as HTMLElement).getByTitle(/删除（真删除，不可恢复）/));
     expect(await screen.findByText(/删除「斗技」？/)).toBeInTheDocument();
     expect(workflowDelete).not.toHaveBeenCalled();
 
@@ -521,7 +584,7 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     expect(workflowDelete).not.toHaveBeenCalled();
 
     const [again] = await screen.findAllByTestId('workspace-workflow-row');
-    await user.click(within(again as HTMLElement).getByTitle(/移到工作区根的 .trash/));
+    await user.click(within(again as HTMLElement).getByTitle(/删除（真删除，不可恢复）/));
     await user.click(await screen.findByRole('button', { name: '确认删除' }));
     expect(workflowDelete).toHaveBeenCalledWith(`${WS_A}/斗技`);
   });
@@ -549,5 +612,28 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     expect(screen.queryByPlaceholderText('/Users/me/Documents/game-a')).not.toBeInTheDocument();
     // 区域本身常驻
     expect(screen.getByTestId('workspace-region')).toBeInTheDocument();
+  });
+
+  it('读不回来的工作流在列表里标出来，而不是静默当空图', () => {
+    useLibraryStore.setState({
+      workspaceRoot: WS_A,
+      workflows: [
+        {
+          name: '坏图',
+          root: `${WS_A}/坏图`,
+          nodes: 0,
+          edges: 0,
+          recognizers: 0,
+          templates: 0,
+          modified: 0,
+          error: '边 e1 的 from 节点不存在: n_gone',
+        },
+      ],
+    });
+    render(<Harness />);
+
+    const badge = screen.getByTestId('workflow-error');
+    expect(badge).toHaveTextContent('读不了');
+    expect(badge).toHaveAttribute('title', expect.stringContaining('from 节点不存在'));
   });
 });

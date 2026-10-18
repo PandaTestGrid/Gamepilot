@@ -229,9 +229,7 @@ def test_unknown_screen_keeps_state_and_relocates(engine: tuple[Engine, Scripted
 def test_run_action_resolves_variables(engine: tuple[Engine, ScriptedController]) -> None:
     """「单独执行这一步」必须先求值，和其他执行路径同一套。
 
-    真踩过：把动作参数抽成变量之后（`{"$var": "时长"}`），点「▶ 执行这一步」报
-    `动作参数必须是数字，收到: {'$var': '时长'}` —— 因为这条路径先 `Action.parse` 再交给
-    `_execute`，跳过了变量求值。
+    单步执行须先 resolve 变量再 Action.parse。
     """
     machine, _controller = engine
     machine.variables.set("时长", 120)

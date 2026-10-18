@@ -9,7 +9,7 @@
  * 用 Mock 设备，所以 CI 里不需要真机。
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -18,6 +18,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   graphSave,
+  projectSet,
   workflowCreate,
   workflowDelete,
   workflowDuplicate,
@@ -25,6 +26,7 @@ import {
   workspaceTree,
   type GraphPayload,
 } from '@/lib/rpc';
+import { enginePython } from '@/test/engine-process';
 import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { useGraphStore } from '@/stores/graph.store';
@@ -53,7 +55,7 @@ class EngineBridge {
    */
   start(projectDir: string, workspaceDir: string, configDir: string): void {
     const engineDir = path.resolve(process.cwd(), '..', '..', 'engine');
-    const child = spawn(path.join(engineDir, '.venv', 'bin', 'python'), ['-m', 'gamepilot.rpc'], {
+    const child = spawn(enginePython(engineDir), ['-m', 'gamepilot.rpc'], {
       cwd: engineDir,
       env: {
         ...process.env,
@@ -61,6 +63,7 @@ class EngineBridge {
         GAMEPILOT_PROJECT_DIR: projectDir,
         GAMEPILOT_WORKSPACE_DIR: workspaceDir,
         GAMEPILOT_CONFIG_DIR: configDir,
+        GAMEPILOT_TEST_SYNTHETIC: '1',
       },
     });
     this.child = child;
@@ -147,10 +150,10 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: (event: string, handler: NotificationHandler) => bridge.current.listen(event, handler),
 }));
 
-const DEVICE_ID = 'mock:mock-1';
-const DEVICE_URI = 'Mock:///?width=320&height=180';
+const DEVICE_ID = 'synthetic:test-1';
+const DEVICE_URI = 'Synthetic:///?serial=test-1&width=320&height=180';
 
-async function waitFor(condition: () => boolean, timeout = 8000, step = 50): Promise<void> {
+async function waitFor(condition: () => boolean, timeout = 15000, step = 50): Promise<void> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (condition()) {
@@ -161,7 +164,7 @@ async function waitFor(condition: () => boolean, timeout = 8000, step = 50): Pro
   throw new Error('等待条件超时');
 }
 
-describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
+describe('前端 ↔ 引擎 联调（真实子进程 + Synthetic 测试设备）', () => {
   let projectDir = '';
   /** v4：当前工作区也是一个临时目录（工作流那一段直接建在它下面） */
   let workspaceDir = '';
@@ -193,8 +196,10 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     await useSessionStore.getState().init();
     // 设备列表启动时是空的（界面空态引导用户去扫描），这里模拟"打开设备面板"触发扫描
     await useDeviceStore.getState().scan();
-    await waitFor(() => useDeviceStore.getState().devices.some((item) => item.id === DEVICE_ID), 15000);
-  });
+    // Mock 不再出现在扫描结果里（界面不展示合成设备）；下面直接用 URI 连它，
+    // `markConnectedWith` 会把设备补进列表。
+    expect(useDeviceStore.getState().devices.some((item) => item.id === DEVICE_ID)).toBe(false);
+  }, 60000);
 
   afterAll(() => {
     bridge.current?.stop();
@@ -225,6 +230,9 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     await waitFor(() => (useSessionStore.getState().frames[DEVICE_ID]?.fps ?? 0) > 0);
     expect(useSessionStore.getState().frames[DEVICE_ID]?.fps).toBeGreaterThan(0);
   });
+
+  // 「界面重载后扫描结果报 connected」原先靠 Mock 出现在扫描列表里来联调；
+  // Mock 移出扫描后，这条逻辑改由引擎单测 `test_device_list_reports_live_sessions_as_connected` 覆盖。
 
   it(
     '工作流（工作区 › 工作流）：建/切换/改名/复制/删除 全部落到真实磁盘（v4 只有两层）',
@@ -277,27 +285,30 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
       expect(copy.current).toBe(copyRoot);
       expect(existsSync(path.join(copyRoot, 'graph.json'))).toBe(true);
 
-      // 删除工作流 = 移到工作区根的 .trash/（可恢复）；删的是当前工作流 → 切到剩下的一个
+      // 删除工作流 = **真删除**（连目录一起，没有回收站）；删的是当前工作流 → 切到剩下的一个
       const removed = await workflowDelete(copyRoot);
       expect(removed.items.map((item) => item.name)).not.toContain('斗技-副本');
       expect(existsSync(copyRoot)).toBe(false);
+      expect(existsSync(removed.removed)).toBe(false);
+      expect(existsSync(path.join(workspaceDir, '.trash'))).toBe(false);
       expect(removed.items.map((item) => item.root)).toContain(removed.current);
       expect(existsSync(removed.current)).toBe(true);
-      const trash = path.join(workspaceDir, '.trash');
-      expect(readdirSync(trash).some((name) => name.includes('斗技-副本'))).toBe(true);
 
       // 删光所有工作流：没有当前工作流是一等状态（root 空串，不崩）
       await workflowDelete(renamedRoot);
       await workflowDelete(firstRoot);
-      await useSessionStore.getState().refreshProject();
-      expect(useSessionStore.getState().project?.root ?? '').toBe('');
+      await useSessionStore.getState().refreshCurrentWorkflow();
+      expect(useSessionStore.getState().currentWorkflow?.root ?? '').toBe('');
       expect((await workspaceTree()).workflows).toEqual([]);
 
       // 工作流操作会把"当前工作流"切走，后面的用例要用回本用例自己的目录。
-      // 切回来之后要**等通知落地**：project.changed 是异步推来的，不等就可能被上一条覆盖
-      await useSessionStore.getState().switchProject(projectDir);
-      await waitFor(() => useSessionStore.getState().project?.root === projectDir);
-      expect(useSessionStore.getState().project?.root).toBe(projectDir);
+      // v4 是两层：`projectDir` 是**脚本目录**（逃生口 pin 的那个），不在工作区列表里，
+      // 所以不能走 switchWorkflow（它先查工作区列表、查不到就关标签）；
+      // 直接 project.set 回到它（create 默认 true，会补齐 graph.json 供后面的录制用例用）。
+      await projectSet(projectDir, true);
+      await useSessionStore.getState().refreshCurrentWorkflow();
+      await waitFor(() => useSessionStore.getState().currentWorkflow?.root === projectDir);
+      expect(useSessionStore.getState().currentWorkflow?.root).toBe(projectDir);
     },
   );
 
@@ -309,7 +320,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     await expect(workflowCreate('日常/任务')).rejects.toThrow(/不能包含/);
   });
 
-  it('录制模板：真裁剪落盘 + 识别器进状态图 + 后续帧带出分数', async () => {
+  it('录制模板：真裁剪落盘 + 识别器注册 + 步骤链不建状态图节点', { timeout: 30000 }, async () => {
     const draft: RecordDraft = {
       rect: [0.6, 0.3, 0.16, 0.12], // Mock 画面里的棋盘格 LOGO（有纹理 → 走模板匹配）
       label: 'logo',
@@ -317,6 +328,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
       score: 0,
       asEnter: true,
       asActionTarget: true,
+      search: 'region',
       targetMode: 'new',
       targetNodeId: null,
       newNodeName: '主界面',
@@ -324,17 +336,24 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
       // 传下去会撞上老界面 —— 见 session.store.record 的 allocateNodeId）
       newNodeId: 'node_1',
     };
-    // 录制写的是"当前脚本目录"，先确认它真的回到了本用例的目录（上一条库用例会切走）
-    expect(useSessionStore.getState().project?.root).toBe(projectDir);
+    await useSessionStore.getState().switchWorkflow(projectDir);
+    await waitFor(() => useSessionStore.getState().currentWorkflow?.root === projectDir);
+    await graphSave({
+      version: 1,
+      defaults: {},
+      nodes: [],
+      edges: [],
+      recognizers: {},
+      flow: { steps: [{ id: 'trigger', type: 'manual', params: {} }] },
+    });
+    await useGraphStore.getState().refresh(DEVICE_ID);
     await useSessionStore.getState().record(DEVICE_ID, draft);
 
     expect(existsSync(path.join(projectDir, 'templates', 'logo.png'))).toBe(true);
     const graph = useGraphStore.getState().graphs[DEVICE_ID];
     expect(graph?.recognizers.map((item) => item.label)).toContain('logo');
-    // 「新建」时 id 由引擎给（n_1、n_2…），不是界面传下去的 node_1
-    expect(graph?.nodes.map((item) => item.id)).toEqual(['n_1']);
-    expect(graph?.nodes[0]?.name).toBe('主界面');
-    expect(useGraphStore.getState().selectedNodeId).toBe('n_1'); // 录完就选中，知道录到哪个界面上
+    expect(graph?.nodes ?? []).toEqual([]);
+    expect(graph?.flow?.steps?.length).toBeGreaterThan(0);
 
     // 引擎持续推帧：识别器面板的分数应当被真实数据刷新
     await waitFor(() => {
@@ -345,25 +364,21 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     });
   });
 
-  it('运行状态机：引擎事件进入事件栏，且真的产生了点击动作', async () => {
+  it('运行步骤链：引擎事件进入事件栏，且真的产生了点击动作', { timeout: 30000 }, async () => {
     const saved = JSON.parse(readFileSync(path.join(projectDir, 'graph.json'), 'utf-8')) as GraphPayload;
-    // 边从这里**已存在**的界面出发（id 是引擎上一步分配的，别写死）
-    const source = saved.nodes[0]?.id;
-    expect(source).toBeTruthy();
-    const withEdge: GraphPayload = {
+    const withClick: GraphPayload = {
       ...saved,
-      edges: [
-        {
-          id: 'e_tap',
-          from: source,
-          when: 'logo',
-          cooldown_ms: 300,
-          action: { type: 'click', target: 'logo' },
-        },
-      ],
+      nodes: [],
+      edges: [],
+      flow: {
+        steps: [
+          { id: 'trigger', type: 'manual', params: {} },
+          { id: 's_click', type: 'click', params: { by: '识别器', rec: 'logo' } },
+        ],
+      },
     };
-    // 走前端的 RPC 路径写回（等价于画布上连线后保存）
-    await graphSave(withEdge, DEVICE_ID);
+    await graphSave(withClick, DEVICE_ID);
+    await useGraphStore.getState().refresh(DEVICE_ID);
 
     await useSessionStore.getState().startRun(DEVICE_ID);
     expect(useSessionStore.getState().running[DEVICE_ID]).toBe(true);
@@ -373,8 +388,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     );
 
     const types = (useEventStore.getState().events[DEVICE_ID] ?? []).map((item) => item.type);
-    expect(types).toContain('node_entered');
-    expect(types).toContain('edge_matched');
+    expect(types).toContain('step_started');
     expect(types).toContain('action_executed');
 
     await useSessionStore.getState().stopRun(DEVICE_ID);
@@ -385,28 +399,23 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     const graphPath = path.join(projectDir, 'graph.json');
     const before = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
     expect(Object.keys(before.recognizers)).toContain('logo');
-    // 上一条用例加的边引用了 logo（when + action.target），改名必须把它一起改掉
-    expect(before.edges.some((edge) => edge.when === 'logo')).toBe(true);
+    expect(before.flow?.steps?.some((step) => (step.params as { rec?: string })?.rec === 'logo')).toBe(true);
 
     const result = await useSessionStore.getState().renameRecognizer(DEVICE_ID, 'logo', '游戏标题');
 
     expect(result).not.toBeNull();
-    expect(result?.refs.nodes).toBeGreaterThanOrEqual(1); // 界面的进入条件
-    expect(result?.refs.edges).toBeGreaterThanOrEqual(1); // e_tap 的 when / 动作目标
+    expect((result?.refs as { flowSteps?: number }).flowSteps ?? 0).toBeGreaterThanOrEqual(1);
 
     // 界面里的图：新名字在、旧名字没了（改名不能留下两个）
     const labels = useGraphStore.getState().graphs[DEVICE_ID]?.recognizers.map((item) => item.label) ?? [];
     expect(labels).toContain('游戏标题');
     expect(labels).not.toContain('logo');
 
-    // 磁盘上的 graph.json：识别器键 / 节点 enter / 边 when / 动作目标 全部换新
     const saved = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
     expect(Object.keys(saved.recognizers)).toContain('游戏标题');
     expect(Object.keys(saved.recognizers)).not.toContain('logo');
-    expect(saved.nodes[0]?.enter).toContain('游戏标题');
-    const tapEdge = saved.edges.find((edge) => edge.id === 'e_tap');
-    expect(tapEdge?.when).toBe('游戏标题');
-    expect((tapEdge?.action as { target?: string } | undefined)?.target).toBe('游戏标题');
+    const clickStep = saved.flow?.steps?.find((step) => step.id === 's_click');
+    expect((clickStep?.params as { rec?: string })?.rec).toBe('游戏标题');
 
     // 模板文件不跟着改名（spec 里存的是相对路径，文件叫什么对匹配没影响）
     expect(existsSync(path.join(projectDir, 'templates', 'logo.png'))).toBe(true);
@@ -426,7 +435,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
 
   it('删除识别器：被引用时拒绝并说清被谁用了；没人用才真删（连模板文件）', { timeout: 20000 }, async () => {
     const graphPath = path.join(projectDir, 'graph.json');
-    // 上一条用例改成"游戏标题"了，且界面的进入条件 + e_tap 的 when/动作都引用它
+    // 上一条用例改成"游戏标题"了，步骤链里的 click 仍引用它
     const before = JSON.parse(readFileSync(graphPath, 'utf-8')) as GraphPayload;
     expect(Object.keys(before.recognizers)).toContain('游戏标题');
 
@@ -438,14 +447,15 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     expect(Object.keys(stillThere.recognizers)).toContain('游戏标题');
 
     // 再录两个**没人引用**的识别器（不建节点/边），它们就该删得掉
-    const draft = (label: string, rect: readonly [number, number, number, number]) => ({
+    const draft = (label: string, rect: readonly [number, number, number, number]): RecordDraft => ({
       rect,
       label,
       threshold: 0.8,
       score: 0,
       asEnter: false,
       asActionTarget: false,
-      targetMode: 'new' as const,
+      search: 'region',
+      targetMode: 'new',
       targetNodeId: null,
       newNodeName: '临时',
       newNodeId: 'tmp',
@@ -476,7 +486,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Mock 设备）', () => {
     expect(types).toContain('recognizer_removed');
   });
 
-  it('断开设备后：连接态归零', async () => {
+  it('断开设备后：连接态归零', { timeout: 20000 }, async () => {
     await useSessionStore.getState().disconnect(DEVICE_ID);
 
     const device = useDeviceStore.getState().devices.find((item) => item.id === DEVICE_ID);

@@ -7,7 +7,8 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
   "numpy>=1.26",
-  "opencv-python-headless>=4.9",
+  # 5.x 在 Py3.13/Windows 上曾出现只装 dist-info、无 cv2 的坏包；先钉在 4.x
+  "opencv-python-headless>=4.9,<5",
   "pillow>=10",
   # 安卓连接与控制（发现 / 截图 / 输入）。MIT 许可，纯 Python 调用 adb
   "adbutils>=2.0",
@@ -15,13 +16,14 @@ dependencies = [
   "av>=12",
   # iOS 切 USB 配置（config2）用：小、纯 Python，libusb 在 macOS 自带
   "pyusb>=1.2",
-  "pyobjc-framework-quartz>=12.2.2",
-  "pyobjc-framework-applicationservices>=12.2.2",
+  # macOS 本机窗口的截图/输入（Quartz / ApplicationServices），仅 macOS 需要
+  "pyobjc-framework-quartz>=12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-applicationservices>=12.2.2; sys_platform == 'darwin'",
+  # iOS ≥17.4：RSD 隧道 + DVT 截图 + HID（与 Android 同为标配依赖）
+  "pymobiledevice3>=10",
 ]
 
 [project.optional-dependencies]
-# iOS 控制（QuickTime 采集 + CoreDevice HID，需要 iOS 17.4+）
-ios = ["pymobiledevice3>=10"]
 # OCR 识别器是可选能力：装了 rapidocr 才出现 ocr 类型识别器
 ocr = ["rapidocr-onnxruntime>=1.3"]
 
@@ -35,6 +37,9 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.11",
 ]
+packaging = [
+  "pyinstaller>=6.6",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -42,6 +47,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gamepilot"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/gamepilot/assets" = "gamepilot/assets"
 
 # --------------------------------------------------------------------------- #
 # ruff：格式化 + lint（与前端 Prettier/ESLint 对齐的风格基线）
@@ -79,8 +87,6 @@ files = ["src", "tests"]
 warn_unused_ignores = true
 show_error_codes = true
 
-# pymobiledevice3 是**可选**依赖（iOS 控制用）：本机装了 brew 版就能直接跑，
-# 没装时 iOS 那一路会给出明确提示，其它平台不受影响
 [[tool.mypy.overrides]]
 module = ["pymobiledevice3.*", "usb.*", "Quartz.*", "AppKit.*", "ApplicationServices.*"]
 ignore_missing_imports = true
@@ -99,7 +105,9 @@ ignore_missing_imports = true
 # --------------------------------------------------------------------------- #
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+# `-p no:xonsh`：xonsh（iOS 依赖链带进来的）注册了 pytest 插件，它的 CLI 走 prompt_toolkit，
+# 没有 Windows 控制台时直接 INTERNALERROR 把整个 pytest 打死。这个插件对本仓库没有任何用处。
+addopts = "-q --strict-markers -p no:xonsh"
 filterwarnings = ["error"]
 
 [tool.coverage.run]

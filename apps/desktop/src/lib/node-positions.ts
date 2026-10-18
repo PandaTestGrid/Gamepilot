@@ -1,21 +1,7 @@
 /**
  * 节点坐标：**界面私有**（引擎不存 x/y），所以坐标的"记忆"必须由界面自己负责。
  *
- * 真踩过的坑（用户反馈"拖动后节点会消失""右键建的新节点前面的节点也没了"）：
- *   拖动只改了界面 store 里的坐标，而任何一次引擎回包（连接/录制/改名/切脚本/建节点）
- *   都会重新走 `toGraphData` 的网格 `layout(index)` —— 拖过的位置被**覆盖**，节点弹回网格；
- *   新建节点时还会展开下方详情坞（画布变矮），弹回去的节点就掉出可视区，看起来就是"消失"。
- *
- *   另一个坑（用户反馈"切换设备的时候还会改流程图的布局"）：
- *   图是**项目级**的（`graph.json` 属于脚本，见 stores/graph.store.ts 的 SCRIPT_SCOPE），
- *   坐标却按**设备**分开记 —— 同一份脚本在 A 设备摆好，切到 B 设备就套用 B 的旧记忆
- *   （甚至是几轮之前摆的），看起来就是"切个设备布局自己变了"。
- *   现在坐标只按**脚本目录**记：**一台设备动过，其它设备看到的也是同一份摆位**。
- *
- * 这里的约定：
- *   1. `applyPositions` / `preservePositions`：把记住的坐标套回新回包的图上（按节点 id 匹配）；
- *   2. 坐标顺手写进 localStorage：重启应用后"我摆好的图"还在（`重新布局` 可显式丢弃记忆）；
- *   3. 键里带脚本目录，切换脚本不会串味（设备**不进**键，见上）。
+ * 引擎不存坐标；`applyPositions` / `preservePositions` 按节点 id 合并，键为脚本目录 + localStorage。
  */
 import type { GraphData } from '@/types';
 
@@ -130,22 +116,134 @@ export function storePositions(graph: GraphData): void {
   }
 }
 
+/** 步骤链画布：节点 id = step id，坐标仍按工作流目录记忆 */
+export function storeStepPositions(positions: Record<string, NodePosition>): void {
+  try {
+    window.localStorage.setItem(storageKey(), JSON.stringify(positions));
+  } catch {
+    // 同上
+  }
+}
+
 /** 「重新布局」用：把这份脚本的记忆清掉（含旧版本按设备存的那几份，否则会被重新捡回来） */
 export function clearStoredPositions(): void {
-  const legacy: string[] = [];
+  clearStoredPositionsForRoot(scope);
+}
+
+function normalizePathKey(value: string): string {
+  return value
+    .replace(/[\\/]+$/, '')
+    .replace(/\\/g, '/')
+    .toLowerCase();
+}
+
+function matchesRootKey(storageKeyName: string, targetRoot: string): boolean {
+  if (!storageKeyName.startsWith(`${STORAGE_PREFIX}:`)) {
+    return false;
+  }
+  const rest = storageKeyName.slice(STORAGE_PREFIX.length + 1);
+  const normRest = normalizePathKey(rest);
+  const normTarget = normalizePathKey(targetRoot);
+  return normRest === normTarget || normRest.startsWith(`${normTarget}:`);
+}
+
+function loadPositionsForRoot(root: string): Record<string, NodePosition> {
+  if (!root) {
+    return {};
+  }
+  const direct = readStored(`${STORAGE_PREFIX}:${root}`);
+  if (Object.keys(direct).length > 0) {
+    return direct;
+  }
+  const merged: Record<string, NodePosition> = {};
   try {
-    const prefix = legacyPrefix();
     for (let index = 0; index < window.localStorage.length; index += 1) {
       const key = window.localStorage.key(index);
-      if (key?.startsWith(prefix)) {
-        legacy.push(key);
+      if (key && matchesRootKey(key, root)) {
+        Object.assign(merged, readStored(key));
       }
     }
-    window.localStorage.removeItem(storageKey());
-    for (const key of legacy) {
+  } catch {
+    return merged;
+  }
+  return merged;
+}
+
+/** 删除工作流时清掉该工作流的坐标缓存（防止新建同名工作流时串用旧坐标） */
+export function clearStoredPositionsForRoot(root: string): void {
+  if (!root) {
+    return;
+  }
+  const toRemove: string[] = [];
+  try {
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (key && matchesRootKey(key, root)) {
+        toRemove.push(key);
+      }
+    }
+    window.localStorage.removeItem(`${STORAGE_PREFIX}:${root}`);
+    for (const key of toRemove) {
       window.localStorage.removeItem(key);
     }
   } catch {
     // 同上
+  }
+}
+
+/** 删除工作区时清掉该工作区下所有工作流的坐标缓存 */
+export function clearStoredPositionsUnder(baseDir: string): void {
+  if (!baseDir) {
+    return;
+  }
+  const normBase = normalizePathKey(baseDir);
+  if (!normBase) {
+    return;
+  }
+  const toRemove: string[] = [];
+  try {
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (!key?.startsWith(`${STORAGE_PREFIX}:`)) {
+        continue;
+      }
+      const rest = normalizePathKey(key.slice(STORAGE_PREFIX.length + 1));
+      if (rest === normBase || rest.startsWith(`${normBase}/`)) {
+        toRemove.push(key);
+      }
+    }
+    for (const key of toRemove) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // 同上
+  }
+}
+
+/** 复制工作流时把原工作流的节点摆位一并复制过去 */
+export function copyStoredPositions(fromRoot: string, toRoot: string): void {
+  if (!fromRoot || !toRoot) {
+    return;
+  }
+  const existing = loadPositionsForRoot(fromRoot);
+  if (Object.keys(existing).length === 0) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(`${STORAGE_PREFIX}:${toRoot}`, JSON.stringify(existing));
+  } catch {
+    // 同上
+  }
+}
+
+/** 工作流改名时把坐标缓存迁移到新目录，并清掉旧目录键 */
+export function migrateStoredPositions(fromRoot: string, toRoot: string): void {
+  if (!fromRoot || !toRoot || normalizePathKey(fromRoot) === normalizePathKey(toRoot)) {
+    return;
+  }
+  copyStoredPositions(fromRoot, toRoot);
+  clearStoredPositionsForRoot(fromRoot);
+  if (normalizePathKey(scope) === normalizePathKey(fromRoot)) {
+    scope = toRoot;
   }
 }

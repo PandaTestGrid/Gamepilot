@@ -25,10 +25,14 @@ venv/
 dist/
 build/
 engine/.venv/
+engine/vendor/scrcpy-server
+engine/src/gamepilot/assets/ppocr_v4/*.onnx
+engine/build/sidecar-pyinstaller/
 
 # ---------- 运行时产物（用户数据不入库）----------
 assets/runtime/
 runs/
+**/.runs/
 *.log
 
 # 工作区（= 用户自己选的文件夹，里面是工作流的流程图与模板截图，属于用户数据）

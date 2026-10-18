@@ -28,19 +28,31 @@
 .react-flow__node.draggable.dragging {
   cursor: grabbing;
 }
+.react-flow__node.draggable .state-node {
+  cursor: grab;
+}
 .react-flow__node.dragging .state-node,
 .react-flow__node.dragging > div {
   border-color: var(--brand);
   background-color: var(--bg-raised);
 }
 
-/* 边是可点的（点它看/改属性），光标要给；线宽/颜色是逐条内联的，由 JS 按
-   "选中 > 悬停 > 默认"决定（见 GraphPane 的 hoveredEdge）—— CSS 盖不住内联样式 */
+/* 边带内联 stroke，选中/悬停必须 !important 才能盖过 */
 .react-flow__edge {
   cursor: pointer;
 }
 .react-flow__edge:hover .react-flow__edge-text {
   font-weight: 600;
+}
+.react-flow__edge:hover:not(.selected) .react-flow__edge-path {
+  stroke: var(--brand) !important;
+  stroke-width: 2.25px !important;
+}
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:focus .react-flow__edge-path,
+.react-flow__edge:focus-visible .react-flow__edge-path {
+  stroke: var(--brand) !important;
+  stroke-width: 3px !important;
 }
 
 /* 连线中的预览线（从圆点拖出来时）跟着主题色，别用默认的灰 */
@@ -106,4 +118,32 @@
   .state-node[data-run='pending'] {
     animation: none;
   }
+}
+
+/* 左栏模块指针拖放：避免 React Flow 空白平移抢走 pointer，落点用 elementsFromPoint 穿透 */
+body.flow-module-pointer-dragging .react-flow__pane {
+  cursor: copy !important;
+}
+body.flow-module-pointer-dragging .react-flow__pane.draggable {
+  cursor: copy !important;
+}
+
+/* 运行中模块的流光在描边环上，避免被 xyflow 节点层裁切 */
+.react-flow__node:has(.flow-step-running) {
+  overflow: visible !important;
+}
+
+/*
+ * 步骤节点内禁用 transition。
+ *
+ * WKWebView 在悬停触发 opacity / transform / color 过渡时，会把被过渡的元素提升成
+ * 合成层，连带把节点里的文字重新栅格化 —— 位置没变，但抗锯齿灰度变了，看起来就是
+ * 文字闪烁/抖动（实测两帧 dx=0 dy=0、只有文字像素不同）。节点的悬停反馈已经改成
+ * 即时颜色变化，不再需要过渡。
+ *
+ * 注意：这里只关 transition，不影响 `flow-step-running` 的 animation。
+ */
+.flow-step-card,
+.flow-step-card * {
+  transition: none !important;
 }

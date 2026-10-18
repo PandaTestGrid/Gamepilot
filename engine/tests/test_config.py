@@ -1,4 +1,4 @@
-"""引擎配置（`config.json`）：当前工作区 + 最近使用列表 + 全局回收站（契约 §1）。
+"""引擎配置（`config.json`）：当前工作区 + 最近使用列表（契约 §1）。
 
 全部在 `tmp_path` 上跑：`GAMEPILOT_CONFIG_DIR` 指到临时目录，**不碰用户真实的配置目录**。
 """
@@ -32,16 +32,23 @@ def cfg_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_config_dir_follows_env(cfg_dir: Path) -> None:
     assert config.config_dir() == str(cfg_dir)
     assert config.config_path() == str(cfg_dir / config.CONFIG_FILE)
-    assert config.global_trash_root() == str(cfg_dir / ".trash")
 
 
 def test_default_config_dir_is_platform_specific(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """平台默认目录：macOS / Linux / Windows 各按自己的规矩。"""
+    """平台默认目录：macOS / Linux / Windows 各按自己的规矩。
+
+    `default_config_dir()` 同时看 `sys.platform`（darwin）和 `os.name`（nt），
+    所以三个分支都得把这两个摆到位 —— 只改 `sys.platform` 的话，在 Windows 上会一直
+    落到 nt 那条（真机就是），另外两条永远测不到。
+    """
     monkeypatch.delenv(config.CONFIG_DIR_ENV, raising=False)
+    # `~` 的展开两边都要钉住：POSIX 看 HOME，Windows 看 USERPROFILE
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
 
+    monkeypatch.setattr(os, "name", "posix")
     monkeypatch.setattr(sys, "platform", "darwin")
     assert config.default_config_dir() == str(tmp_path / "Library" / "Application Support" / "gamepilot")
 
@@ -208,7 +215,10 @@ def test_pinned_workspace_seeds_in_memory_and_never_writes_a_file(
 ) -> None:
     pinned = tmp_path / "pinned"
     monkeypatch.delenv(config.CONFIG_DIR_ENV, raising=False)
+    # 默认配置目录也要钉在临时目录里：Windows 看 APPDATA（否则这一条会去读用户真实的 config.json）
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setenv(config.WORKSPACE_DIR_ENV, str(pinned))
 
     cfg = config.load()

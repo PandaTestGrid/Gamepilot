@@ -31,20 +31,26 @@ export function PanelShell({
         （截图里「框选/点选/多开」被压成"框 选"两行就是这个原因）。
         min-h-7 保证窄的时候长高，宽的时候还是 28px。
       */}
-      <div className="flex min-h-7 shrink-0 flex-wrap items-center gap-x-1 gap-y-0.5 border-b border-line px-2 py-0.5">
+      <div
+        className={cn(
+          'flex min-h-7 shrink-0 border-b border-line',
+          tabs ? 'items-stretch' : 'flex-wrap items-center gap-x-1 gap-y-0.5 px-2 py-0.5',
+        )}
+      >
         {tabs ? (
-          // 标签条：`min-w-0` 才能被压缩、`overflow-x-auto` 才不会把按钮顶到下一行；
-          // 滚动条本身在 28px 的头里太吵，隐藏掉（触控板横滑 / Shift+滚轮照样能用）
-          <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <>
             {tabs}
-          </div>
+            {actions ? (
+              <div className="flex shrink-0 items-center gap-0.5 self-center px-2 py-0.5">{actions}</div>
+            ) : null}
+          </>
         ) : (
           <>
-            <span className="shrink-0 text-panelhead font-medium">{title}</span>
+            <span className="shrink-0 px-2 text-panelhead font-medium">{title}</span>
             <div className="min-w-2 flex-1" />
+            {actions}
           </>
         )}
-        {actions}
       </div>
       {/*
         内容区必须同时有 flex-1 + min-h-0：画面栏里全是绝对定位元素（img absolute inset-0），
@@ -56,6 +62,37 @@ export function PanelShell({
       </div>
       {footer}
     </section>
+  );
+}
+
+/** IDE 风格：仅图标、约 22×22，用于面板头右侧工具组 */
+export function IconGhostButton({
+  children,
+  onClick,
+  active,
+  title,
+  disabled,
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  active?: boolean;
+  title?: string;
+  disabled?: boolean;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      disabled={disabled}
+      className={cn(
+        'flex size-[22px] shrink-0 items-center justify-center rounded-sm text-dim hover:bg-raised hover:text-fg',
+        active && 'bg-active text-fg',
+        disabled && 'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-dim',
+      )}
+    >
+      {children}
+    </button>
   );
 }
 

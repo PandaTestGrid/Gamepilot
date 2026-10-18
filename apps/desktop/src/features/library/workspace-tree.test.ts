@@ -70,7 +70,12 @@ describe('收窄引擎返回的树（v4：root + workflows）', () => {
       recognizers: 0,
       templates: 0,
       modified: 0,
+      trigger: null,
     });
+    expect(
+      toWorkflow({ name: '组队', trigger: { type: 'schedule', params: { at: '09:00' } } })?.trigger,
+    ).toEqual({ type: 'schedule', params: { at: '09:00' } });
+    expect(toWorkflow({ name: '坏触发', trigger: {} })?.trigger).toBeNull();
     expect(toWorkflow(null)).toBeNull();
     expect(toTree({ root: ROOT, workflows: [{ name: 'a' }, null, 42, 'x'] }).workflows).toHaveLength(1);
   });
@@ -98,11 +103,10 @@ describe('收窄引擎返回的树（v4：root + workflows）', () => {
 });
 
 describe('工作区（v4：可以有多个，名字是用户输的）', () => {
-  it('workspace.list：active/recommended/trashRoot/items 都收窄；active 缺失 = null', () => {
+  it('workspace.list：active/recommended/items 都收窄；active 缺失 = null', () => {
     const result = toWorkspaceList({
       active: '/w/a',
       recommended: '/repo/workspaces/默认',
-      trashRoot: '/config/.trash',
       items: [
         { name: '我的工作区', root: '/w/a', active: true, exists: true },
         { name: 'game-b', root: '/w/b', active: false, exists: false },
@@ -111,7 +115,6 @@ describe('工作区（v4：可以有多个，名字是用户输的）', () => {
 
     expect(result.active).toBe('/w/a');
     expect(result.recommended).toBe('/repo/workspaces/默认');
-    expect(result.trashRoot).toBe('/config/.trash');
     expect(result.items.map((item) => item.name)).toEqual(['我的工作区', 'game-b']);
     expect(result.items[1]?.exists).toBe(false);
 

@@ -8,6 +8,7 @@
 import type { GraphPayload } from '@/lib/rpc';
 import type {
   EdgeAction,
+  FlowStep,
   GraphVariable,
   EdgeCondition,
   EdgeKind,
@@ -45,9 +46,11 @@ export function toGraphData(
     id: node.id,
     name: node.name ?? node.id,
     enter: node.enter ?? [],
+    at: typeof node.at === 'string' && node.at ? node.at : undefined,
     ...layout(index),
     visits: 0,
-    note: node.timeout_ms ? `timeout ${node.timeout_ms}ms` : undefined,
+    // `note` 是引擎里的真实备注字段；`timeout_ms` 是限时等待的阈值，不能顶替它
+    note: typeof node.note === 'string' && node.note ? node.note : undefined,
   }));
 
   const edges: GraphEdgeView[] = (payload.edges ?? []).map((edge) => ({
@@ -86,16 +89,36 @@ export function toGraphData(
   const recognizers: RecognizerView[] = Object.entries(payload.recognizers ?? {}).map(([label, spec]) => {
     const live1 = liveScores.get(label);
     const type = str(spec.type, 'template');
-    const roi = Array.isArray(spec.roi) && spec.roi.length === 4 ? (spec.roi as number[]) : [0, 0, 0, 0];
+    // 没写 roi = 整帧（引擎的语义）；界面按 [0,0,1,1] 画全屏框，不能显示成 0×0
+    const roi = Array.isArray(spec.roi) && spec.roi.length === 4 ? (spec.roi as number[]) : [0, 0, 1, 1];
     return {
       label,
       type: type === 'color' ? 'color' : type === 'ocr' ? 'ocr' : 'template',
       template: typeof spec.template === 'string' ? spec.template : undefined,
+      text: typeof spec.text === 'string' ? spec.text : undefined,
+      recordedSize:
+        Array.isArray(spec.recorded_size) && spec.recorded_size.length === 2
+          ? [Number(spec.recorded_size[0]) || 0, Number(spec.recorded_size[1]) || 0]
+          : undefined,
       score: live1?.score ?? 0,
       threshold: num(spec.threshold, 0.82),
-      roi: [roi[0] ?? 0, roi[1] ?? 0, roi[2] ?? 0, roi[3] ?? 0],
+      roi: [roi[0] ?? 0, roi[1] ?? 0, roi[2] ?? 1, roi[3] ?? 1],
+      search: spec.search === 'full' ? 'full' : 'region',
       samples: 1,
       state: (live1?.state as RecognizerView['state']) ?? 'idle',
+    };
+  });
+
+  const flowSteps: FlowStep[] = (payload.flow?.steps ?? []).map((step) => {
+    const item = step;
+    return {
+      id: str(item.id),
+      type: str(item.type),
+      params:
+        typeof item.params === 'object' && item.params !== null
+          ? (item.params as Record<string, unknown>)
+          : {},
+      disabled: item.disabled === true,
     };
   });
 
@@ -107,6 +130,7 @@ export function toGraphData(
     variables,
     activeNodeId: live?.node ?? null,
     pendingNodeId: live?.pending ?? null,
+    flow: { steps: flowSteps },
   };
 }
 
@@ -154,21 +178,19 @@ export function toParamValue(value: unknown): ParamValue | undefined {
   return undefined;
 }
 
-/** 界面上的 "$点X" → 引擎里的 {"$var": "点X"} */
-export function toParamPayload(value: ParamValue | undefined): unknown {
-  if (typeof value === 'string' && value.startsWith('$') && value.length > 1) {
-    return { $var: value.slice(1) };
-  }
-  return value;
-}
-
 function toAction(value: unknown, fallbackTarget: string): EdgeAction {
   const spec = (value ?? {}) as Record<string, unknown>;
   const type = str(spec.type, 'click');
-  const known = ['click', 'long_press', 'swipe', 'wait', 'key', 'text', 'set', 'call'];
+  // 必须和引擎 `core/actions.py` 的 ACTION_TYPES 对齐：漏一个就会把用户录的动作静默改写成 click
+  const known = ['click', 'double_click', 'long_press', 'swipe', 'wait', 'key', 'text', 'set', 'call'];
   return {
     type: (known.includes(type) ? type : 'click') as EdgeAction['type'],
-    target: typeof spec.target === 'string' ? spec.target : fallbackTarget,
+    target:
+      typeof spec.target === 'string'
+        ? spec.target
+        : spec.x !== undefined && spec.y !== undefined
+          ? undefined
+          : fallbackTarget,
     toTarget: typeof spec.to_target === 'string' ? spec.to_target : undefined,
     x: toParamValue(spec.x),
     y: toParamValue(spec.y),
@@ -181,74 +203,4 @@ function toAction(value: unknown, fallbackTarget: string): EdgeAction {
     assign: toParamValue(spec.value) !== undefined ? String(toParamValue(spec.value)) : undefined,
     value: typeof spec.value === 'string' ? spec.value : '',
   };
-}
-
-/** 界面模型 → graph.json 的 condition（默认形态就省略，保持文件干净） */
-export function toConditionPayload(
-  condition: EdgeCondition,
-  when: string,
-): Record<string, unknown> | undefined {
-  if (condition.always) {
-    return { always: true, ...(condition.withinMs > 0 ? { within_ms: condition.withinMs } : {}) };
-  }
-  const out: Record<string, unknown> = {};
-  const allOf = condition.allOf.filter((item) => item !== when);
-  if (allOf.length > 0) {
-    out.all_of = [...allOf];
-  }
-  if (condition.anyOf.length > 0) {
-    out.any_of = [...condition.anyOf];
-  }
-  if (condition.noneOf.length > 0) {
-    out.none_of = [...condition.noneOf];
-  }
-  if (condition.minScore > 0) {
-    out.min_score = condition.minScore;
-  }
-  if (condition.withinMs > 0) {
-    out.within_ms = condition.withinMs;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
-/** 界面模型 → graph.json 的 action */
-export function toActionPayload(action: EdgeAction): Record<string, unknown> {
-  const out: Record<string, unknown> = { type: action.type };
-  if (action.type === 'call') {
-    out.script = action.script ?? '';
-    return out;
-  }
-  if (action.type === 'set') {
-    out.name = action.name ?? '';
-    out.value = action.assign ?? '0';
-    return out;
-  }
-  if (action.type === 'wait') {
-    out.seconds = toParamPayload(action.seconds) ?? 0.5;
-    return out;
-  }
-  if (action.type === 'key' || action.type === 'text') {
-    out.value = action.value ?? '';
-    return out;
-  }
-  if (action.target) {
-    out.target = action.target;
-  } else {
-    if (action.x !== undefined) {
-      out.x = toParamPayload(action.x);
-    }
-    if (action.y !== undefined) {
-      out.y = toParamPayload(action.y);
-    }
-  }
-  if (action.type === 'swipe') {
-    if (action.toTarget) {
-      out.to_target = action.toTarget;
-    } else {
-      out.to_x = toParamPayload(action.toX) ?? 0.5;
-      out.to_y = toParamPayload(action.toY) ?? 0.5;
-    }
-  }
-  out.duration_ms = toParamPayload(action.durationMs) ?? 300;
-  return out;
 }

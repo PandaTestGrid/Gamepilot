@@ -3,7 +3,7 @@
  *
  * 契约 v3 §3.3 的硬要求：**动态 import + try/catch**。原生对话框在浏览器 / vitest 里没有，
  * 插件没装、权限没给也会抛 —— 这些情况一律返回 `null`，由调用方退回"手输绝对路径"。
- * 绝不能出现"点了＋没反应"（那正是我们在 浏览器原生 prompt 上踩过的坑）。
+ * 失败时返回 null，由调用方显示手输路径表单。
  *
  * 说明：`@tauri-apps/plugin-dialog` 是可选依赖（顶层 dynamic import 会被打包器处理，
  * 装不上时这段 import 会 reject → 走 catch；配套的 Rust 侧装配见 src-tauri/）。

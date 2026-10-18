@@ -10,8 +10,12 @@ GamePilot 的引擎进程：负责**感知 + 决策 + 执行 + 事件**，不含
 
 ```bash
 cd engine
-uv sync --all-extras      # 或 uv sync（不装 OCR/scrcpy 可选依赖）
+uv sync --extra ocr       # 含 pymobiledevice3（iOS）和 OCR
+uv sync                   # 不要 OCR 时
 ```
+
+离线 OCR 的 PP-OCRv4 ONNX 已内置在 `src/gamepilot/assets/ppocr_v4/`（约 16MB，随包分发、无需联网下载）。
+若该目录缺失，安装 `uv sync --extra ocr` 后引擎会回退使用 `rapidocr-onnxruntime` wheel 内的同名模型。
 
 ## 常用命令
 
@@ -28,6 +32,13 @@ uv run python -m gamepilot.rpc         # 以 stdio 模式启动引擎（手工�
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"engine.ping","params":{}}' | uv run python -m gamepilot.rpc
 ```
+
+## 步骤链 vs 状态图
+
+- **`flow.steps` 非空**：运行走 `FlowEngine`；`graph.node.*` / `graph.edge.*` 会拒绝（见 `session.reject_legacy_graph_edit`）。
+- **无 flow**：仍可用 legacy nodes/edges RPC 与状态机（测试与旧脚本）。
+
+契约说明见 [`docs/rpc.md`](../docs/rpc.md)。
 
 ## 铁律
 

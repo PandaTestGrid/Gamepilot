@@ -1,8 +1,6 @@
 """scrcpy 投屏通道（客户端实现，协议对齐 scrcpy 3.3.4 的 server）。
 
-为什么要自己实现协议：adb `screencap` 每帧要 PNG 编解码 + USB 传输，实测 550ms/帧（1.8fps），
-而 scrcpy 走 H.264 视频流 + 控制 socket，同样一台 OPPO A57 上能到 30fps 量级，
-点击也从 `adb shell input tap`（~1s，每次 fork 一个进程）降到毫秒级。
+adb screencap PNG 太慢；本模块走 H.264 视频流 + 控制 socket（对齐 scrcpy 3.3.4）。
 
 协议要点（源码依据：scrcpy v3.3.4 server/DesktopConnection.java、device/Streamer.java、
 app/src/control_msg.c）：
@@ -32,6 +30,8 @@ from typing import Any
 
 import numpy as np
 
+from ..core.bezier_trajectory import play_swipe_path, play_tap, resolve_swipe_points
+
 logger = logging.getLogger("gamepilot.devices.scrcpy")
 
 # 与 vendor/scrcpy-server 的版本严格对应（协议随版本变化）
@@ -40,6 +40,7 @@ SOCKET_NAME = "scrcpy"
 
 # 控制报文
 MSG_INJECT_KEYCODE = 0
+MSG_INJECT_TEXT = 1
 MSG_INJECT_TOUCH = 2
 ACTION_DOWN = 0
 ACTION_UP = 1
@@ -52,12 +53,26 @@ PACKET_FLAG_KEY_FRAME = 1 << 62
 
 def find_server_jar() -> str | None:
     """按优先级找 scrcpy-server：环境变量 → 仓库 vendor → 系统安装的 scrcpy。"""
-    candidates = [os.environ.get("GAMEPILOT_SCRCPY_SERVER")]
+    import shutil
+
+    from gamepilot.runtime_paths import vendor_scrcpy_server
+
+    bundled = vendor_scrcpy_server()
+    candidates = [os.environ.get("GAMEPILOT_SCRCPY_SERVER"), str(bundled) if bundled.is_file() else None]
     here = os.path.dirname(os.path.abspath(__file__))
     repo_engine = os.path.abspath(os.path.join(here, "..", "..", ".."))
     candidates.append(os.path.join(repo_engine, "vendor", "scrcpy-server"))
     for share in ("/opt/homebrew/share/scrcpy", "/usr/local/share/scrcpy", "/usr/share/scrcpy"):
         candidates.append(os.path.join(share, "scrcpy-server"))
+    scrcpy_bin = shutil.which("scrcpy")
+    if scrcpy_bin:
+        bindir = os.path.dirname(os.path.abspath(scrcpy_bin))
+        candidates.append(os.path.join(bindir, "scrcpy-server"))
+        candidates.append(os.path.abspath(os.path.join(bindir, "..", "share", "scrcpy", "scrcpy-server")))
+    for env_key in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+        root = os.environ.get(env_key)
+        if root:
+            candidates.append(os.path.join(root, "scrcpy", "scrcpy-server"))
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return candidate
@@ -77,6 +92,7 @@ class ScrcpyChannel:
         max_fps: int = 30,
         bit_rate: int = 8_000_000,
         connect_timeout: float = 8.0,
+        display_id: int | None = None,
     ) -> None:
         self.serial = serial
         self.adb_path = adb_path
@@ -85,6 +101,9 @@ class ScrcpyChannel:
         self.max_fps = max_fps
         self.bit_rate = bit_rate
         self.connect_timeout = connect_timeout
+        # 多屏设备的模拟器（MuMu 这类）会把每个标签页放到一块独立的虚拟屏上：
+        # `display_id` = 只镜像那一块屏（视频与输入事件都跟着走）。None = 默认屏。
+        self.display_id = display_id
 
         self.video_size: tuple[int, int] = (0, 0)
         self.fps = 0.0
@@ -106,10 +125,6 @@ class ScrcpyChannel:
         self.scid = random.randint(1, 0x7FFFFFFF)
         self.socket_name = f"{SOCKET_NAME}_{self.scid:08x}"
         self._server_log_lines: list[str] = []
-
-    # ------------------------------------------------------------------ #
-    # 生命周期
-    # ------------------------------------------------------------------ #
 
     def start(self) -> None:
         import av  # 延迟导入：没有 PyAV 时由调用方回退到 adb 截图
@@ -172,14 +187,17 @@ class ScrcpyChannel:
             self._decoder_thread.join(timeout=2)
         if self._server is not None and self._server.poll() is None:
             self._server.kill()
-        try:
-            self._adb("forward", "--remove", f"tcp:{self._port}")
-        except Exception:  # 清理失败不影响退出
-            logger.debug("清理 adb forward 失败", exc_info=True)
-
-    # ------------------------------------------------------------------ #
-    # 帧
-    # ------------------------------------------------------------------ #
+        if self._server is not None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self._server.wait(timeout=2)
+        if self._port:
+            try:
+                self._adb("forward", "--remove", f"tcp:{self._port}")
+            except Exception:  # 清理失败不影响退出
+                logger.debug("清理 adb forward 失败", exc_info=True)
+        if getattr(self, "_remote_jar", None):
+            with contextlib.suppress(Exception):
+                self._adb("shell", "rm", "-f", self._remote_jar)
 
     def latest_frame(self, timeout: float = 1.0) -> np.ndarray | None:
         """取最新解码帧；timeout 内没有新帧则返回 None。"""
@@ -201,10 +219,6 @@ class ScrcpyChannel:
     def canvas_size(self) -> tuple[int, int]:
         return self.video_size
 
-    # ------------------------------------------------------------------ #
-    # 控制
-    # ------------------------------------------------------------------ #
-
     def touch(self, phase: str, x_norm: float, y_norm: float) -> None:
         """实时触控：一次只发一个事件（down / move / up）。
 
@@ -221,15 +235,15 @@ class ScrcpyChannel:
         y = round(min(max(y_norm, 0.0), 1.0) * (height - 1))
         self._send_touch(action, x, y)
 
-    def click(self, x_norm: float, y_norm: float) -> None:
-        """归一化坐标点击（相对视频画布）。"""
-        if self._control is None:
-            raise RuntimeError("控制通道未就绪")
-        width, height = self.video_size
-        x = round(min(max(x_norm, 0.0), 1.0) * (width - 1))
-        y = round(min(max(y_norm, 0.0), 1.0) * (height - 1))
-        self._send_touch(ACTION_DOWN, x, y)
-        self._send_touch(ACTION_UP, x, y)
+    def click(
+        self,
+        x_norm: float,
+        y_norm: float,
+        duration: float = 0.05,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
+        """归一化坐标点击：HID 式 down / 微移 / up，不是 adb tap。"""
+        play_tap(self.touch, (x_norm, y_norm), duration, path)
 
     def key(self, keycode: int) -> None:
         """注入一个按键（返回 / Home / 任务 / 电源 …）。"""
@@ -240,9 +254,28 @@ class ScrcpyChannel:
             assert len(payload) == 14, len(payload)
             self._control.sendall(payload)
 
-    def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3, steps: int = 12) -> None:
+    def text(self, value: str) -> None:
+        """注入一段文本（INJECT_TEXT：u32 长度 + UTF-8 字节）。"""
         if self._control is None:
             raise RuntimeError("控制通道未就绪")
+        raw = value.encode("utf-8")
+        self._control.sendall(struct.pack(">BI", MSG_INJECT_TEXT, len(raw)) + raw)
+
+    def swipe(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        duration: float = 0.3,
+        steps: int = 12,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
+        if self._control is None:
+            raise RuntimeError("控制通道未就绪")
+        if path:
+            play_swipe_path(self.touch, resolve_swipe_points((x1, y1), (x2, y2), duration, path), duration)
+            return
         width, height = self.video_size
         start = (int(x1 * (width - 1)), int(y1 * (height - 1)))
         end = (int(x2 * (width - 1)), int(y2 * (height - 1)))
@@ -262,7 +295,7 @@ class ScrcpyChannel:
         # 参数对齐参考实现 panda-agent/devices/android/control/touch_controller.py：
         # pointer_id=1、pressure=1、action_button/buttons=PRIMARY。
         # 之前用"手指式"（pointer_id=-1、buttons=0）时，桌面拖动只跟手一点点然后回弹，
-        # 手势没被系统识别成有效拖动（实测翻页失败）。
+        # 位移过小会被系统当成无效拖动。
         payload = struct.pack(
             ">BBQIIHHHII",  # type,action,pointerId,x,y,w,h,pressure,actionButton,buttons = 32B
             MSG_INJECT_TOUCH,
@@ -279,10 +312,6 @@ class ScrcpyChannel:
         assert len(payload) == 32, len(payload)
         assert self._control is not None
         self._control.sendall(payload)
-
-    # ------------------------------------------------------------------ #
-    # 内部
-    # ------------------------------------------------------------------ #
 
     def _decode_loop(self) -> None:
         assert self._video is not None
@@ -340,7 +369,8 @@ class ScrcpyChannel:
             return None
 
     def _push_server(self) -> None:
-        remote = "/data/local/tmp/scrcpy-server.jar"
+        # 每条并行服务独占 jar 路径，防止两次 adb push 同时改写同一个文件。
+        remote = f"/data/local/tmp/gamepilot-scrcpy-{self.scid:08x}.jar"
         self._adb("push", self.server_jar, remote)
         self._remote_jar = remote
 
@@ -368,6 +398,9 @@ class ScrcpyChannel:
             "cleanup=false",
             "log_level=info",
         ]
+        if self.display_id is not None:
+            # 服务端选项名就是 display_id（scrcpy 3.x），客户端 --display-id 映射到它
+            args.append(f"display_id={self.display_id}")
         logger.debug("启动 scrcpy server: %s", " ".join(args))
         self._server = subprocess.Popen(
             [self.adb_path, "-s", str(self.serial), *args],
@@ -375,6 +408,7 @@ class ScrcpyChannel:
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         # 必须持续读走 stderr：管道写满会让 server 阻塞，表现就是"投屏莫名其妙卡死"
         if self._server.stderr is not None:
@@ -385,9 +419,20 @@ class ScrcpyChannel:
         if self.serial:
             command += ["-s", str(self.serial)]
         command += list(args)
-        return subprocess.run(
-            command, capture_output=True, text=True, timeout=30, check=False, stdin=subprocess.DEVNULL
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"adb {' '.join(args[:2])} 失败：{result.stderr.strip()[:250] or result.stdout.strip()[:250]}"
+            )
+        return result
 
     def _drain_server_log(self, stream: Any) -> None:
         try:

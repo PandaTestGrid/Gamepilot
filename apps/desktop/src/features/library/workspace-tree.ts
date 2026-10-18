@@ -7,7 +7,13 @@
  *
  * 两层的名字（契约 v4 §0）：**工作区（= 项目，同一个东西；用户选的文件夹）› 工作流 = 一张流程图**。
  */
-import type { WorkspaceListResult, WorkspaceSummary, WorkspaceTreePayload, WorkflowSummary } from '@/lib/rpc';
+import type {
+  WorkspaceListResult,
+  WorkspaceSummary,
+  WorkspaceTreePayload,
+  WorkflowSummary,
+  WorkflowTrigger,
+} from '@/lib/rpc';
 
 /** 取对象上的一个键（不是对象就当没有）。 */
 function read(source: unknown, key: string): unknown {
@@ -35,6 +41,22 @@ export function toModified(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+/** 触发条件：只认 `{type, params}`；缺失/类型不对就是 null（调用节点不显示）。 */
+function toTrigger(value: unknown): WorkflowTrigger | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  const type = str(read(value, 'type'));
+  if (!type) {
+    return null;
+  }
+  const params = read(value, 'params');
+  return {
+    type,
+    params: typeof params === 'object' && params !== null ? (params as Record<string, unknown>) : {},
+  };
+}
+
 /** 工作流摘要：字段缺失/类型不对一律降级（缺 nodes 就当 0，而不是显示 undefined）。 */
 export function toWorkflow(value: unknown): WorkflowSummary | null {
   if (typeof value !== 'object' || value === null) {
@@ -48,6 +70,7 @@ export function toWorkflow(value: unknown): WorkflowSummary | null {
     recognizers: num(read(value, 'recognizers')),
     templates: num(read(value, 'templates')),
     modified: toModified(read(value, 'modified')),
+    trigger: toTrigger(read(value, 'trigger')),
   };
 }
 
@@ -109,13 +132,12 @@ export function toWorkspaces(result: unknown): WorkspaceSummary[] {
   return workspaces;
 }
 
-/** `workspace.list` 的返回（`{ active, recommended, trashRoot, items }`）。 */
+/** `workspace.list` 的返回（`{ active, recommended, items }`）。 */
 export function toWorkspaceList(result: unknown): WorkspaceListResult {
   const active = read(result, 'active');
   return {
     active: typeof active === 'string' && active ? active : null,
     recommended: str(read(result, 'recommended')),
-    trashRoot: str(read(result, 'trashRoot')),
     items: toWorkspaces(result),
   };
 }

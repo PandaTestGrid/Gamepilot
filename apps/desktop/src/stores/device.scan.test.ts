@@ -3,9 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DeviceRuntime } from '@/types';
 
 const listDevicesMock = vi.hoisted(() => vi.fn());
-vi.mock('@/lib/rpc', () => ({ listDevices: listDevicesMock }));
+vi.mock('@/lib/rpc', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listDevices: listDevicesMock,
+}));
 
 const { mergeScan, toRuntimeDevice, useDeviceStore } = await import('@/stores/device.store');
+const { useSessionStore } = await import('@/stores/session.store');
 
 function device(over: Partial<DeviceRuntime> & { id: string }): DeviceRuntime {
   return {
@@ -16,6 +20,36 @@ function device(over: Partial<DeviceRuntime> & { id: string }): DeviceRuntime {
     resolution: [1080, 1920],
     fps: 0,
     ...over,
+  };
+}
+
+const MAIN = device({
+  id: 'android:emulator-5554',
+  kind: 'emulator',
+  uri: 'Android:///?serial=emulator-5554',
+  status: 'connected',
+});
+const SECONDARY = device({
+  id: 'android:emulator-5554:42',
+  kind: 'emulator',
+  uri: 'Android:///?serial=emulator-5554&display=23&physical=42',
+  name: 'MuMu · 屏23',
+  status: 'connected',
+});
+
+function info(item: DeviceRuntime) {
+  return {
+    id: item.id,
+    name: item.name,
+    uri: item.uri,
+    kind: item.kind,
+    status: 'discovered',
+    serial: 'emulator-5554',
+    model: null,
+    product: null,
+    resolution: item.resolution,
+    error: null,
+    suggestedFix: null,
   };
 }
 
@@ -49,6 +83,21 @@ describe('扫描结果合并（纯函数）', () => {
   it('活动设备仍在列表里时保持不变', () => {
     const merged = mergeScan([device({ id: 'a' })], [device({ id: 'a' }), device({ id: 'b' })], 'a');
     expect(merged.activeId).toBe('a');
+  });
+
+  it('同一物理屏重排逻辑屏号后仍是原会话，更新 URI 与屏幕名称', () => {
+    const changed = {
+      ...SECONDARY,
+      uri: 'Android:///?serial=emulator-5554&display=2&physical=42',
+      name: 'MuMu · 屏2',
+    };
+    const merged = mergeScan([MAIN, SECONDARY], [MAIN, changed], SECONDARY.id);
+    expect(merged.activeId).toBe(SECONDARY.id);
+    expect(merged.devices.find((item) => item.id === SECONDARY.id)).toMatchObject({
+      status: 'connected',
+      uri: changed.uri,
+      name: changed.name,
+    });
   });
 });
 
@@ -103,6 +152,7 @@ describe('scan()', () => {
       scanErrors: [],
       scanError: null,
       lastScanAt: null,
+      missingDisplays: {},
     });
   });
 
@@ -147,5 +197,73 @@ describe('scan()', () => {
     expect(state.scanState).toBe('error');
     expect(state.scanError).toContain('引擎未启动');
     expect(state.devices.map((item) => item.id)).toEqual(['keep']);
+  });
+
+  it('一次刷新内复核两次确认附屏消失，立即移走黑屏会话', async () => {
+    const originalDisconnect = useSessionStore.getState().disconnect;
+    const disconnect = vi.fn(() => Promise.resolve());
+    useSessionStore.setState({ disconnect, ready: { [MAIN.id]: true, [SECONDARY.id]: true } });
+    useDeviceStore.setState({ devices: [MAIN, SECONDARY], activeId: SECONDARY.id });
+    listDevicesMock.mockResolvedValue({ devices: [info(MAIN)], errors: [] });
+
+    try {
+      await useDeviceStore.getState().scan();
+      expect(listDevicesMock).toHaveBeenCalledTimes(2);
+      expect(disconnect).toHaveBeenCalledOnce();
+      expect(disconnect).toHaveBeenCalledWith(SECONDARY.id);
+      expect(useDeviceStore.getState().activeId).toBe(MAIN.id);
+      expect(useDeviceStore.getState().devices.some((item) => item.id === SECONDARY.id)).toBe(false);
+    } finally {
+      useSessionStore.setState({ disconnect: originalDisconnect, ready: {} });
+    }
+  });
+
+  it('一次 adb 漏报、复核时屏幕恢复：不误断已连接窗口', async () => {
+    const originalDisconnect = useSessionStore.getState().disconnect;
+    const disconnect = vi.fn(() => Promise.resolve());
+    useSessionStore.setState({ disconnect, ready: { [MAIN.id]: true, [SECONDARY.id]: true } });
+    useDeviceStore.setState({ devices: [MAIN, SECONDARY], activeId: SECONDARY.id });
+    listDevicesMock
+      .mockResolvedValueOnce({ devices: [info(MAIN)], errors: [] })
+      .mockResolvedValueOnce({ devices: [info(MAIN), info(SECONDARY)], errors: [] });
+
+    try {
+      await useDeviceStore.getState().scan();
+      expect(disconnect).not.toHaveBeenCalled();
+      expect(useDeviceStore.getState().activeId).toBe(SECONDARY.id);
+      expect(useDeviceStore.getState().devices.some((item) => item.id === SECONDARY.id)).toBe(true);
+    } finally {
+      useSessionStore.setState({ disconnect: originalDisconnect, ready: {} });
+    }
+  });
+
+  it('复核时 Android 扫描失败：保留旧会话，不把失败当成已关闭', async () => {
+    const originalDisconnect = useSessionStore.getState().disconnect;
+    const disconnect = vi.fn(() => Promise.resolve());
+    useSessionStore.setState({ disconnect, ready: { [MAIN.id]: true, [SECONDARY.id]: true } });
+    useDeviceStore.setState({ devices: [MAIN, SECONDARY], activeId: SECONDARY.id });
+    listDevicesMock
+      .mockResolvedValueOnce({ devices: [info(MAIN)], errors: [] })
+      .mockResolvedValueOnce({ devices: [info(MAIN)], errors: [{ provider: 'android', message: '超时' }] });
+
+    try {
+      await useDeviceStore.getState().scan();
+      expect(disconnect).not.toHaveBeenCalled();
+      expect(useDeviceStore.getState().activeId).toBe(SECONDARY.id);
+      expect(useDeviceStore.getState().scanErrors).toEqual(['android: 超时']);
+    } finally {
+      useSessionStore.setState({ disconnect: originalDisconnect, ready: {} });
+    }
+  });
+
+  it('安卓扫描源报错时不把附屏缺席算作关闭', async () => {
+    useDeviceStore.setState({ devices: [MAIN, SECONDARY], activeId: SECONDARY.id });
+    listDevicesMock.mockResolvedValue({
+      devices: [info(MAIN)],
+      errors: [{ provider: 'android', message: 'dumpsys 暂时不可用' }],
+    });
+    await useDeviceStore.getState().scan();
+    expect(useDeviceStore.getState().missingDisplays[SECONDARY.id]).toBeUndefined();
+    expect(useDeviceStore.getState().activeId).toBe(SECONDARY.id);
   });
 });

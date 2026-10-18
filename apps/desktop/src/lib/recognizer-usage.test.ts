@@ -91,7 +91,18 @@ describe('识别器被谁引用（collectRecognizerUsage）', () => {
   it('没人引用 → total 0（删除按钮据此可点）', () => {
     const data = graph([node('n_1', '界面1', ['别的'])], [edge('e_1', { when: '别的' })]);
 
-    expect(collectRecognizerUsage(data, '相机')).toEqual({ nodes: [], edges: [], total: 0 });
+    expect(collectRecognizerUsage(data, '相机')).toEqual({ nodes: [], edges: [], flowSteps: [], total: 0 });
+  });
+
+  it('flow.steps 的 params.rec 算模块引用', () => {
+    const data = graph([], []);
+    const withFlow = {
+      ...data,
+      flow: { steps: [{ id: 's1', type: 'wait', params: { rec: '相机' } }] },
+    };
+    const usage = collectRecognizerUsage(withFlow, '相机');
+    expect(usage.flowSteps).toEqual([{ id: 's1', label: '等待界面 · 相机' }]);
+    expect(usage.total).toBe(1);
   });
 
   it('图还没加载 / 标签为空：返回"没人用"而不是抛错', () => {
@@ -102,7 +113,9 @@ describe('识别器被谁引用（collectRecognizerUsage）', () => {
 
 describe('引用说明文案（describeRecognizerUsage）', () => {
   it('没人用：直接说删掉不影响脚本', () => {
-    expect(describeRecognizerUsage({ nodes: [], edges: [], total: 0 })).toContain('删掉不影响脚本');
+    expect(describeRecognizerUsage({ nodes: [], edges: [], flowSteps: [], total: 0 })).toContain(
+      '删掉不影响脚本',
+    );
   });
 
   it('节点写成"名字（id）"、边带原因（和引擎提示同一规矩）', () => {
@@ -112,11 +125,12 @@ describe('引用说明文案（describeRecognizerUsage）', () => {
         { id: 'n_1', name: '界面1' },
       ],
       edges: [{ id: 'e_ai', reasons: ['判断条件', '动作目标'] }],
-      total: 3,
+      flowSteps: [{ id: 's_wait', label: '等待界面 · 相机' }],
+      total: 4,
     });
 
-    // 名字和 id 不同就都写上：重名时（两个「新界面」）才知道该去改哪个
-    expect(text).toBe('正在被引用：新界面（node_1）、界面1（n_1）、e_ai（判断条件 + 动作目标）');
+    expect(text).toContain('模块 · 等待界面 · 相机（s_wait）');
+    expect(text).toContain('界面 · 新界面（node_1）');
   });
 
   it('超过 3 处：收尾成"等 N 处"，不把面板撑爆', () => {
@@ -128,6 +142,7 @@ describe('引用说明文案（describeRecognizerUsage）', () => {
         { id: 'd', name: 'd' },
       ],
       edges: [],
+      flowSteps: [],
       total: 4,
     });
 

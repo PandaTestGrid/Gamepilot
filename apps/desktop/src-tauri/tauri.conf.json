@@ -5,9 +5,9 @@
   "identifier": "com.gamepilot.desktop",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:30110",
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build"
+    "beforeBuildCommand": "pnpm build:sidecar && pnpm build"
   },
   "app": {
     "windows": [
@@ -19,7 +19,8 @@
         "minHeight": 700,
         "resizable": true,
         "fullscreen": false,
-        "center": true
+        "center": true,
+        "theme": "Dark"
       }
     ],
     "security": {
@@ -29,6 +30,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/gamepilot-engine"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

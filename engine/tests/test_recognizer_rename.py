@@ -18,7 +18,7 @@ import pytest
 from gamepilot.core.conditions import ALWAYS_LABEL, Condition
 from gamepilot.core.geometry import Rect
 from gamepilot.core.graph import Edge, Graph, Node, validate_recognizer_label
-from gamepilot.devices.mock import BUTTON, LOGO, MockController
+from gamepilot.devices.synthetic_test import BUTTON, LOGO, SyntheticController
 from gamepilot.project import Project
 from gamepilot.session import DeviceSession
 
@@ -69,7 +69,7 @@ def test_rename_updates_every_reference(tmp_path: Path) -> None:
 
     refs = graph.rename_recognizer("old_label", "开始按钮")
 
-    assert refs == {"nodes": 1, "edges": 3, "scores": 2}
+    assert refs == {"nodes": 1, "edges": 3, "scores": 2, "flowSteps": 0}
     # 键换了，识别器实例跟着重建
     assert "开始按钮" in graph.specs and "old_label" not in graph.specs
     assert "开始按钮" in graph.recognizers and "old_label" not in graph.recognizers
@@ -121,7 +121,12 @@ def test_rename_round_trips_through_json(tmp_path: Path) -> None:
 def test_rename_to_same_name_is_a_noop(tmp_path: Path) -> None:
     graph = _graph_with_references(tmp_path)
 
-    assert graph.rename_recognizer("old_label", "old_label") == {"nodes": 0, "edges": 0, "scores": 0}
+    assert graph.rename_recognizer("old_label", "old_label") == {
+        "nodes": 0,
+        "edges": 0,
+        "scores": 0,
+        "flowSteps": 0,
+    }
     assert "old_label" in graph.specs
 
 
@@ -129,7 +134,12 @@ def test_rename_without_references_reports_zero(tmp_path: Path) -> None:
     graph = Graph.empty(str(tmp_path))
     graph.add_recognizer("lonely", dict(SPEC))
 
-    assert graph.rename_recognizer("lonely", "solo") == {"nodes": 0, "edges": 0, "scores": 0}
+    assert graph.rename_recognizer("lonely", "solo") == {
+        "nodes": 0,
+        "edges": 0,
+        "scores": 0,
+        "flowSteps": 0,
+    }
     assert list(graph.specs) == ["solo"]
 
 
@@ -187,11 +197,11 @@ def _wait(predicate: Any, timeout: float = 5.0, interval: float = 0.05) -> bool:
 @pytest.fixture()
 def session(tmp_path: Path) -> Any:
     notifications: list[tuple[str, dict[str, Any]]] = []
-    controller = MockController()
+    controller = SyntheticController()
     controller.connect()
     project = Project(root=str(tmp_path)).ensure()
     instance = DeviceSession(
-        device_id="mock:mock-1",
+        device_id="synthetic:test-1",
         controller=controller,
         project=project,
         emit=lambda method, params: notifications.append((method, params)),

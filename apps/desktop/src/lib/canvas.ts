@@ -23,6 +23,20 @@ export interface Size {
  * 按 `object-fit: contain` 的规则算出画面在容器里的实际显示矩形（容器相对坐标）。
  * 容器或画面尺寸无效时返回 null（此时不应该接受控制操作）。
  */
+/** 量画面区时优先用引擎帧分辨率：转横屏后 JPEG 可能还没 decode，naturalWidth 仍是旧竖屏。 */
+export function screenImageSize(
+  resolution: readonly [number, number] | undefined | null,
+  image: { naturalWidth: number; naturalHeight: number } | null,
+): Size | null {
+  if (resolution && resolution[0] > 0 && resolution[1] > 0) {
+    return { width: resolution[0], height: resolution[1] };
+  }
+  if (image && image.naturalWidth > 0 && image.naturalHeight > 0) {
+    return { width: image.naturalWidth, height: image.naturalHeight };
+  }
+  return null;
+}
+
 export function containBox(container: Size, image: Size): Box | null {
   if (container.width <= 0 || container.height <= 0 || image.width <= 0 || image.height <= 0) {
     return null;
@@ -93,8 +107,7 @@ export function canvasPointToPixels(box: Box | null, point: readonly [number, nu
  * **画面归一化矩形 → 容器像素矩形**（`pointToCanvas` 的逆运算）。
  *
  * 界面上所有"按画面坐标画东西"的地方都必须走这里：
- * 框选框、识别框、录制确认浮层……各画各的就会飘（踩过：确认浮层还在用容器百分比，
- * 有黑边时和实际画面差一大截）。
+ * 框选、识别框、录制浮层等须统一走此换算，避免与 letterbox 后的画面错位。
  */
 export function canvasRectToPixels(
   box: Box | null,

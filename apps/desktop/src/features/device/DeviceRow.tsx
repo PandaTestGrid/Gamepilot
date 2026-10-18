@@ -47,7 +47,7 @@ export function DeviceRow({
 
   return (
     <div className={cn('group border-b border-line/60', active && 'bg-active/60')}>
-      <div className="flex h-8 items-center gap-2 pl-1.5 hover:bg-raised">
+      <div className="flex h-8 items-center gap-2 pr-2 pl-1.5 hover:bg-raised">
         {/* 当前设备的竖线：多设备时一眼看出"操作的是哪台" */}
         <span className={cn('h-4 w-[2px] shrink-0', active ? 'bg-brand' : 'bg-transparent')} />
 
@@ -95,7 +95,7 @@ export function DeviceRow({
             onClick={onConnect}
             className="w-12 shrink-0 text-right text-badge text-brand hover:underline"
           >
-            连接
+            {failed ? '重试' : '连接'}
           </button>
         )}
       </div>
@@ -108,7 +108,7 @@ export function DeviceRow({
             {device.suggestedFix ? ` · ${device.suggestedFix}` : ''}
           </span>
           <button type="button" onClick={onConnect} className="shrink-0 text-badge text-brand">
-            重新检测
+            重试
           </button>
         </div>
       )}

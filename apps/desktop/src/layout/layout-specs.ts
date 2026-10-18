@@ -3,7 +3,7 @@
  *
  * 界面里每个能拖的区域都是一个 `react-resizable-panels` 的 Group：
  *   - 主壳三栏（画面 / 状态图 / 右栏）→ 横向拖，改**宽度**
- *   - 栏内（画面·读数、事件·识别器、画布·编辑器）→ 纵向拖，改**高度**
+ *   - 栏内（画面·素材区、事件·识别器、画布·编辑器）→ 纵向拖，改**高度**
  * 两件事用的是同一套机制，所以"上下也能拖"是默认能力，不是某个面板的特例。
  *
  * 这里集中三件事，避免默认比例散落在各个组件里：
@@ -32,16 +32,34 @@ export const SHELL_LAYOUT: LayoutSpec = {
   panels: { screen: 34, graph: 40, right: 26 },
 };
 
-/** 画面栏：实时画面 70 / 识别读数 30 */
+/** 画面栏：实时画面 70 / 素材区 30 */
 export const SCREEN_LAYOUT: LayoutSpec = {
   id: 'gamepilot.layout.screen.v1',
-  panels: { view: 70, readout: 30 },
+  panels: { view: 70, materials: 30 },
 };
 
-/** 状态图栏：画布 68 / 编辑区 32（编辑区没选中时自动收起） */
+/** 状态图栏：画布 80 / 编辑区 20（点节点展开；没选中时自动收起） */
 export const GRAPH_LAYOUT: LayoutSpec = {
-  id: 'gamepilot.layout.graph.v1',
-  panels: { canvas: 68, editor: 32 },
+  id: 'gamepilot.layout.graph.v2',
+  panels: { canvas: 80, editor: 20 },
+};
+
+/**
+ * 工作流画布内：左侧模块栏 / 右侧画布区。
+ *
+ * 模块栏实际按像素宽（见 ModulePaletteRail），不随画面|画布分隔线按比例缩放。
+ * 这里的百分比只给布局记忆/setLayout 当占位；v2 丢掉旧的 14%/86% 记忆，
+ * 避免上次把模块栏拖得很宽之后，再拖画面宽度会把整栏撑满。
+ */
+export const GRAPH_PALETTE_LAYOUT: LayoutSpec = {
+  id: 'gamepilot.layout.graph.palette.v2',
+  panels: { palette: 14, workspace: 86 },
+};
+
+/** 工作流左右分屏（两个打开的标签并排） */
+export const GRAPH_SPLIT_LAYOUT: LayoutSpec = {
+  id: 'gamepilot.layout.graph.split.v1',
+  panels: { primary: 50, secondary: 50 },
 };
 
 /**
@@ -68,7 +86,7 @@ export const LAYOUT_PRESETS: readonly LayoutPreset[] = [
   {
     id: 'balanced',
     name: '均衡（默认）',
-    note: '三栏 34/40/26 · 画面与读数 70/30',
+    note: '三栏 34/40/26 · 画面与素材区 70/30',
     groups: {
       [SHELL_LAYOUT.id]: SHELL_LAYOUT.panels,
       [SCREEN_LAYOUT.id]: SCREEN_LAYOUT.panels,
@@ -79,10 +97,10 @@ export const LAYOUT_PRESETS: readonly LayoutPreset[] = [
   {
     id: 'screen',
     name: '画面优先',
-    note: '画面栏最宽、画面最高（读数压到最下面）',
+    note: '画面栏最宽、画面最高（素材区压到最下面）',
     groups: {
       [SHELL_LAYOUT.id]: { screen: 52, graph: 28, right: 20 },
-      [SCREEN_LAYOUT.id]: { view: 84, readout: 16 },
+      [SCREEN_LAYOUT.id]: { view: 84, materials: 16 },
       [DOCK_LAYOUT.id]: { main: 90, dock: 10 },
     },
   },
@@ -93,7 +111,7 @@ export const LAYOUT_PRESETS: readonly LayoutPreset[] = [
     groups: {
       [SHELL_LAYOUT.id]: { screen: 26, graph: 52, right: 22 },
       [GRAPH_LAYOUT.id]: { canvas: 78, editor: 22 },
-      [SCREEN_LAYOUT.id]: { view: 62, readout: 38 },
+      [SCREEN_LAYOUT.id]: { view: 62, materials: 38 },
       [DOCK_LAYOUT.id]: { main: 86, dock: 14 },
     },
   },
@@ -104,7 +122,7 @@ export const LAYOUT_PRESETS: readonly LayoutPreset[] = [
     groups: {
       [SHELL_LAYOUT.id]: { screen: 32, graph: 42, right: 26 },
       [DOCK_LAYOUT.id]: { main: 52, dock: 48 },
-      [SCREEN_LAYOUT.id]: { view: 60, readout: 40 },
+      [SCREEN_LAYOUT.id]: { view: 60, materials: 40 },
     },
   },
 ];

@@ -1,5 +1,5 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Debug 和 Release 都是桌面窗口应用，不能额外弹一个控制台。
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 fn main() {
     gamepilot_lib::run();

@@ -1,14 +1,14 @@
 /**
  * 设备弹层的纯逻辑：**分类 / 过滤 / 排序**，全部是不碰 React 的函数（可单测）。
  *
- * 为什么单独一个文件：设备来源已经有 安卓 / 模拟器 / iOS / 本机窗口(macOS) / Mock 五种，
+ * 为什么单独一个文件：设备来源已经有 安卓 / 模拟器 / iOS / 本机窗口(macOS) 四种，
  * 而且 macOS 那边是**一个伪设备 + 一串窗口**两条数据路径（见 DevicePopover）。
  * 把"哪些算一类、怎么排、搜什么"收敛在这里，界面只负责画。
  */
 import type { DotTone } from '@/layout/PanelShell';
 import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
 
-export type DeviceTabId = 'all' | 'android' | 'ios' | 'mac' | 'mock' | 'other';
+export type DeviceTabId = 'all' | 'android' | 'emulator' | 'ios' | 'mac' | 'other';
 
 export interface DeviceTab {
   readonly id: DeviceTabId;
@@ -41,8 +41,6 @@ export function kindLabel(kind: DeviceKind): string {
       return '模拟器';
     case 'windows':
       return '本机窗口';
-    case 'mock':
-      return 'Mock';
     default:
       return '远程';
   }
@@ -61,7 +59,7 @@ export function isMacPicker(device: DeviceRuntime): boolean {
   return device.id === 'macos:picker';
 }
 
-/** 列表里可连接的设备（把伪设备摘掉——它只用来在 Tab 上提示"有几个窗口"） */
+/** 可连设备：去掉本机窗口伪入口。模拟器附屏也是可连项（MuMu 每个应用标签页一块屏）。 */
 export function connectableDevices(devices: readonly DeviceRuntime[]): DeviceRuntime[] {
   return devices.filter((device) => !isMacPicker(device));
 }
@@ -109,22 +107,20 @@ export function filterByTab(devices: readonly DeviceRuntime[], tab: DeviceTabId)
     case 'all':
       return [...devices];
     case 'android':
-      // 模拟器就是安卓模拟器，和真机放一类更符合直觉
-      return devices.filter((device) => device.kind === 'android' || device.kind === 'emulator');
+      return devices.filter((device) => device.kind === 'android');
+    case 'emulator':
+      return devices.filter((device) => device.kind === 'emulator');
     case 'ios':
       return devices.filter((device) => device.kind === 'ios');
     case 'mac':
       return devices.filter(isMacDevice);
-    case 'mock':
-      return devices.filter((device) => device.kind === 'mock');
     default:
       return devices.filter(
         (device) =>
           !isMacDevice(device) &&
           device.kind !== 'android' &&
           device.kind !== 'emulator' &&
-          device.kind !== 'ios' &&
-          device.kind !== 'mock',
+          device.kind !== 'ios',
       );
   }
 }
@@ -134,15 +130,21 @@ export function buildDeviceTabs(devices: readonly DeviceRuntime[]): DeviceTab[] 
   const specs: ReadonlyArray<{ id: DeviceTabId; label: string }> = [
     { id: 'all', label: '全部' },
     { id: 'android', label: '安卓' },
+    { id: 'emulator', label: '模拟器' },
     { id: 'ios', label: 'iOS' },
     { id: 'mac', label: '本机窗口' },
-    { id: 'mock', label: 'Mock' },
     { id: 'other', label: '其它' },
   ];
-  const connectable = devices;
-  return specs
-    .map((spec) => ({ ...spec, count: filterByTab(connectable, spec.id).length }))
-    .filter((tab) => tab.id === 'all' || tab.count > 0);
+  const connectable = connectableDevices(devices);
+  return (
+    specs
+      // picker 本身不能连接，但它是本机窗口 Tab 的入口；否则一台窗口都没连时连 Tab 也消失。
+      .map((spec) => ({
+        ...spec,
+        count: filterByTab(spec.id === 'mac' ? devices : connectable, spec.id).length,
+      }))
+      .filter((tab) => tab.id === 'all' || tab.count > 0)
+  );
 }
 
 /** 打开弹层时落在哪个 Tab：当前 Tab 没内容就退到第一个有内容的分类（优先"全部"）。 */

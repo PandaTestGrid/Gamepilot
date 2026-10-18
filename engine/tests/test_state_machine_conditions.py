@@ -34,7 +34,15 @@ class RecordingController(ScriptedController):
         self.texts: list[str] = []
         self.touches: list[tuple[str, float, float]] = []
 
-    def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
+    def swipe(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        duration: float = 0.3,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
         self.swipes.append((x1, y1, x2, y2, duration))
 
     def press(self, name: str) -> None:
@@ -191,7 +199,7 @@ def test_basic_actions_are_executed(tmp_path: Path) -> None:
             edge("e_swipe", {"type": "swipe", "x": 0.5, "y": 0.8, "to_x": 0.5, "to_y": 0.2, "duration_ms": 400}, 0),
             edge("e_press", {"type": "key", "value": "back"}, 1),
             edge("e_text", {"type": "text", "value": "hello"}, 2),
-            edge("e_long", {"type": "long_press", "target": "main_start", "duration_ms": 120}, 3),
+            edge("e_long", {"type": "long_press", "x": 0.05, "y": 0.05, "duration_ms": 120}, 3),
         ],
         nodes=[Node(id="main", name="主界面", enter=["main_start"])],
     )
@@ -203,7 +211,7 @@ def test_basic_actions_are_executed(tmp_path: Path) -> None:
     assert controller.swipes and controller.swipes[0][4] == pytest.approx(0.4), "滑动时长应来自 duration_ms"
     assert controller.keys == ["back"], "功能键应走 press（scrcpy 控制通道）"
     assert controller.texts == ["hello"]
-    assert [phase for phase, _, _ in controller.touches] == ["down", "up"], "长按应按下-抬起"
+    assert controller.clicks and abs(controller.clicks[0][0] - 0.05) < 0.02, "长按应落到指定坐标"
 
 
 def test_wait_action_sleeps(tmp_path: Path) -> None:
@@ -265,6 +273,7 @@ def test_variables_apply_at_runtime() -> None:
         {
             "nodes": [{"id": "main", "name": "主界面", "enter": ["home"]}],
             "recognizers": {"home": {"type": "template", "template": "templates/home.png", "threshold": 0.7}},
+            "defaults": {"click_jitter_px": 0, "click_micro_px": 0, "delay_jitter_ms": 0},
             "variables": {"点X": {"type": "number", "value": 0.25}, "次数": {"type": "number", "value": 0}},
             "edges": [
                 {
@@ -374,6 +383,42 @@ def test_breakpoint_pauses_then_resumes(tmp_path: Path) -> None:
             break
     assert not engine.paused, "恢复后不该又停在同一处"
     assert controller.clicks, "恢复后应该真的执行"
+
+
+def test_step_runs_one_edge_then_pauses_before_the_next(tmp_path: Path) -> None:
+    """单步：放行刚停住的那条边，执行完、在下一条边之前再停。"""
+    controller = RecordingController()
+    graph = Graph.from_dict(
+        {
+            "nodes": [{"id": "main", "name": "主界面"}],
+            # when 留空 = 恒成立：两条边依次可执行，正好拿来数"走了几步"
+            "edges": [
+                {"id": "e_a", "when": "", "from": "main", "action": {"type": "click", "x": 0.2, "y": 0.2}},
+                {"id": "e_b", "when": "", "from": "main", "action": {"type": "click", "x": 0.8, "y": 0.8}},
+            ],
+        },
+        base_dir=str(tmp_path),
+    )
+    graph.validate()
+    engine = Engine(graph, controller, start_node="main")
+    engine.breakpoints.add("e_a")
+
+    frame_img = _canvas()
+    for index in range(1, 5):
+        engine.tick(_frame(frame_img, index))
+        if engine.paused:
+            break
+    assert engine.paused_at == "e_a"
+    assert not controller.clicks, "断点命中时不该执行动作"
+
+    engine.step()
+    engine.tick(_frame(frame_img, 10))
+    assert not engine.paused, "单步放行的那一条要先真的执行"
+    assert len(controller.clicks) == 1, "单步只应该走一步"
+
+    engine.tick(_frame(frame_img, 11))
+    assert engine.paused_at == "e_b", "执行完这一步，下一条边之前再停"
+    assert len(controller.clicks) == 1, "暂停时不该继续执行"
 
 
 def test_score_data_source_resolves_live_score() -> None:

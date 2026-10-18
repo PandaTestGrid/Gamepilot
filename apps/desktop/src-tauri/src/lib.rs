@@ -12,13 +12,10 @@ mod window;
 
 use engine::Bridge;
 
-/// 前端诊断日志：打印到应用终端（`pnpm tauri dev` 的输出）。
-///
-/// 前端跑在 WebView 里，console 看不到；排查"事件到没到前端"这类问题时
-/// （比如画面不出来、fps 一直是 0），这条通道是唯一能从终端观察前端状态的办法。
+/// 前端诊断日志写入应用日志目录，不能为它在 Windows 上打开控制台。
 #[tauri::command]
 fn dev_log(message: String) {
-    println!("[ui] {message}");
+    log::info!(target: "gamepilot.ui", "{message}");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -38,16 +35,15 @@ pub fn run() {
             dev_log,
             window::open_pane_window
         ])
-        .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
-            Ok(())
-        })
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Info)
+                .clear_targets()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                ))
+                .build(),
+        )
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

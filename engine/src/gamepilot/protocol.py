@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
-PROTOCOL_VERSION = 1
+# 2：删除不再走回收站（`workflow.delete` / `workspace.remove` 真删除）：响应字段
+#    `trashed` → `removed`，并去掉 `trashRoot`（破坏性变更，见 docs/rpc.md §6）
+PROTOCOL_VERSION = 2
 
 # stdio 分帧：NDJSON（每行一个 JSON 对象，UTF-8）
 FRAMING = "ndjson"
@@ -23,14 +25,18 @@ INTERNAL_ERROR = -32603
 # 引擎 → 前端 的通知方法（无 id，不期待响应）
 NOTIFY_READY = "engine.ready"
 NOTIFY_DEVICE_CONNECTING = "device.connecting"
+# 只有拿到 scrcpy 的首帧才算连好（拿不到就报 failed，不再回退 ADB 截图）。
 NOTIFY_DEVICE_CONNECTED = "device.connected"
 # 当前工作流切换（界面顶栏跟着变）
 NOTIFY_PROJECT_CHANGED = "project.changed"
 NOTIFY_DEVICE_DISCONNECTED = "device.disconnected"
 NOTIFY_DEVICE_FAILED = "device.failed"
+NOTIFY_DEVICE_RECOVERED = "device.recovered"  # 视频恢复；可带 channel、linkNote
 NOTIFY_LOG = "engine.log"
 NOTIFY_EVENT = "engine.event"
 NOTIFY_FRAME = "engine.frame"
+NOTIFY_OCR_PROGRESS = "ocr.progress"
+NOTIFY_OCR_RESULT = "ocr.result"
 
 # 前端 → 引擎 的请求方法（完整清单见 docs/rpc.md）
 METHOD_PING = "engine.ping"
@@ -69,7 +75,7 @@ METHOD_PROJECT_SET = "project.set"
 METHOD_TEMPLATE_IMAGE = "template.image"
 # 录制：把手动操作变成工作流里的一步
 METHOD_RECORD_ACTION = "record.action"
-# 图编辑器：加/改/删节点与边
+# 图编辑器（legacy）：加/改/删 nodes/edges；flow.steps 非空时引擎会拒绝
 METHOD_GRAPH_NODE_ADD = "graph.node.add"
 METHOD_GRAPH_NODE_UPDATE = "graph.node.update"
 METHOD_GRAPH_NODE_REMOVE = "graph.node.remove"
@@ -79,9 +85,18 @@ METHOD_GRAPH_SAVE = "graph.save"
 
 # 录制与调参
 METHOD_RECORD_TEMPLATE = "record.template"
+#: 框一块区域 + 填要认的字 → 注册 OCR 识别器（"录一段文字"）
+METHOD_RECORD_OCR = "record.ocr"
 METHOD_RECOGNIZER_THRESHOLD = "recognizer.threshold"
+METHOD_RECOGNIZER_SEARCH = "recognizer.search"
 METHOD_RECOGNIZER_REMOVE = "recognizer.remove"
 METHOD_RECOGNIZER_RENAME = "recognizer.rename"
+
+# 离线 OCR（PP-OCRv4 Mobile ONNX 按需下载、加载与框选/整屏文字识别）
+METHOD_OCR_STATUS = "ocr.status"
+METHOD_OCR_LOAD = "ocr.load"
+METHOD_OCR_RECOGNIZE = "ocr.recognize"
+METHOD_OCR_CANCEL = "ocr.cancel"
 
 # 运行控制
 # 变量（"黑板"）：改运行期变量值（不写回工作流）
@@ -89,7 +104,10 @@ METHOD_VARIABLE_SET = "variable.set"
 # 调试：只执行一个动作（"单独跑这一步"），不影响状态机位置
 METHOD_ACTION_RUN = "action.run"
 METHOD_RUN_RESUME = "run.resume"  # 断点暂停后继续
+METHOD_RUN_STEP = "run.step"  # 单步：执行完当前这一步再停
 METHOD_BREAKPOINT = "run.breakpoint"  # 设/清断点（edgeId）
 METHOD_RUN_START = "run.start"
 METHOD_RUN_STOP = "run.stop"
 METHOD_TIMELINE = "timeline.get"
+METHOD_RUN_EVIDENCE = "run.evidence"  # 最近一次运行的证据目录
+METHOD_EVIDENCE_IMAGE = "evidence.image"  # 按文件名取一张证据截图

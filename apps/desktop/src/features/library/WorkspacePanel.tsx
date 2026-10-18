@@ -1,41 +1,28 @@
-/**
- * 工作区区域（**右侧区域的本体内容**，不是浮层、不是弹框）：契约 v4 §3.2。
- *
- * 形态（用户原话："就像 deepseek 侧边栏一样，在工作区下面添加一个会话"）：
- *   头部「工作区」+ 搜索 + 设置 + ＋（添加工作区 ⌘O）
- *   列表 = **工作区（文件夹）› 会话（= 一张状态图）**：
- *     工作区行：箭头（展开/收起）+ 文件夹 + 名字（**点名字 = 切到这个工作区**）+ 悬停的 ＋（新建会话）
- *     会话行：圆点 + 名字 + 相对时间（点名字切过去，悬停出 改 / 复 / 删）
- *
- * **不要在这个区域里再画一遍同样的列表**（曾经有一个「树」组件和它并排渲染，重复且混乱 —— 已经删掉）。
- *
- * 几条硬规矩：
- * - **工作区 = 电脑上的一个文件夹**（任意位置，引擎 `workspace.add` 不往里面写任何东西）；
- * - **＋/⌘O 添加工作区是一步**：挑文件夹 → 直接登记（显示名默认取文件夹名，之后可改）。
- *   挑文件夹用原生对话框（`native-dialog.ts`）；**拿不到就退回手输绝对路径**（浏览器 / vitest
- *   里必须能验证，绝不允许"点＋没反应"），并在日志里记一行说明为什么退化了；
- * - **从 Finder 拖一个文件夹进来 = 同一个动作**（webview 的拖拽事件给的是真实路径）；
- * - **＋ 新建会话不弹输入框**：自动命名（「新会话」「新会话2」…，引擎侧 `auto_name`），建完直接进去；
- * - 移除工作区两个入口都要有：**移到回收站（可恢复）** 与 **只从列表移除（不动文件）**，
- *   都走**行内二次确认**；文案显示回收站路径，且**不许出现"永久删除"**（我们不做真删除）；
- * - 一律不用 浏览器原生 prompt / confirm（Tauri 的 webview 里弹不出来，踩过两次）；
- * - ⌘O = 添加工作区；⌘F = 聚焦搜索框；Esc = 收起行内表单。
- */
+/** 工作区列表（文件夹 › 工作流）。添加工作区用 native-dialog 或手输路径；⌘O/⌘F/Esc 见契约 v4 §3.2。 */
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   ChevronDown,
   ChevronRight,
   Copy,
+  FileDown,
+  FileUp,
   Folder,
+  FolderMinus,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   Settings,
   Trash2,
 } from 'lucide-react';
 
 import { pickDirectory } from '@/features/library/native-dialog';
+import {
+  downloadWorkflowJson,
+  parseWorkflowJson,
+  pickWorkflowJsonFile,
+} from '@/features/library/workflow-io';
 import { useWorkspaceDrop } from '@/features/library/use-workspace-drop';
 import { WorkflowNameForm } from '@/features/library/WorkflowNameForm';
 import {
@@ -45,9 +32,13 @@ import {
   searchWorkflows,
   searchWorkspaces,
 } from '@/features/library/workspace-tree';
-import { devLog } from '@/lib/rpc';
+import { devLog, graphGet, graphSave } from '@/lib/rpc';
+import { useGraphStore } from '@/stores/graph.store';
 import { cn } from '@/lib/utils';
 import type { WorkflowSummary, WorkspaceSummary } from '@/lib/rpc';
+import { RunLiveDot } from '@/features/graph/flow/RunBusySpinner';
+import { RunTargetList, RunTargetsTrigger } from '@/features/graph/flow/RunTargetsMenu';
+import { useLiveWorkflow, useRunningDevicesForWorkflow } from '@/lib/useLiveWorkflow';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
 
@@ -68,7 +59,7 @@ export function WorkspacePanel(): ReactNode {
   const workspaces = useLibraryStore((state) => state.workspaces);
   const workflows = useLibraryStore((state) => state.workflows);
   const workspaceRoot = useLibraryStore((state) => state.workspaceRoot);
-  const trashRoot = useLibraryStore((state) => state.trashRoot);
+
   const addWorkspace = useLibraryStore((state) => state.addWorkspace);
   const removeWorkspace = useLibraryStore((state) => state.removeWorkspace);
   const refreshWorkspaces = useLibraryStore((state) => state.refreshWorkspaces);
@@ -85,7 +76,9 @@ export function WorkspacePanel(): ReactNode {
   const [dropping, setDropping] = useState(false);
   /** 正在起名字的那个工作区（'' = 没在起名）；＋ 之后弹表单，提交才 `workflow.create` */
   const [sessionIn, setSessionIn] = useState('');
-  /** 行内二次确认：'' | 'trash' | 'unlist'（当前工作区）| 'unlist:<root>'（列表里某一项） */
+  /** 正在改显示名的那个工作区 root（'' = 没在改名） */
+  const [renamingWs, setRenamingWs] = useState('');
+  /** 行内二次确认：'' | 'delete:<root>' | 'unlist:<root>' */
   const [confirming, setConfirming] = useState('');
   /**
    * 折叠的工作区（**只有当前工作区默认展开**，别的行点开也没有内容 —— 像树一样能折起来）。
@@ -138,8 +131,7 @@ export function WorkspacePanel(): ReactNode {
 
   /**
    * 开始"添加工作区"：先试**系统文件夹选择器**，选中就直接加。
-   * 拿不到原生对话框（浏览器 / 权限没给）时，手输框已经显示出来了 —— 顺手记一行日志，
-   * 免得用户以为"点了没反应"（这是我们踩过的坑）。
+   * 无原生对话框时退回手输路径并写日志。
    */
   const beginAdd = useCallback((): void => {
     setConfirming('');
@@ -156,13 +148,13 @@ export function WorkspacePanel(): ReactNode {
   }, [addDirectory]);
 
   /**
-   * 工作区行尾的 ＋ = 在这个工作区里新建会话：**先弹输入框让你起名**，提交了才建。
+   * 工作区行尾的 ＋ = 在这个工作区里新建工作流：**先弹输入框让你起名**，提交了才建。
    *
    * 为什么不是"点一下直接建"：名字是你自己认这张图的方式（用户明确要"点完让我输名字"）。
    */
   const beginSession = useCallback(
     async (root: string, workspaceName: string, isCurrent: boolean): Promise<void> => {
-      // 不是当前工作区就先切过去（幂等），否则新会话会建到别的目录里
+      // 不是当前工作区就先切过去（幂等），否则新工作流会建到别的目录里
       if (!isCurrent) {
         setBusy(true);
         await addWorkspace(root, workspaceName);
@@ -175,9 +167,9 @@ export function WorkspacePanel(): ReactNode {
 
   /** 表单提交（两个入口共用）：建完收起表单 */
   const submitSession = useCallback(
-    (name: string): void => {
+    (name: string, description?: string): void => {
       setSessionIn('');
-      void createWorkflow(name);
+      void createWorkflow(name, description);
     },
     [createWorkflow],
   );
@@ -191,7 +183,7 @@ export function WorkspacePanel(): ReactNode {
       void addDirectories(paths);
     },
   });
-  /** 移除工作区：deleteFiles=true → 移到回收站；false → 只从列表移除 */
+  /** 移除工作区：deleteFiles=true → **真删除**（连目录里的工作流）；false → 只从列表移除 */
   const remove = useCallback(
     async (target: string, deleteFiles: boolean): Promise<void> => {
       setBusy(true);
@@ -261,6 +253,7 @@ export function WorkspacePanel(): ReactNode {
         setAddStep('closed');
         setConfirming('');
         setSessionIn('');
+        setRenamingWs('');
       }
     };
     document.addEventListener('keydown', onKey);
@@ -305,9 +298,6 @@ export function WorkspacePanel(): ReactNode {
     }
   }, [current]);
 
-  /** 回收站路径：引擎给了就显示绝对路径，拿不到就降级说明（都不许说"永久删除"） */
-  const trashLabel = trashRoot || '全局回收站（配置目录下的 .trash/）';
-
   return (
     <div
       className={cn(
@@ -337,8 +327,8 @@ export function WorkspacePanel(): ReactNode {
         </button>
         <button
           type="button"
-          title="设置（移除当前工作区）"
-          className={ICON}
+          title="工作区设置（路径、重命名、刷新列表）"
+          className={cn(ICON, settingsOpen && 'bg-raised text-fg')}
           onClick={() => {
             setSettingsOpen((value) => !value);
             setConfirming('');
@@ -417,70 +407,71 @@ export function WorkspacePanel(): ReactNode {
         </div>
       )}
 
-      {/* 设置：移除当前工作区（两个入口都要有，差别必须看得见） */}
+      {/* 工作区设置：查看/复制路径、修改工作区显示名、刷新目录列表、切换全部展开/折叠 */}
       {settingsOpen && (
-        <div className="border-b border-line bg-raised px-2 py-1.5 text-badge">
+        <div className="space-y-1.5 border-b border-line bg-raised px-2 py-2 text-badge">
           {current ? (
-            confirming === 'trash' ? (
-              <div>
-                <div className="text-dim">把工作区「{currentName || '当前'}」整个移到回收站？</div>
-                <div className="mt-0.5 text-faint">位置：{trashLabel}</div>
-                <div className="mt-0.5 text-faint">移到那里之后可以恢复。</div>
-                <div className="mt-1 flex items-center gap-1">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void remove(current, true)}
-                    className="shrink-0 rounded-sm border border-failed px-1.5 py-0.5 text-failed hover:bg-raised"
-                  >
-                    确认移入回收站
-                  </button>
-                  <button type="button" className={CONFIRM_BUTTON} onClick={() => setConfirming('')}>
-                    取消
-                  </button>
-                </div>
-              </div>
-            ) : confirming === 'unlist' ? (
-              <div>
-                <div className="text-dim">只把工作区「{currentName || '当前'}」从列表移除？</div>
-                <div className="mt-0.5 text-faint">磁盘上的文件一个都不会动，随时可以再添加回来。</div>
-                <div className="mt-1 flex items-center gap-1">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void remove(current, false)}
-                    className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-dim hover:bg-raised hover:text-fg"
-                  >
-                    确认移除
-                  </button>
-                  <button type="button" className={CONFIRM_BUTTON} onClick={() => setConfirming('')}>
-                    取消
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-1">
-                <div className="text-dim">
-                  当前工作区：{currentName || current}
-                  <span className="text-faint">（{current}）</span>
-                </div>
+            <>
+              <div className="flex items-center justify-between gap-1">
+                <span className="font-medium text-fg">当前工作区：{currentName || baseName(current)}</span>
                 <button
                   type="button"
-                  className="flex items-center gap-1 text-left text-failed hover:underline"
-                  onClick={() => setConfirming('trash')}
+                  disabled={busy}
+                  title="重新扫描磁盘上的工作区与工作流"
+                  onClick={() => {
+                    void refreshWorkspaces();
+                    void useLibraryStore.getState().refresh();
+                  }}
+                  className="inline-flex items-center gap-1 rounded-sm border border-line bg-canvas px-1.5 py-0.5 text-[10px] text-dim hover:bg-panel hover:text-fg"
                 >
-                  <Trash2 className="size-3" />
-                  移到回收站（可以恢复）
+                  <RefreshCw className="size-2.5" />
+                  刷新列表
+                </button>
+              </div>
+              <div className="flex items-center gap-1">
+                <input
+                  readOnly
+                  value={current}
+                  title={current}
+                  className="h-5 min-w-0 flex-1 rounded-sm border border-line bg-canvas px-1.5 font-mono text-[10px] text-faint focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(current);
+                  }}
+                  className="h-5 shrink-0 rounded-sm border border-line bg-canvas px-1.5 text-[10px] text-dim hover:bg-panel hover:text-fg"
+                >
+                  复制路径
+                </button>
+              </div>
+              <div className="flex items-center gap-1 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRenamingWs(renamingWs === current ? '' : current);
+                    setSettingsOpen(false);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-sm border border-line bg-canvas px-1.5 py-0.5 text-[10px] text-dim hover:bg-panel hover:text-fg"
+                >
+                  <Pencil className="size-2.5" />
+                  修改工作区名称
                 </button>
                 <button
                   type="button"
-                  className="text-left text-dim hover:text-fg"
-                  onClick={() => setConfirming('unlist')}
+                  onClick={() => {
+                    if (collapsed.size > 0) {
+                      setCollapsed(new Set());
+                    } else {
+                      setCollapsed(new Set(rows.map((r) => r.root)));
+                    }
+                  }}
+                  className="inline-flex items-center gap-1 rounded-sm border border-line bg-canvas px-1.5 py-0.5 text-[10px] text-dim hover:bg-panel hover:text-fg"
                 >
-                  只从列表移除（不动文件）
+                  {collapsed.size > 0 ? '全部展开' : '全部收起'}
                 </button>
               </div>
-            )
+            </>
           ) : (
             <div className="text-faint">还没有当前工作区</div>
           )}
@@ -491,6 +482,7 @@ export function WorkspacePanel(): ReactNode {
         {rows.map((workspace) => {
           const active = workspace.active || workspace.root === current;
           const unlinking = confirming === `unlist:${workspace.root}`;
+          const deletingWs = confirming === `delete:${workspace.root}`;
           /** 折叠：只有当前工作区有工作流可折（别的行展开也是空的，箭头照样显示，点了有意义） */
           const folded = collapsed.has(workspace.root);
           const workflowCount = active ? visibleWorkflows.length : 0;
@@ -498,8 +490,7 @@ export function WorkspacePanel(): ReactNode {
             <div key={workspace.root}>
               {/* 工作区行（= 一个文件夹）：箭头管展开/收起，**点名字 = 切到这个工作区**
                     （已经在这个工作区里 → 点名字就是展开/收起，和 IDE 一样）；
-                    行尾悬停的 ＋ = 在这个工作区里新建一个会话（= 一张状态图，自动命名）。
-                    行本身恒为白字 + 灰文件夹图标，当前那个不加背景不变蓝（"当前"靠子行体现）。 */}
+                    行尾悬停出：＋（新建工作流）、改名、从列表移除、删除工作区目录。 */}
               <div
                 data-testid="workspace-row"
                 data-active={active ? 'true' : 'false'}
@@ -526,31 +517,134 @@ export function WorkspacePanel(): ReactNode {
                   {workspace.name}
                 </button>
                 {folded && workflowCount > 0 && (
-                  <span className="shrink-0 text-faint">{workflowCount} 个工作流</span>
+                  <span className="shrink-0 text-faint group-hover:hidden">{workflowCount} 个工作流</span>
                 )}
                 {!workspace.exists && <span className="shrink-0 text-failed">目录不存在</span>}
-                {workspace.exists && (
+                <span
+                  className={cn(
+                    'flex shrink-0 items-center gap-0.5',
+                    'opacity-0 group-hover:opacity-100 focus-within:opacity-100',
+                  )}
+                >
+                  {workspace.exists && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        title={`在「${workspace.name}」里新建工作流`}
+                        data-testid="workspace-new-session"
+                        onClick={() => void beginSession(workspace.root, workspace.name, active)}
+                        className="rounded-sm p-0.5 text-dim hover:bg-raised hover:text-fg disabled:opacity-50"
+                      >
+                        <Plus className="size-3" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        title={`重命名工作区「${workspace.name}」`}
+                        onClick={() => {
+                          setConfirming('');
+                          setRenamingWs(renamingWs === workspace.root ? '' : workspace.root);
+                        }}
+                        className="rounded-sm p-0.5 text-faint hover:bg-raised hover:text-fg disabled:opacity-50"
+                      >
+                        <Pencil className="size-3" />
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     disabled={busy}
-                    title={`在「${workspace.name}」里新建一个会话（= 一张状态图）`}
-                    data-testid="workspace-new-session"
-                    onClick={() => void beginSession(workspace.root, workspace.name, active)}
-                    className={cn(
-                      'shrink-0 rounded-sm px-1 text-dim hover:bg-raised hover:text-fg disabled:opacity-50',
-                      'opacity-0 group-hover:opacity-100 focus:opacity-100',
-                    )}
+                    title="只从列表移除（保留磁盘上的文件夹与工作流）"
+                    data-testid="workspace-row-unlist"
+                    onClick={() => {
+                      setRenamingWs('');
+                      setConfirming(unlinking ? '' : `unlist:${workspace.root}`);
+                    }}
+                    className="rounded-sm p-0.5 text-faint hover:bg-raised hover:text-fg disabled:opacity-50"
                   >
-                    <Plus className="size-3" />
+                    <FolderMinus className="size-3" />
                   </button>
-                )}
+                  {workspace.exists && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      title="删除工作区（连同磁盘目录一起删除，不可恢复）"
+                      data-testid="workspace-row-delete"
+                      onClick={() => {
+                        setRenamingWs('');
+                        setConfirming(deletingWs ? '' : `delete:${workspace.root}`);
+                      }}
+                      className="rounded-sm p-0.5 text-faint hover:bg-raised hover:text-failed disabled:opacity-50"
+                    >
+                      <Trash2 className="size-3" />
+                    </button>
+                  )}
+                </span>
               </div>
+
+              {/* 工作区重命名表单 */}
+              {renamingWs === workspace.root && (
+                <WorkflowNameForm
+                  title={`修改工作区「${workspace.name}」显示名称`}
+                  initial={workspace.name}
+                  submitLabel="保存"
+                  onSubmit={(nextName) => {
+                    setRenamingWs('');
+                    void addWorkspace(workspace.root, nextName);
+                  }}
+                  onCancel={() => setRenamingWs('')}
+                />
+              )}
+
+              {/* 工作区行内二次确认：从列表移除 / 彻底删除工作区目录 */}
+              {unlinking && (
+                <div className="border-b border-line bg-raised px-2 py-1.5 text-badge">
+                  <div className="text-dim">只把工作区「{workspace.name}」从列表移除？</div>
+                  <div className="mt-0.5 text-faint">磁盘上的文件一个都不会动，随时可以再添加回来。</div>
+                  <div className="mt-1 flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void remove(workspace.root, false)}
+                      className={CONFIRM_BUTTON}
+                    >
+                      确认移除
+                    </button>
+                    <button type="button" className={CONFIRM_BUTTON} onClick={() => setConfirming('')}>
+                      取消
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {deletingWs && (
+                <div className="border-b border-line bg-raised px-2 py-1.5 text-badge">
+                  <div className="text-dim">把工作区「{workspace.name}」整个删除？</div>
+                  <div className="mt-0.5 text-faint">目录和里面的工作流都会被删掉。</div>
+                  <div className="mt-0.5 font-medium text-failed">删除后不可恢复。</div>
+                  <div className="mt-1 flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void remove(workspace.root, true)}
+                      className="shrink-0 rounded-sm border border-failed px-1.5 py-0.5 text-failed hover:bg-raised"
+                    >
+                      确认删除
+                    </button>
+                    <button type="button" className={CONFIRM_BUTTON} onClick={() => setConfirming('')}>
+                      取消
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* ＋ 之后的起名表单：挂在**那个工作区行下面**，提交才建 */}
               {sessionIn === workspace.root && (
                 <WorkflowNameForm
-                  title={`在「${workspace.name}」里新建会话`}
+                  title={`在「${workspace.name}」里新建工作流`}
                   submitLabel="创建"
+                  showDescription
                   onSubmit={submitSession}
                   onCancel={() => setSessionIn('')}
                 />
@@ -566,32 +660,16 @@ export function WorkspacePanel(): ReactNode {
                   <WorkflowRow key={workflow.root} workflow={workflow} busy={busy} />
                 ))}
 
-              {/* 目录被用户在 Finder 里删了：只能"从列表移除"（不动文件，也没文件可动） */}
-              {!workspace.exists &&
-                (unlinking ? (
-                  <div className="flex items-center gap-1 bg-raised px-2 py-1 text-badge">
-                    <span className="min-w-0 flex-1 truncate text-dim">从列表移除「{workspace.name}」？</span>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void remove(workspace.root, false)}
-                      className={CONFIRM_BUTTON}
-                    >
-                      确认移除
-                    </button>
-                    <button type="button" className={CONFIRM_BUTTON} onClick={() => setConfirming('')}>
-                      取消
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    className="px-2 py-0.5 pl-7 text-badge text-dim hover:text-fg"
-                    onClick={() => setConfirming(`unlist:${workspace.root}`)}
-                  >
-                    从列表移除
-                  </button>
-                ))}
+              {/* 目录被用户在 Finder 里删了：提供显式文字入口"从列表移除" */}
+              {!workspace.exists && !unlinking && (
+                <button
+                  type="button"
+                  className="px-2 py-0.5 pl-7 text-badge text-dim hover:text-fg"
+                  onClick={() => setConfirming(`unlist:${workspace.root}`)}
+                >
+                  从列表移除
+                </button>
+              )}
             </div>
           );
         })}
@@ -613,7 +691,7 @@ export function WorkspacePanel(): ReactNode {
               className="flex w-full items-center gap-1.5 rounded-sm border border-line px-2 py-1 text-badge text-dim hover:bg-raised hover:text-fg disabled:opacity-50"
             >
               <Plus className="size-3" />
-              新建会话（= 一张状态图）
+              新建工作流
             </button>
           </div>
         )}
@@ -650,69 +728,160 @@ function WorkflowRow({
   readonly workflow: WorkflowSummary;
   readonly busy: boolean;
 }): ReactNode {
-  const currentWorkflowRoot = useSessionStore((state) => state.project?.root ?? '');
-  const switchProject = useSessionStore((state) => state.switchProject);
+  const currentWorkflowRoot = useSessionStore((state) => state.currentWorkflow?.root ?? '');
+  const switchWorkflow = useSessionStore((state) => state.switchWorkflow);
   const renameWorkflow = useLibraryStore((state) => state.renameWorkflow);
   const duplicateWorkflow = useLibraryStore((state) => state.duplicateWorkflow);
   const removeWorkflow = useLibraryStore((state) => state.removeWorkflow);
+  const syncCurrentWorkflow = useSessionStore((state) => state.syncCurrentWorkflow);
 
   /** '' | 'rename' | 'delete' —— 行内表单/确认，不用浏览器 prompt */
   const [form, setForm] = useState('');
+  const [runOpen, setRunOpen] = useState(false);
   const isCurrent = workflow.root === currentWorkflowRoot;
+  const live = useLiveWorkflow(workflow.root);
+  const runners = useRunningDevicesForWorkflow(workflow.root);
+
+  // 没有设备在跑时菜单直接收起：用派生值而不是 effect 里 setState（会触发级联渲染）
+  const runMenuOpen = runOpen && runners.length > 0;
   const run = (task: Promise<boolean>): void => {
     setForm('');
     void task;
   };
 
+  const exportJson = async (): Promise<void> => {
+    if (!isCurrent) {
+      await switchWorkflow(workflow.root);
+    }
+    const graph = await graphGet();
+    downloadWorkflowJson(workflow.name, graph);
+  };
+
+  const importJson = async (): Promise<void> => {
+    if (!isCurrent) {
+      await switchWorkflow(workflow.root);
+    }
+    const text = await pickWorkflowJsonFile();
+    if (!text) {
+      return;
+    }
+    const graph = parseWorkflowJson(text);
+    await graphSave(graph);
+    await useGraphStore.getState().refresh();
+    await syncCurrentWorkflow();
+  };
+
   return (
     <div data-testid="workspace-workflow-row" aria-current={isCurrent ? 'true' : undefined}>
       <div className={cn(WORKFLOW_ROW, 'group', isCurrent ? 'bg-active text-dim' : 'text-dim')}>
-        <span
-          data-testid="workflow-dot"
-          data-current={isCurrent ? 'true' : 'false'}
-          aria-hidden="true"
-          className={cn('shrink-0 text-[10px] leading-none', isCurrent ? 'text-brand' : 'text-faint')}
-        >
-          {isCurrent ? '•' : '·'}
-        </span>
+        {live ? (
+          <RunLiveDot />
+        ) : (
+          <span
+            data-testid="workflow-dot"
+            data-current={isCurrent ? 'true' : 'false'}
+            aria-hidden="true"
+            className={cn('shrink-0 text-[10px] leading-none', isCurrent ? 'text-brand' : 'text-faint')}
+          >
+            {isCurrent ? '•' : '·'}
+          </span>
+        )}
         <button
           type="button"
           disabled={busy}
-          onClick={() => void switchProject(workflow.root)}
-          title={workflow.root}
-          className="min-w-0 flex-1 truncate text-left"
+          onClick={() => {
+            if (live && runners.length > 0) {
+              setRunOpen((open) => !open);
+              return;
+            }
+            void switchWorkflow(workflow.root);
+          }}
+          title={
+            workflow.error
+              ? `${workflow.root}\n${workflow.error}`
+              : live
+                ? runners.length
+                  ? `${workflow.root}\n运行中 · ${runners.map((runner) => runner.name).join('、')}`
+                  : `${workflow.root}\n运行中`
+                : workflow.root
+          }
+          className={cn('min-w-0 flex-1 truncate text-left', live ? 'text-brand' : undefined)}
         >
           {workflow.name}
         </button>
-        <span className="shrink-0 text-faint group-hover:hidden">{relativeTime(workflow.modified)}</span>
-        <span className="hidden shrink-0 items-center gap-1 group-hover:flex">
-          <button
-            type="button"
-            title="重命名"
-            className={ROW_ICON}
-            onClick={() => setForm(form === 'rename' ? '' : 'rename')}
+        {workflow.error ? (
+          /* 读不回来的工作流要**看得见**：计数是 0，别让人以为它是空图 */
+          <span
+            data-testid="workflow-error"
+            title={workflow.error}
+            className="shrink-0 text-failed group-hover:hidden"
           >
-            <Pencil className="size-3" />
-          </button>
-          <button
-            type="button"
-            title="复制一份"
-            className={ROW_ICON}
-            disabled={busy}
-            onClick={() => run(duplicateWorkflow(workflow.root, `${workflow.name}-副本`))}
-          >
-            <Copy className="size-3" />
-          </button>
-          <button
-            type="button"
-            title="删除（移到工作区根的 .trash/，可恢复）"
-            className={cn(ROW_ICON, 'hover:text-failed')}
-            onClick={() => setForm(form === 'delete' ? '' : 'delete')}
-          >
-            <Trash2 className="size-3" />
-          </button>
-        </span>
+            ⚠ 读不了
+          </span>
+        ) : live && runners.length > 0 ? (
+          <RunTargetsTrigger
+            runners={runners}
+            open={runMenuOpen}
+            onToggle={() => setRunOpen((open) => !open)}
+          />
+        ) : live ? (
+          <span className="shrink-0 text-brand">运行中</span>
+        ) : (
+          <span className="shrink-0 text-faint group-hover:hidden">{relativeTime(workflow.modified)}</span>
+        )}
+        {live ? null : (
+          <span className="hidden shrink-0 items-center gap-1 group-hover:flex">
+            <button
+              type="button"
+              title="导出 graph.json"
+              className={ROW_ICON}
+              disabled={busy}
+              onClick={() => void exportJson()}
+            >
+              <FileDown className="size-3" />
+            </button>
+            <button
+              type="button"
+              title="从 JSON 导入（覆盖当前工作流图）"
+              className={ROW_ICON}
+              disabled={busy}
+              onClick={() => void importJson()}
+            >
+              <FileUp className="size-3" />
+            </button>
+            <button
+              type="button"
+              title="重命名"
+              className={ROW_ICON}
+              onClick={() => setForm(form === 'rename' ? '' : 'rename')}
+            >
+              <Pencil className="size-3" />
+            </button>
+            <button
+              type="button"
+              title="复制一份"
+              className={ROW_ICON}
+              disabled={busy}
+              onClick={() => run(duplicateWorkflow(workflow.root, `${workflow.name}-副本`))}
+            >
+              <Copy className="size-3" />
+            </button>
+            <button
+              type="button"
+              title="删除（真删除，不可恢复）"
+              className={cn(ROW_ICON, 'hover:text-failed')}
+              onClick={() => setForm(form === 'delete' ? '' : 'delete')}
+            >
+              <Trash2 className="size-3" />
+            </button>
+          </span>
+        )}
       </div>
+      {runMenuOpen && live ? (
+        <div className="border-b border-line bg-raised/60 pl-5" data-testid="workflow-run-targets">
+          <RunTargetList workflowRoot={workflow.root} runners={runners} />
+        </div>
+      ) : null}
 
       {form === 'rename' && (
         <WorkflowNameForm
@@ -727,7 +896,8 @@ function WorkflowRow({
       {form === 'delete' && (
         <div className="flex items-center gap-1 border-b border-line bg-raised px-2 py-1 text-badge">
           <span className="min-w-0 flex-1 truncate text-dim">
-            删除「{workflow.name}」？会移到工作区根的 .trash/，可以恢复。
+            删除「{workflow.name}」？连同目录里的模板一起删掉，
+            <span className="text-failed">删除后不可恢复</span>。
           </span>
           <button
             type="button"

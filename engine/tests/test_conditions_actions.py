@@ -18,9 +18,6 @@ def detections(**items: FakeDetection) -> dict[str, FakeDetection]:
     return dict(items)
 
 
-# ---------------------------------------------------------------- 条件
-
-
 def test_condition_defaults_to_when_label() -> None:
     condition = Condition.parse(None, fallback="main")
     assert condition.all_of == ("main",)
@@ -102,15 +99,13 @@ def test_condition_timer_wait_then_timeout() -> None:
     assert timer.check("home", "e2", 0, 999.0) == "ok"
 
 
-# ---------------------------------------------------------------- 动作
-
-
 def test_action_types_cover_basic_operations() -> None:
-    assert set(ACTION_TYPES) == {"click", "long_press", "swipe", "wait", "key", "text"}
+    assert set(ACTION_TYPES) == {"click", "double_click", "long_press", "swipe", "wait", "key", "text"}
 
 
 def test_click_forms() -> None:
     assert Action.parse({"type": "click", "target": "start"}).describe() == "点击 start"
+    assert Action.parse({"type": "double_click", "target": "start"}).describe() == "双击 start"
     assert Action.parse({"type": "click", "rect": [0.1, 0.2, 0.3, 0.4]}).describe() == "点击 矩形中心"
     assert Action.parse({"type": "click", "x": 0.5, "y": 0.5}).describe() == "点击 (0.50, 0.50)"
     # 老写法：只有 type，目标从 when 兜底
@@ -175,9 +170,6 @@ def test_action_round_trip() -> None:
     assert Action.parse(parsed.to_dict()).to_dict() == parsed.to_dict()
 
 
-# ---------------------------------------------------------------- 边的序列化
-
-
 def test_edge_round_trip_keeps_always_condition() -> None:
     """always 条件必须写进文件：丢了它再读回来会变成"叫 always 的识别器标签"。"""
     from gamepilot.core.graph import Edge
@@ -233,9 +225,6 @@ def test_default_condition_is_omitted_from_file() -> None:
     edge = Edge.from_dict({"id": "e1", "when": "home", "action": {"type": "click", "target": "home"}})
     payload = edge.to_dict()
     assert "condition" not in payload, "默认条件（就是 when）不用写进文件，保持 graph.json 干净"
-
-
-# ---------------------------------------------------------------- 变量（黑板）
 
 
 def test_parse_variables_accepts_shorthand_and_types() -> None:
@@ -328,7 +317,7 @@ def test_graph_validates_set_action_target() -> None:
 
 
 def test_graph_round_trip_keeps_variables() -> None:
-    """变量必须写进文件再读回来（踩过：to_dict 漏了这段，存盘后变量就没了）。"""
+    """变量须随 graph 序列化往返。"""
     from gamepilot.core.graph import Graph
 
     graph = Graph.from_dict(
@@ -387,6 +376,14 @@ def test_call_action_runs_sub_script() -> None:
     engine2._execute(graph.edges[0])
     assert engine2.stats["failed"] >= 1
 
+    # 回调里切换/启动子工作流失败也不能把截图线程打崩
+    def boom(_name: str) -> None:
+        raise RuntimeError("子工作流目录不存在")
+
+    engine3 = Engine(graph, ScriptedController(), on_call=boom)
+    engine3._execute(graph.edges[0])
+    assert engine3.stats["failed"] >= 1
+
     # 没写工作流名 → 保存时就拦下
     bad = Graph()
     bad.add_edge(Edge.from_dict({"id": "e1", "action": {"type": "call"}}))
@@ -397,7 +394,7 @@ def test_call_action_runs_sub_script() -> None:
 def test_none_of_survives_round_trip() -> None:
     """分支的另一条边（none_of=[when]）不能被当成"默认条件"省略掉。
 
-    踩过：省略后读回来变成 all_of=[when]，**分支逻辑直接反过来**。
+    省略 none_of 后读回会变成 all_of，分支逻辑反转。
     """
     from gamepilot.core.graph import Edge
 

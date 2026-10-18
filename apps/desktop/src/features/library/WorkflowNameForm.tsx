@@ -12,22 +12,28 @@ import { cn } from '@/lib/utils';
 export function WorkflowNameForm({
   title,
   initial = '',
+  initialDescription = '',
+  showDescription = false,
   submitLabel,
   onSubmit,
   onCancel,
 }: {
   title: string;
   initial?: string;
+  initialDescription?: string;
+  /** 新建工作流时可填备注（写入 graph.defaults.workflow_note） */
+  showDescription?: boolean;
   submitLabel: string;
-  onSubmit: (name: string) => void;
+  onSubmit: (name: string, description?: string) => void;
   onCancel: () => void;
 }): ReactNode {
   const [name, setName] = useState(initial);
+  const [description, setDescription] = useState(initialDescription);
   const problem = workflowNameError(name);
 
   const submit = (): void => {
     if (!problem) {
-      onSubmit(name.trim());
+      onSubmit(name.trim(), showDescription ? description.trim() : undefined);
     }
   };
 
@@ -72,6 +78,15 @@ export function WorkflowNameForm({
           取消
         </button>
       </div>
+      {showDescription && (
+        <input
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          spellCheck={false}
+          placeholder="备注（可选）"
+          className="h-6 rounded-sm border border-line bg-canvas px-1.5 text-badge text-fg"
+        />
+      )}
       {problem && <div className="text-badge text-failed">{problem}</div>}
     </form>
   );

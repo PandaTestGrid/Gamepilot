@@ -28,10 +28,11 @@ interface EventState {
     deviceId: string;
     seq: number;
     ts: number;
-    type: string;
+    type: TraceEventType;
     node: string | null;
     edge: string | null;
     message: string;
+    extra?: Readonly<Record<string, unknown>>;
   }) => void;
 }
 
@@ -92,11 +93,12 @@ export const useEventStore = create<EventState>()((set, get) => ({
       const event: TraceEventView = {
         seq: payload.seq,
         ts: payload.ts,
-        type: payload.type as TraceEventType,
+        type: payload.type,
         deviceId: payload.deviceId,
         node: payload.node,
         edge: payload.edge,
         message: payload.message,
+        extra: payload.extra,
       };
       return {
         seq: Math.max(state.seq, payload.seq),

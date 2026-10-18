@@ -2,19 +2,22 @@
 
 `scan()` 是唯一给上层的发现接口，约定：
 - **绝不抛异常**：单个来源失败（adb 没装、usbmux 不可用）只记进 `errors`，
-  其它来源照常返回，UI 才能显示"Android 扫描失败，但 Mock 可用"；
+  其它来源照常返回，UI 才能显示"Android 扫描失败，但 iOS 照常可用"；
 - 结果按 (kind, name) 排序，保证 UI 列表顺序稳定。
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 
-from . import android, ios, macos, mock
+from . import android, ios, macos
+
+if os.environ.get("GAMEPILOT_TEST_SYNTHETIC") == "1":
+    from . import synthetic_test  # noqa: F401
 from .base import (  # noqa: F401
     KIND_ANDROID,
     KIND_EMULATOR,
-    KIND_MOCK,
     KIND_REMOTE,
     KIND_WINDOWS,
     STATUS_CONNECTED,
@@ -34,8 +37,8 @@ from .base import (  # noqa: F401
 ORIENTATION_LABELS: dict[int, str] = {
     1: "竖屏",
     2: "竖屏（倒置）",
-    3: "横屏（左）",
-    4: "横屏（右）",
+    3: "横屏（Home 在右）",
+    4: "横屏（Home 在左）",
 }
 
 _SEEN: set[str] = set()
@@ -45,9 +48,8 @@ def _providers() -> list[tuple[str, Callable[[], list[DeviceInfo]]]]:
     """设备来源清单。新增平台（iOS / Windows / 鸿蒙）在这里加一行即可。"""
     return [
         ("android", android.discover),
-        ("ios", ios.discover),  # 仅 iOS 17.4+；没装 pymobiledevice3 时返回空列表
+        ("ios", ios.discover),
         ("macos", macos.discover),  # macOS 本机窗口（非 macOS 自动返回空）
-        ("mock", mock.discover),
     ]
 
 

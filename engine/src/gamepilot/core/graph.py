@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 from .actions import Action
 from .conditions import ALWAYS_LABEL, Condition
-from .geometry import Rect
-from .recognizer import Recognizer, build_recognizer
+from .flow_model import validate_flow
+from .recognizer import Recognizer, build_recognizer, normalize_search
 from .variables import CALL_ACTION, SET_ACTION, Variable, VariableRefs, parse_variables
+
+GRAPH_WRITE_LOCK = threading.RLock()
 
 
 @dataclass
@@ -25,6 +29,8 @@ class Node:
     enter: list[str] = field(default_factory=list)
     timeout_ms: int | None = None
     note: str = ""
+    """计划触发时刻（HH:mm，工作流事件节点；与界面 enter 无关）"""
+    at: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Node:
@@ -34,6 +40,7 @@ class Node:
             enter=[str(item) for item in data.get("enter", [])],
             timeout_ms=int(data["timeout_ms"]) if data.get("timeout_ms") else None,
             note=str(data.get("note", "")),
+            at=str(data.get("at", "") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +49,8 @@ class Node:
             out["timeout_ms"] = self.timeout_ms
         if self.note:
             out["note"] = self.note
+        if self.at:
+            out["at"] = self.at
         return out
 
 
@@ -158,6 +167,8 @@ class Graph:
     variables: dict[str, Variable] = field(default_factory=dict)
     specs: dict[str, dict[str, Any]] = field(default_factory=dict)
     defaults: dict[str, object] = field(default_factory=dict)
+    # 步骤链（"脚本"视图）：和 nodes/edges 并存，互不转换。None = 这份图还没用过步骤链。
+    flow: dict[str, Any] | None = None
     path: str | None = None
     base_dir: str = "."
 
@@ -171,11 +182,19 @@ class Graph:
             edges=[Edge.from_dict(edge) for edge in data.get("edges", [])],
             defaults=dict(data.get("defaults") or {}),
             variables=parse_variables(data.get("variables")),
+            flow=validate_flow(data["flow"], set(specs), strict=False) if data.get("flow") else None,
             path=path,
             base_dir=base_dir,
         )
         graph.specs = specs
-        graph.recognizers = {label: build_recognizer(label, spec, base_dir) for label, spec in specs.items()}
+        raw_min_score = graph.defaults.get("default_min_score")
+        default_threshold = 0.82
+        if isinstance(raw_min_score, (int, float)) and not isinstance(raw_min_score, bool):
+            default_threshold = float(raw_min_score)
+        graph.recognizers = {
+            label: build_recognizer(label, spec, base_dir, default_threshold=default_threshold)
+            for label, spec in specs.items()
+        }
         graph.validate()
         return graph
 
@@ -208,15 +227,31 @@ class Graph:
         if self.variables:
             # 没有变量就不写这段（老工作流的文件保持干净）
             out["variables"] = {name: var.to_dict() for name, var in self.variables.items()}
+        if self.flow is not None:
+            # 空步骤链也要写：`{"steps": []}` 表示"用过步骤链、但还一步没加"，
+            # 和"从来没启用过"（没有这个键）不是一回事
+            out["flow"] = self.flow
         return out
 
     def save(self, path: str | None = None) -> str:
         target = path or self.path
         if not target:
             raise ValueError("状态图没有保存路径")
+        # 落盘前先自检：写出去的文件**必须能被读回来**。
+        # 有一条路径曾经能写出"边的 from 指向已删除节点"的图，而 save() 不做校验，
+        # 于是文件安静地坏掉 —— 应用下次启动恢复工作区时直接读崩。
+        # 宁可在写入点报错，也不留一个打不开的工作流。
+        self.validate()
         os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
-        with open(target, "w", encoding="utf-8") as handle:
-            json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2)
+        with GRAPH_WRITE_LOCK:
+            descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(target)), suffix=".tmp")
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2)
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
         self.path = os.path.abspath(target)
         return self.path
 
@@ -232,6 +267,26 @@ class Graph:
             raise KeyError(f"识别器不存在: {label}")
         spec["threshold"] = round(float(threshold), 4)
         self.add_recognizer(label, spec)
+
+    def set_recognizer_search(self, label: str, search: str) -> dict[str, Any]:
+        """切换识别器的搜索范围：`region`（默认，只在 roi 里找）/ `full`（整帧找）。
+
+        `roi` **不删**：它是录制时的原区域，切回 `region` 时还要用。
+        颜色识别器不支持整帧搜索（会退化成"整个屏幕找同色像素"，没有判别力），直接拒绝。
+        """
+        spec = self.specs.get(label)
+        if spec is None:
+            raise KeyError(f"识别器不存在: {label}")
+        if str(spec.get("type", "template")).lower() != "template":
+            raise ValueError(f"识别器「{label}」不是模板识别器，不能设置搜索范围")
+        mode = normalize_search(search)
+        if mode == "full":
+            spec["search"] = "full"
+        else:
+            # 默认值不落盘：graph.json 保持干净，老引擎读到也不受影响
+            spec.pop("search", None)
+        self.add_recognizer(label, spec)
+        return {"label": label, "search": mode}
 
     def rename_recognizer(self, old: str, new: str) -> dict[str, int]:
         """给识别器改名（标签），并把**所有引用一起改**。
@@ -251,7 +306,7 @@ class Graph:
         if old not in self.specs:
             raise KeyError(f"识别器不存在: {old}")
         if old == new:
-            return {"nodes": 0, "edges": 0, "scores": 0}
+            return {"nodes": 0, "edges": 0, "scores": 0, "flowSteps": 0}
         if new in self.specs:
             raise ValueError(f"已经有同名识别器: {new}")
 
@@ -293,8 +348,20 @@ class Graph:
             if touched or renamed_scores:
                 edges += 1
 
+        flow_steps = 0
+        if self.flow and isinstance(self.flow.get("steps"), list):
+            for step in self.flow["steps"]:
+                if not isinstance(step, dict):
+                    continue
+                params = step.get("params")
+                if not isinstance(params, dict):
+                    continue
+                if params.get("rec") == old:
+                    params["rec"] = new
+                    flow_steps += 1
+
         self.validate()
-        return {"nodes": nodes, "edges": edges, "scores": scores}
+        return {"nodes": nodes, "edges": edges, "scores": scores, "flowSteps": flow_steps}
 
     def upsert_node(self, node: Node) -> None:
         self.nodes[node.id] = node
@@ -311,6 +378,8 @@ class Graph:
     # ---------- 校验 ----------
 
     def validate(self) -> None:
+        if self.flow is not None:
+            self.flow = validate_flow(self.flow, set(self.recognizers), strict=False)
         for edge in self.edges:
             if edge.src and edge.src not in self.nodes:
                 raise ValueError(f"边 {edge.id} 的 from 节点不存在: {edge.src}")
@@ -356,10 +425,6 @@ class Graph:
             "edges": [edge.to_dict() for edge in self.edges],
             "recognizers": [{"label": label, **spec} for label, spec in self.specs.items()],
         }
-
-
-def roi_of(spec: dict[str, Any]) -> Rect | None:
-    return Rect.parse(spec["roi"]) if spec.get("roi") else None
 
 
 # 识别器标签的长度上限：它会变成模板文件名（`templates/<label>.png`），

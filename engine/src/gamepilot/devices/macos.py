@@ -15,7 +15,7 @@
 
   | 模式 | 鼠标/焦点 | 可靠性 |
   |---|---|---|
-  | `pid`（默认） | **完全不动**（CGEventPostToPid 直投目标进程） | 部分 App 会忽略直投事件（实测 Finder / 活动监视器） |
+  | `pid`（默认） | **完全不动**（CGEventPostToPid 直投目标进程） | 部分 App 会忽略直投（如 Finder） |
   | `global` | 会激活目标 App、指针被挪到点击处（点完自动放回原处） | 和真人操作一样可靠 |
 
   所以：想一边用它一边干活 → 保持 `pid`；发现点了没反应 → 换 `global`。
@@ -40,6 +40,7 @@ from typing import Any
 
 import numpy as np
 
+from ..core.bezier_trajectory import play_swipe_path, play_tap, resolve_swipe_points
 from .base import (
     KIND_WINDOWS,
     STATUS_DISCOVERED,
@@ -284,8 +285,7 @@ class MacWindowController(Controller):
         self._connected = True
 
     def _resolve_window(self) -> MacWindow | None:
-        # 先不看自己的窗口；按句柄找不到时再带上自己找一遍
-        # （不然"连自己应用的窗口"永远失败 —— 实测踩过）
+        # 先 exclude 本进程窗口，匹配失败再 include_own 重试。
         windows = list_windows(include_own=False) or list_windows()
         resolved = self._match_window(windows)
         if resolved is None and self.window_ref:
@@ -349,8 +349,8 @@ class MacWindowController(Controller):
         buffer = np.frombuffer(data, dtype=np.uint8)
         # 每行可能有对齐填充：先按 stride 切，再取前 width*4 字节
         usable = height * stride
-        buffer = buffer[:usable].reshape(height, stride)
-        pixels = buffer[:, : width * 4].reshape(height, width, 4)
+        rows = buffer[:usable].reshape(height, stride)
+        pixels = rows[:, : width * 4].reshape(height, width, 4)
         return np.ascontiguousarray(pixels[:, :, :3])
 
     def screenshot(self) -> np.ndarray:
@@ -459,14 +459,21 @@ class MacWindowController(Controller):
             raise ValueError(f"phase 必须是 down/move/up，收到: {phase}")
         self._mouse(mapping[phase], x, y, restore=phase == "up")
 
-    def click(self, x: float, y: float) -> None:
-        """点一下：优先用辅助功能按元素（后台执行），不行再走鼠标事件。"""
+    def click(
+        self,
+        x: float,
+        y: float,
+        duration: float = 0.05,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
+        """点一下：有拟人轨迹时走触控；否则优先辅助功能，不行再鼠标事件。"""
+        if path:
+            play_tap(self.touch, (x, y), duration, path)
+            return
         if self.strategy in ("auto", "ax") and self._ax_press(x, y):
             self.ax_clicks += 1
             return
-        self.touch("down", x, y)
-        time.sleep(0.03)
-        self.touch("up", x, y)
+        play_tap(self.touch, (x, y), duration)
 
     def _ax_press(self, x: float, y: float) -> bool:
         """在目标窗口的这个位置找可操作元素并按下 —— 不移动鼠标、不抢焦点。
@@ -493,14 +500,16 @@ class MacWindowController(Controller):
             logger.debug("AX 点击失败（回退鼠标事件）: %s", exc)
         return False
 
-    def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.3) -> None:
-        steps = max(4, int(duration / 0.02))
-        self.touch("down", x1, y1)
-        for index in range(1, steps + 1):
-            ratio = index / steps
-            self.touch("move", x1 + (x2 - x1) * ratio, y1 + (y2 - y1) * ratio)
-            time.sleep(max(0.005, duration / steps))
-        self.touch("up", x2, y2)
+    def swipe(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        duration: float = 0.3,
+        path: list[tuple[float, float]] | None = None,
+    ) -> None:
+        play_swipe_path(self.touch, resolve_swipe_points((x1, y1), (x2, y2), duration, path), duration)
 
     def press(self, name: str) -> None:
         """按键：名字 → macOS 虚拟键码（和安卓/iOS 的按键名保持同一套）。"""

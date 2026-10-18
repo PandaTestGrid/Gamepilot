@@ -11,17 +11,40 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from gamepilot import library
+from gamepilot.core.graph import Edge, Graph
 from gamepilot.project import Project
 from gamepilot.rpc.stdio import RpcServer
 from gamepilot.session import DeviceSession
 
 
 def _server(project_dir: Path) -> tuple[RpcServer, io.StringIO]:
+    """构造一个**隔离**的服务端。
+
+    必须把配置目录指到临时目录：`SessionManager.__init__` 会从 `config.json`
+    恢复"上次的工作区"，不隔离的话测试会去读开发机上真实的工作区 ——
+    那台机器上的图一旦有问题，整个套件就跟着红（反过来也可能改到真实数据）。
+    """
     out = io.StringIO()
-    server = RpcServer(io.StringIO(), out)
+    keys = ("GAMEPILOT_CONFIG_DIR", "GAMEPILOT_WORKSPACE_DIR", "GAMEPILOT_PROJECT_DIR")
+    previous = {key: os.environ.get(key) for key in keys}
+    os.environ["GAMEPILOT_CONFIG_DIR"] = str(project_dir / ".config")
+    os.environ["GAMEPILOT_WORKSPACE_DIR"] = str(project_dir / ".workspaces")
+    os.environ.pop("GAMEPILOT_PROJECT_DIR", None)
+    try:
+        server = RpcServer(io.StringIO(), out)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     server.sessions.use_project(str(project_dir))
     return server, out
 
@@ -42,6 +65,21 @@ def _graph_json(project_dir: Path) -> dict[str, Any]:
     with open(project_dir / "graph.json", encoding="utf-8") as handle:
         payload: dict[str, Any] = json.load(handle)
     return payload
+
+
+def test_graph_node_update_persists_event_at(tmp_path: Path) -> None:
+    server, out = _server(tmp_path)
+    created = _call(server, out, "graph.node.add", {"name": "晨间签到"})
+    node_id = created["result"]["nodeId"]
+    updated = _call(
+        server,
+        out,
+        "graph.node.update",
+        {"nodeId": node_id, "patch": {"at": "09:30"}},
+    )
+    assert "error" not in updated, updated
+    nodes = _graph_json(tmp_path)["nodes"]
+    assert nodes[0]["at"] == "09:30"
 
 
 def test_graph_get_without_device_reads_the_project_script(tmp_path: Path) -> None:
@@ -105,20 +143,20 @@ def test_project_level_edits_land_in_graph_json(tmp_path: Path) -> None:
 
 def test_project_level_edit_hot_reloads_connected_sessions(tmp_path: Path) -> None:
     """**在 A 上录的流程，B 上也跑得了**：项目级改动 → 所有会话热重载，读到的就是新脚本。"""
-    from gamepilot.devices.mock import MockController
+    from gamepilot.devices.synthetic_test import SyntheticController
 
     server, out = _server(tmp_path)
-    controller = MockController()
+    controller = SyntheticController()
     controller.connect()
     session = DeviceSession(
-        device_id="mock:mock-1",
+        device_id="synthetic:test-1",
         controller=controller,
         project=Project(root=str(tmp_path)).ensure(),
         emit=lambda method, params: None,
         fps=20.0,
         jpeg_width=320,
     )
-    server.sessions.sessions["mock:mock-1"] = session
+    server.sessions.sessions["synthetic:test-1"] = session
     try:
         assert session.graph.nodes == {}
 
@@ -127,7 +165,7 @@ def test_project_level_edit_hot_reloads_connected_sessions(tmp_path: Path) -> No
         # 连着的设备（会话）也拿到了这份脚本 —— 不需要它自己再拉一次
         assert list(session.graph.nodes) == ["main"]
         # 会话级读取（老调用方）照样能用
-        by_device = _call(server, out, "graph.get", {"deviceId": "mock:mock-1"})
+        by_device = _call(server, out, "graph.get", {"deviceId": "synthetic:test-1"})
         assert [node["id"] for node in by_device["result"]["nodes"]] == ["main"]
     finally:
         session.stop()
@@ -153,3 +191,72 @@ def test_graph_get_without_any_script_is_an_empty_graph_not_an_error(tmp_path: P
     assert "error" not in reply, reply
     assert reply["result"]["nodes"] == []
     assert reply["result"]["edges"] == []
+
+
+def test_save_refuses_a_graph_whose_edge_points_at_a_deleted_node(tmp_path: Path) -> None:
+    """落盘前必须自检：写出去的文件要能被读回来。
+
+    历史上有一条路径（录模板时按 `engine.current` 建"动作目标"边）能写出
+    "边的 from 指向已删除节点"的图，而 `save()` 不校验，于是文件安静地坏掉 ——
+    应用下次启动恢复工作区时直接读崩，用户看到的是"这个工作流打不开了"。
+    """
+    graph = Graph.load(str(tmp_path / "graph.json"))
+    graph.add_edge(
+        Edge.from_dict(
+            {
+                "id": "e_main_1",
+                "when": "",
+                "from": "n_2",
+                "to": None,
+                "action": {"type": "click", "x": 0.5, "y": 0.5},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="from 节点不存在"):
+        graph.save()
+    # 没有把坏图写到盘上：文件要么不存在，要么还是能读的
+    assert not (tmp_path / "graph.json").exists()
+
+
+def test_startup_survives_a_workflow_whose_graph_is_unreadable(tmp_path: Path) -> None:
+    """一个读不回来的 graph.json 不能让引擎起不来。
+
+    真发生过：`library.list_workflows` 对每份图 `Graph.load()` 且不兜错，
+    而启动要"恢复上次的工作区"，于是**一个坏工作流把整个应用拖死**（引擎都起不来）。
+    现在：照旧列出它、把原因挂在 `error` 上，启动也照常。
+    """
+    workspace = tmp_path / "workspaces" / "默认"
+    broken = workspace / "坏图"
+    broken.mkdir(parents=True)
+    (broken / "graph.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "nodes": [],
+                "edges": [{"id": "e1", "from": "n_gone", "to": None, "action": {"type": "click", "x": 0.5, "y": 0.5}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    keys = ("GAMEPILOT_CONFIG_DIR", "GAMEPILOT_WORKSPACE_DIR", "GAMEPILOT_PROJECT_DIR")
+    previous = {key: os.environ.get(key) for key in keys}
+    os.environ["GAMEPILOT_CONFIG_DIR"] = str(tmp_path / "config")
+    os.environ["GAMEPILOT_WORKSPACE_DIR"] = str(workspace)
+    os.environ.pop("GAMEPILOT_PROJECT_DIR", None)
+    try:
+        # 起得来（不抛）就是这条测试的全部要求
+        server = RpcServer(io.StringIO(), io.StringIO())
+        items = library.list_workflows(str(workspace))
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert [item["name"] for item in items] == ["坏图"]
+    assert items[0]["error"], "坏图要把原因报出来，界面才能提示"
+    assert items[0]["nodes"] == 0
+    # 恢复到的就是它（行为不变），但引擎活着
+    assert server.sessions.project.root.endswith("坏图")

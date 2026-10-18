@@ -1,13 +1,7 @@
 /**
  * 前端依赖的引擎能力清单（**引擎进程是独立的，很容易跑到旧版本上**）。
  *
- * 背景（真踩过）：引擎由 Tauri 壳在应用启动时拉起，之后一直活着。
- * 代码更新（比如新增 `workflow.create`）后，**正在跑的那个进程仍然是旧的** ——
- * 界面点「新建工作流」就收到 `-32601 未知方法: workflow.create`。
- * 引擎在握手（`engine.ready`）与 `engine.info` 里都会带上方法表，所以这里做能力校验，
- * 缺方法就明确告诉用户"引擎是旧进程，重启即可"，而不是丢一个 JSON-RPC 错误码给用户。
- *
- * 规则：**新增一个前端会调用的 RPC 方法时，往下面这张表里加一行**。
+ * 握手时对比方法表；新增前端 RPC 时在此登记一行。
  * 只列"界面直接依赖"的方法；纯引擎内部方法不用列。
  */
 export const REQUIRED_ENGINE_METHODS: readonly string[] = [
@@ -21,6 +15,9 @@ export const REQUIRED_ENGINE_METHODS: readonly string[] = [
   'workflow.rename',
   'workflow.delete',
   'workflow.duplicate',
+  // 识别器：搜索范围（模板默认全屏 / 区域）—— 旧引擎没有它时，
+  // 界面上的「全屏」只是本地勾选，引擎仍按原区域搜，滚动后必然未命中
+  'recognizer.search',
 ];
 
 /** 引擎方法表里缺了哪些前端需要的方法（空数组 = 兼容）。 */

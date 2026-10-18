@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 from pathlib import Path
 
@@ -62,19 +61,17 @@ def ws(tmp_path: Path, cfg_dir: Path) -> Path:
 def test_layout_constants_and_paths(tmp_path: Path) -> None:
     assert workspace.WORKSPACE_NAME == "默认"
     assert workspace.WORKSPACE_ROOT == "workspaces"
-    assert workspace.TRASH_DIR == ".trash"
     assert workspace.WORKSPACE_DIR_ENV == "GAMEPILOT_WORKSPACE_DIR"
     assert workspace.recommended_root() == os.path.join(workspace.repo_root(), "workspaces", "默认")
 
     assert workspace.workspace_root(str(tmp_path)) == str(tmp_path)
-    assert workspace.trash_root(str(tmp_path)) == str(tmp_path / ".trash")
-    assert workspace.global_trash_root() == os.path.join(config.config_dir(), ".trash")
     assert library.GRAPH_FILE == "graph.json"
 
 
 def test_normalize_dir_accepts_absolute_and_tilde_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`workspace.add` 只接受绝对路径或 `~` 开头 —— 相对路径歧义，直接中文报错。"""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows 的 `~` 看这个
 
     assert workspace.normalize_dir(str(tmp_path / "a")) == str(tmp_path / "a")
     assert workspace.normalize_dir("~/文档/我的工作区") == str(tmp_path / "文档" / "我的工作区")
@@ -129,7 +126,7 @@ def test_list_workflows_is_the_direct_children_with_graph(ws: Path) -> None:
     items = workspace.list_workflows()
 
     assert [item["name"] for item in items] == ["alpha", "beta"], "按 name 排序"
-    assert set(items[0]) == {"name", "root", "nodes", "edges", "recognizers", "templates", "modified"}
+    assert set(items[0]) == {"name", "root", "nodes", "edges", "recognizers", "templates", "modified", "trigger"}
     assert items[0]["root"] == str(ws / "alpha")
     assert (items[0]["nodes"], items[0]["edges"], items[0]["recognizers"], items[0]["templates"]) == (0, 0, 0, 0)
     assert items[1]["templates"] == 1
@@ -272,8 +269,8 @@ def test_list_is_persisted_in_config_json(tmp_path: Path, cfg_dir: Path) -> None
     assert restarted.active == str(second)
 
 
-def test_remove_moves_the_workspace_to_the_global_trash(tmp_path: Path, cfg_dir: Path) -> None:
-    """删整个工作区 → 全局回收站（可恢复，不是真删除）。"""
+def test_remove_deletes_the_workspace_for_real(tmp_path: Path, cfg_dir: Path) -> None:
+    """删整个工作区 → **真删除**（不可恢复）。"""
     root = tmp_path / "我的游戏"
     _workflow(root, "斗技")
     store = workspace.Workspaces()
@@ -282,12 +279,9 @@ def test_remove_moves_the_workspace_to_the_global_trash(tmp_path: Path, cfg_dir:
     removal = store.remove(str(root))
 
     assert removal.was_active is True
-    assert removal.trashed is not None
-    trashed = Path(removal.trashed)
-    assert trashed.parent == cfg_dir / ".trash"
-    assert re.fullmatch(r"我的游戏-\d{8}-\d{6}", trashed.name), trashed.name
-    assert (trashed / "斗技" / library.GRAPH_FILE).is_file(), "内容原样保留，能捞回来"
-    assert not root.exists()
+    assert Path(str(removal.removed)).name == "我的游戏", "返回被删掉的目录，界面不用它做文案了但契约保留"
+    assert not root.exists(), "目录真的删掉了"
+    assert not (cfg_dir / ".trash").exists(), "不再有全局回收站"
     assert store.items() == []
     assert store.active is None
     assert workspace.tree() == {"root": "", "workflows": []}
@@ -301,7 +295,7 @@ def test_remove_without_deleting_files_keeps_everything(tmp_path: Path, cfg_dir:
 
     removal = store.remove(str(root), delete_files=False)
 
-    assert removal.trashed is None
+    assert removal.removed is None
     assert removal.was_active is True
     assert (root / "斗技" / library.GRAPH_FILE).is_file(), "磁盘一个字节不动"
     assert store.items() == []
@@ -405,15 +399,14 @@ def test_rename_workflow_rejects_existing_target_and_missing_source(ws: Path) ->
         library.rename_workflow(str(ws / "没有"), "随便")
 
 
-def test_delete_workflow_uses_the_workspace_trash(ws: Path) -> None:
+def test_delete_workflow_deletes_for_real(ws: Path) -> None:
     root = _workflow(ws, "斗技")
 
-    trashed = Path(workspace.delete_workflow(str(root)))
+    removed = Path(workspace.delete_workflow(str(root)))
 
-    assert not root.exists()
-    assert trashed.parent == ws / ".trash"
-    assert re.fullmatch(r"斗技-\d{8}-\d{6}", trashed.name), trashed.name
-    assert (trashed / library.GRAPH_FILE).is_file(), "内容原样保留，用户能捞回来"
+    assert not root.exists(), "目录真的删掉了"
+    assert not (ws / ".trash").exists(), "不再有回收站"
+    assert removed.name == "斗技"
     assert library.list_workflows(str(ws)) == []
 
 
@@ -428,17 +421,14 @@ def test_delete_workflow_refuses_non_workflow_dirs(ws: Path) -> None:
     assert (ws / "斗技").is_dir()
 
 
-def test_trash_into_puts_the_dir_in_the_given_trash(tmp_path: Path) -> None:
-    """`trash_into` 由调用方决定回收站在哪；同一秒删两个同名目录不互相覆盖。"""
+def test_remove_dir_deletes_and_reports_missing(tmp_path: Path) -> None:
+    """删除是真删除（没有回收站），不存在的目录要中文报错。"""
     base = tmp_path / "工作区"
     first = _workflow(base, "斗技")
-    second = _workflow(base, "斗技2")
-    trash = tmp_path / "别处" / library.TRASH_DIR
 
-    one = library.trash_into(str(first), str(trash), "工作流目录")
-    two = library.trash_into(str(second), str(trash), "工作流目录")
+    removed = Path(library.remove_dir(str(first), "工作流目录"))
 
-    assert Path(one).parent == trash and Path(two).parent == trash
-    assert Path(one).is_dir() and Path(two).is_dir() and one != two
+    assert removed.name == "斗技"
+    assert not first.exists(), "目录真的删掉了"
     with pytest.raises(ValueError, match="不存在"):
-        library.trash_into(str(tmp_path / "没有"), str(trash), "工作流目录")
+        library.remove_dir(str(tmp_path / "没有"), "工作流目录")

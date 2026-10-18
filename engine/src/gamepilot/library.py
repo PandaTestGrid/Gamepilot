@@ -4,7 +4,6 @@
 工作流是工作区根下的**直接子目录**：
 
     <工作区根>/
-    ├── .trash/                 ← 删掉的工作流（可恢复，不做真删除）
     ├── 斗技/                    ← 工作流
     │   ├── graph.json          ← 状态图（唯一真源）
     │   └── templates/          ← 识别器模板 PNG
@@ -16,8 +15,8 @@
 - 名称规则统一走 `validate_name`（长度 1~64、禁止 `/ \\ : * ? " < > |`、
   不以 `.` 开头或结尾），错误信息是中文、可直接显示给用户；
 - 列举工作流时只认**直接子目录 + 含 `graph.json`**，隐藏目录（`.` 开头）一律不算；
-- 删除一律是**移动到回收站，不做真删除**：回收站在哪由调用方定（`trash_into`），
-  工作区里的工作流进 `<工作区>/.trash`（见 `workspace`）。
+- 删除是**真删除**（`remove_dir` → `shutil.rmtree`），删了就没了：风险由界面的二次确认兜
+  （确认文案写明"删除后不可恢复"）。
 
 副作用：所有写操作都会在磁盘上建/改/移目录。
 """
@@ -26,18 +25,16 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
 from typing import Any
 
+from .core.flow_model import validate_flow
 from .core.graph import Graph
 
 GRAPH_FILE = "graph.json"
-TRASH_DIR = ".trash"
 MAX_NAME_LEN = 64
 
 # Windows/macOS 上都非法的文件名字符（含路径分隔符，避免逃出工作区根）
 _INVALID_CHARS = '/\\:*?"<>|'
-_TRASH_STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
 def norm_path(path: str) -> str:
@@ -90,6 +87,21 @@ def _count_templates(root: str) -> int:
         return sum(1 for entry in entries if entry.is_file())
 
 
+def _trigger_of(graph: Graph) -> dict[str, Any] | None:
+    """流程第一步的触发条件（`manual` / `schedule` / `interval`）。
+
+    调用节点要显示“目标工作流什么时候触发”，但树/列表原本只回计数。这里只回
+    类型和参数，不把整张图塞进列表；读图失败时由调用方给 `None`。
+    """
+    steps = list((graph.flow or {}).get("steps") or [])
+    for step in steps:
+        kind = step.get("type")
+        if kind in ("manual", "schedule", "interval"):
+            params = step.get("params")
+            return {"type": kind, "params": params if isinstance(params, dict) else {}}
+    return None
+
+
 def _mtime(path: str) -> float:
     try:
         return os.path.getmtime(path)
@@ -110,8 +122,9 @@ def list_workflows(base: str) -> list[dict[str, Any]]:
 
     - 隐藏目录（`.` 开头，含 `.trash`）与没有 `graph.json` 的目录都不算工作流；
     - `base` 不是目录时返回空列表（列表接口不该因为工作区还没建就报错）；
-    - 每项：`{name, root, nodes, edges, recognizers, templates, modified}`，
-      其中 `templates` 是 `templates/` 里的**文件数**、`modified` 见 `workflow_modified`。
+    - 每项：`{name, root, nodes, edges, recognizers, templates, modified, trigger}`，
+      其中 `templates` 是 `templates/` 里的**文件数**、`modified` 见 `workflow_modified`，
+      `trigger` 是流程第一步的 `{type, params}`（没有触发步骤时 `None`）。
     """
     root = _abs(base)
     if not os.path.isdir(root):
@@ -124,7 +137,26 @@ def list_workflows(base: str) -> list[dict[str, Any]]:
         graph_path = os.path.join(workflow_root, GRAPH_FILE)
         if not os.path.isfile(graph_path):
             continue
-        graph = Graph.load(graph_path)
+        try:
+            graph = Graph.load(graph_path)
+        except Exception as error:
+            # 一份读不回来的 graph.json 不能让整个列表（以及"启动恢复工作区"）挂掉：
+            # 以前这里直接抛，结果是**一个坏工作流把整个应用拖死**（引擎都起不来）。
+            # 现在照旧列出它、计数为 0，把原因挂在 `error` 上，界面据此提示。
+            items.append(
+                {
+                    "name": name,
+                    "root": workflow_root,
+                    "nodes": 0,
+                    "edges": 0,
+                    "recognizers": 0,
+                    "templates": _count_templates(workflow_root),
+                    "modified": workflow_modified(workflow_root),
+                    "trigger": None,
+                    "error": str(error) or error.__class__.__name__,
+                }
+            )
+            continue
         items.append(
             {
                 "name": name,
@@ -134,6 +166,7 @@ def list_workflows(base: str) -> list[dict[str, Any]]:
                 "recognizers": len(graph.recognizers),
                 "templates": _count_templates(workflow_root),
                 "modified": workflow_modified(workflow_root),
+                "trigger": _trigger_of(graph),
             }
         )
     return items
@@ -147,7 +180,13 @@ def create_workflow(base: str, name: str) -> str:
     if os.path.exists(target):
         raise ValueError(f"已经有叫「{name}」的工作流了")
     os.makedirs(os.path.join(target, "templates"))
-    Graph.empty(target).save(os.path.join(target, GRAPH_FILE))
+    graph = Graph.empty(target)
+    # Automa 式工作流：默认带「定时触发」块，执行顺序在 flow.steps（与 nodes/edges 状态图并存）
+    graph.flow = validate_flow(
+        {"steps": [{"id": "trigger", "type": "schedule", "params": {"at": "09:00"}}]},
+        set(),
+    )
+    graph.save(os.path.join(target, GRAPH_FILE))
     return target
 
 
@@ -183,39 +222,27 @@ def rename_workflow(root: str, name: str) -> str:
     return target
 
 
-def trash_into(root: str, trash: str, what: str = "目录") -> str:
-    """把目录 `root` 移进指定的回收站 `trash`：`<trash>/<名字>-<YYYYmmdd-HHMMSS>/`。
+def remove_dir(root: str, what: str = "目录") -> str:
+    """**真删除**一个目录（`shutil.rmtree`），返回被删掉的路径。
 
-    **不做真删除**，返回回收站里的路径；同一秒内删两个同名目录时追加序号，不覆盖前一个。
-    调用方决定回收站在哪：工作区里的工作流进 `<工作区>/.trash`（见 `workspace`）。
+    以前这里是"移进回收站"（可恢复）：删掉的东西越攒越多，而且散在两个地方（工作区根的
+    `.trash/` 和配置目录的全局回收站）。现在直接删 —— 不可恢复，所以界面必须二次确认。
     `what` 只影响报错文案（工作流目录 / 工作区目录……）。
     """
     source = _require_dir(root, what)
-    # 回收站路径按调用方给的写法保留（`<配置目录>/.trash` 不解析符号链接，
-    # 返回值要和它一致）；源目录仍然取 realpath，保证等价路径也能删。
-    destination = os.path.abspath(os.path.expanduser(trash))
-    os.makedirs(destination, exist_ok=True)
-    name = os.path.basename(source)
-    stamp = time.strftime(_TRASH_STAMP_FORMAT, time.localtime())
-    target = os.path.join(destination, f"{name}-{stamp}")
-    index = 2
-    while os.path.exists(target):
-        target = os.path.join(destination, f"{name}-{stamp}-{index}")
-        index += 1
-    shutil.move(source, target)
-    return target
+    shutil.rmtree(source)
+    return source
 
 
 __all__ = [
     "GRAPH_FILE",
     "MAX_NAME_LEN",
-    "TRASH_DIR",
     "create_workflow",
     "duplicate_workflow",
     "list_workflows",
     "norm_path",
+    "remove_dir",
     "rename_workflow",
-    "trash_into",
     "validate_name",
     "workflow_modified",
 ]
