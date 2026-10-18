@@ -5,7 +5,7 @@
 GamePilot 是一款面向游戏的**状态机式自动化工作台**：框选界面即可识别，拖拽连线即成脚本，
 一台电脑同时驱动 Android、iPhone 与本机窗口 —— 不写代码，画面不出本机。
 
-![GamePilot 工作台与官网预览](./site/preview.jpg)
+![GamePilot 工作台：画面 / 模块 / 状态图 / 工作区](./docs/assets/gamepilot-workbench.jpg)
 
 ## 产品介绍
 
