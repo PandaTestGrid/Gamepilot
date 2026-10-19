@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import Icon from '../components/Icon';
+import GlitchText from '../reactbits/GlitchText';
 import usePageMeta from '../hooks/usePageMeta';
 
 export default function NotFoundPage() {
@@ -8,9 +9,21 @@ export default function NotFoundPage() {
   return (
     <div className="page-container notfound-page">
       <div className="container notfound-inner">
-        <p className="notfound-code" aria-hidden="true">
-          404
-        </p>
+        <div className="notfound-code-wrap" aria-hidden="true">
+          <GlitchText
+            className="notfound-glitch"
+            speed={0.6}
+            enableShadows
+            shadowColors={['#4da3ff', '#8cc8ff']}
+            mode="slices"
+            intensity={0.3}
+            trigger="hover"
+            fontSize="clamp(90px, 16vw, 180px)"
+            fontWeight={700}
+          >
+            404
+          </GlitchText>
+        </div>
         <p className="eyebrow">SIGNAL LOST · 页面不存在</p>
         <h1>这张界面没有匹配到节点</h1>
         <p className="page-lead">

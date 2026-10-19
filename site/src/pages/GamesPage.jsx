@@ -4,6 +4,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { FEATURED_GAMES, GAMES, GAME_CATEGORIES, GAMES_PER_PAGE, UPCOMING_GAMES } from '../data/games';
 import GameCard from '../components/GameCard';
 import GamePoster from '../components/GamePoster';
+import HotGames from '../components/HotGames';
 import Icon from '../components/Icon';
 import PageHead from '../components/PageHead';
 import Pagination from '../components/Pagination';
@@ -253,6 +254,8 @@ export default function GamesPage() {
             </div>
           </section>
         ) : null}
+
+        <HotGames />
 
         <div className="gc-body">
           <div className="gc-main">

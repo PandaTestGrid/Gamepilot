@@ -4,22 +4,22 @@
    ========================================================================== */
 
 :root {
-  --bg: #070a11;
-  --bg-2: #0a0f1b;
-  --bg-3: #0d1424;
+  --bg: #0f1115;
+  --bg-2: #161920;
+  --bg-3: #1c2029;
   --surface: rgba(255, 255, 255, 0.035);
   --surface-2: rgba(255, 255, 255, 0.06);
   --surface-3: rgba(255, 255, 255, 0.09);
   --line: rgba(255, 255, 255, 0.085);
   --line-strong: rgba(255, 255, 255, 0.15);
-  --text: #eef3ff;
-  --muted: #9aa8c0;
-  --dim: #6d7b94;
+  --text: #e6e8ee;
+  --muted: #9aa3b2;
+  --dim: #6b7280;
   --brand: #4da3ff;
-  --brand-2: #38d6f5;
-  --brand-3: #8b7bff;
+  --brand-2: #8cc8ff;
+  --brand-3: #4da3ff;
   --gold: #ffd15c;
-  --ok: #52d98a;
+  --ok: #4ade80;
   --warn: #fbbf24;
   --rose: #fb7185;
   --radius: 20px;

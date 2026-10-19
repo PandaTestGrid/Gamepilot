@@ -2,11 +2,10 @@ import Compare from '../components/Compare';
 import Cta from '../components/Cta';
 import Devices from '../components/Devices';
 import Faq from '../components/Faq';
-import Features from '../components/Features';
 import GameShowcase from '../components/GameShowcase';
 import Hero from '../components/Hero';
 import Marquee from '../components/Marquee';
-import Reliability from '../components/Reliability';
+import PlayStyles from '../components/PlayStyles';
 import TechBand from '../components/TechBand';
 import Workflow from '../components/Workflow';
 import { useDownload } from '../context/DownloadContext';
@@ -21,11 +20,10 @@ export default function HomePage() {
       <Hero onDownload={onDownload} />
       <Marquee />
       <GameShowcase />
-      <Features />
+      <PlayStyles />
       <Workflow />
       <TechBand />
       <Devices />
-      <Reliability />
       <Compare />
       <Faq onDownload={onDownload} />
       <Cta onDownload={onDownload} />

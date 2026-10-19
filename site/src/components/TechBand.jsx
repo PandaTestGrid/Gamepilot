@@ -1,5 +1,6 @@
 import TechText from '../reactbits/TechText';
 import Reveal from './Reveal';
+import DecryptedText from '../reactbits/DecryptedText';
 
 export default function TechBand() {
   return (
@@ -25,7 +26,7 @@ export default function TechBand() {
             fontSize={240}
             fontWeight={750}
             letterSpacing={-0.035}
-            color="#d7e6ff"
+            color="#e6e8ee"
             accentColor="#4da3ff"
             lineStyle="dashed"
             dashLength={4}
@@ -47,7 +48,13 @@ export default function TechBand() {
         </div>
 
         <div className="tech-band-foot">
-          <span>STATE MACHINE</span>
+          <DecryptedText
+            text="STATE MACHINE"
+            animateOn="view"
+            speed={30}
+            maxIterations={10}
+            className="tech-decrypt"
+          />
           <span>FRAME RECOGNITION</span>
           <span>MULTI-DEVICE HID</span>
           <span className="tech-band-hint">

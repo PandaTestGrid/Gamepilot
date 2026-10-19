@@ -5,6 +5,7 @@ import App from './App.jsx';
 import './styles/base.css';
 import './styles/enhancements.css';
 import './styles/pages.css';
+import './styles/hot-game.css';
 import './styles/theme.css';
 
 createRoot(document.getElementById('root')).render(

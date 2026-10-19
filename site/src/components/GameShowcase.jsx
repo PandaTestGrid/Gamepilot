@@ -13,6 +13,8 @@ import { GAMES, getGame } from '../data/games';
 import GamePoster from './GamePoster';
 import Icon from './Icon';
 import Reveal from './Reveal';
+import RotatingText from '../reactbits/RotatingText';
+import ScrollVelocity from '../reactbits/ScrollVelocity';
 
 const SHOWCASE_SLUGS = [
   'abyss-echo',
@@ -131,8 +133,22 @@ export default function GameShowcase() {
               </span>
             </h2>
             <Reveal as="p" className="showcase-sub" delay={0.1}>
-              手机、模拟器、iPhone、桌面窗口 —— 同一套识别引擎，同一张状态图。
-              一次配置，随时接着玩。
+              在电脑上驱动
+              {" "}
+              <RotatingText
+                texts={['安卓手机', 'iPhone', '桌面窗口', 'Mock 设备']}
+                rotationInterval={2100}
+                staggerDuration={0.018}
+                splitBy="characters"
+                effect="slide"
+                direction="up"
+                blur={3}
+                animatePresenceMode="sync"
+                highlight
+                highlightColor="#1c2029"
+                mainClassName="showcase-rotate"
+              />
+              {" "}—— 同一套识别引擎，同一张状态图。
             </Reveal>
             <Reveal className="showcase-actions" delay={0.18}>
               <Link className="btn btn-glow" to="/games">
@@ -206,6 +222,25 @@ export default function GameShowcase() {
                 </Link>
               </Reveal>
             ))}
+          </div>
+
+          <div className="showcase-velocity" aria-hidden="true">
+            <ScrollVelocity
+              texts={[
+                '状态机 · 模板识别 · 多开同步 · 恢复边 · 变量循环 · 热重载',
+                'ANDROID · IPHONE · MACOS WINDOW · MOCK · 30 FPS'
+              ]}
+              velocity={54}
+              numCopies={3}
+              damping={42}
+              stiffness={320}
+              className="showcase-velocity-part"
+              scrollerClassName="showcase-velocity-scroller"
+              parallaxClassName="showcase-velocity-parallax"
+              fadeEdges
+              pauseOnHover
+              separator="✦"
+            />
           </div>
 
           <div className="showcase-manifesto">

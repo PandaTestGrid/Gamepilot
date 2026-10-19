@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react';
 import BlurText from '../reactbits/BlurText';
 import Magnetic from '../reactbits/Magnetic';
+import ShinyText from '../reactbits/ShinyText';
 import AppMockup from './AppMockup';
 import Icon from './Icon';
 import Stats from './Stats';
@@ -36,7 +37,15 @@ export default function Hero({ onDownload }) {
             transition={{ duration: 0.6, ease: EASE }}
           >
             <span className="ping" />
-            v0.1.0 内测 · Tauri 2 桌面端 · 全程本地
+            <ShinyText
+              text="v0.1.0 内测 · Tauri 2 桌面端 · 全程本地"
+              color="#cfe4ff"
+              shineColor="#ffffff"
+              speed={4}
+              shineWidth={30}
+              glow={0.25}
+              className="eyebrow-shiny"
+            />
           </motion.p>
 
           <h1 id="hero-title">

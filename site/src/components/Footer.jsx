@@ -31,7 +31,7 @@ export default function Footer() {
 
         <nav className="footer-col" aria-label="产品">
           <h3>产品</h3>
-          <Link to="/#features">核心能力</Link>
+          <Link to="/#play-styles">操作方式</Link>
           <Link to="/#workflow">工作流</Link>
           <Link to="/#devices">设备支持</Link>
           <Link to="/#compare">能力对比</Link>
