@@ -24,7 +24,12 @@ OCR_FILES = (
 
 
 def _venv_site_packages() -> Path | None:
-    for base in (ENGINE_ROOT / ".venv" / "Lib" / "site-packages",):
+    # Windows 的 venv 是 Lib/site-packages，POSIX 是 lib/pythonX.Y/site-packages。
+    candidates = [ENGINE_ROOT / ".venv" / "Lib" / "site-packages"]
+    posix_lib = ENGINE_ROOT / ".venv" / "lib"
+    if posix_lib.is_dir():
+        candidates.extend(sorted(posix_lib.glob("python*/site-packages")))
+    for base in candidates:
         if base.is_dir():
             return base
     return None
