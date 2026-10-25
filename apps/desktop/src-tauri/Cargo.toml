@@ -1,6 +1,6 @@
 [package]
 name = "gamepilot"
-version = "0.0.1"
+version = "0.1.0"
 description = "GamePilot 桌面壳：Tauri 2 + 引擎 sidecar 桥"
 authors = ["mini"]
 license = "MIT"
