@@ -876,17 +876,7 @@ class FlowEngine:
                             # 等命中超时就是这一步的结论：不能再走动作前延迟去点一个没命中的
                             # 目标（否则「匹配等待 100ms」实际要多等一个执行前延迟，报错也会
                             # 变成「目标当前没有命中，无法定位」，看不出是等超时）。
-                            label = str(params.get("rec") or "").strip()
-                            timeout_ms = self._resolve_match_timeout_ms(params, default_fallback=20000)
-                            if (
-                                self._handle_failure(
-                                    step_id,
-                                    params,
-                                    f"等待「{label}」超时（{timeout_ms}ms）："
-                                    f"目标当前没有命中 · {self._best_score_text(label)}",
-                                )
-                                == "fail"
-                            ):
+                            if self._fail_action_match_timeout(step_id, params) == "fail":
                                 return
                             continue
 
@@ -896,7 +886,25 @@ class FlowEngine:
                     ):
                         return
 
-                    # 3) 执行本步动作
+                    # 3) 动作前延迟期间目标可能已经丢失：执行前再按同一匹配超时等待。
+                    # 否则「命中 → 3s 执行前延迟 → 目标消失」会绕过 match_timeout，
+                    # 直接报「目标当前没有命中，无法定位」，看起来像等待设置完全没生效。
+                    target = str(params.get("rec") or "").strip()
+                    if (
+                        kind in ("click", "hold")
+                        and target
+                        and _click_target_mode(params) == "recognizer"
+                        and target not in self.detections
+                    ):
+                        match_wait = self._try_wait_action_target(step_id, kind, params, frame)
+                        if match_wait == "wait":
+                            return
+                        if match_wait == "timeout":
+                            if self._fail_action_match_timeout(step_id, params) == "fail":
+                                return
+                            continue
+
+                    # 4) 执行本步动作
                     try:
                         ok, message = self._perform_step(step_id, kind, params)
                     except ActionDeferredError:
@@ -1394,6 +1402,16 @@ class FlowEngine:
             self.blocking = None
             return "timeout"
         return "wait"
+
+    def _fail_action_match_timeout(self, step_id: str, params: dict[str, Any]) -> str:
+        label = str(params.get("rec") or "").strip()
+        timeout_ms = self._resolve_match_timeout_ms(params, default_fallback=20000)
+        return self._handle_failure(
+            step_id,
+            params,
+            f"等待「{label}」超时（{timeout_ms}ms）："
+            f"目标当前没有命中 · {self._best_score_text(label)}",
+        )
 
     def _condition_ok(self, params: dict[str, Any]) -> bool:
         groups = params.get("groups")

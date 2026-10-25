@@ -755,6 +755,41 @@ def test_pre_delay_completes_then_action_runs_once(tmp_path: Path, clock: Clock)
     assert h.controller.calls == [("click", 0.25, 0.25)]
 
 
+def test_target_lost_during_pre_delay_waits_instead_of_failing(tmp_path: Path, clock: Clock) -> None:
+    """命中后进入执行前延迟，目标在延迟中消失时必须重新等，不许直接报无法定位。"""
+    h = Harness(
+        [
+            step("s1", "manual"),
+            step(
+                "s2",
+                "click",
+                by="recognizer",
+                rec="开始",
+                settings={"general": {"matchTimeoutMs": 1_000_000, "preDelayMs": 3000}},
+            ),
+        ],
+        tmp_path,
+        hit("开始"),
+    )
+    h.tick()  # 命中 → 开始 3s 执行前延迟
+    assert h.controller.calls == []
+
+    h.hits.clear()
+    clock.advance(3.1)
+    h.tick()  # 延迟走完但目标没了：应回到匹配等待，而不是抛「无法定位」
+    assert h.engine.result == "running"
+    assert h.controller.calls == []
+    assert not any("无法定位" in str(event.get("message") or "") for event in h.engine.trace.recent_events(8))
+
+    h.hits.update(hit("开始"))
+    h.tick()  # 重新命中 → 重新进入执行前延迟
+    clock.advance(3.1)
+    h.tick()  # 延迟结束且目标仍在 → 点击
+    assert h.controller.calls == [("click", 0.25, 0.25)]
+    h.run()
+    assert h.engine.result == "success"
+
+
 def test_global_pre_and_post_action_delays_and_step_interval(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
         [
