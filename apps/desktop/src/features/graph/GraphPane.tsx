@@ -6,6 +6,7 @@ import { Component, Fragment, type ReactNode, useEffect, useRef } from 'react';
 import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { DockBar } from '@/features/graph/DockBar';
+import { FlowGlobalSettingsDrawer } from '@/features/graph/flow/FlowGlobalSettingsDrawer';
 import { FlowStepConsole } from '@/features/graph/flow/FlowStepConsole';
 import { FlowStepEditor } from '@/features/graph/flow/FlowStepEditor';
 import { flowStepTitle } from '@/features/graph/flow/flow-step-meta';
@@ -259,6 +260,7 @@ export function GraphPane(): ReactNode {
                 </div>
               </CanvasBoundary>
             </div>
+            <FlowGlobalSettingsDrawer />
           </div>
         </Panel>
         <Separator className="h-px bg-line transition-colors hover:bg-brand" title="拖动改高度" />
