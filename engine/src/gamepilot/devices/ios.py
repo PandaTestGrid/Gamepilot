@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import re
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -34,6 +32,8 @@ from .base import (
     Size,
     register,
 )
+from .ios_mux import MuxBridge
+from .ios_qt import QuickTimeCapture
 
 logger = logging.getLogger("gamepilot.devices.ios")
 
@@ -114,9 +114,76 @@ def _clear_live_session(session: TunnelSession) -> None:
             _LIVE_SESSION = None
 
 
+def _reset_tunnel_globals() -> None:
+    """清掉库里的隧道单例标记，让下一次 aopen 能重新建栈。
+
+    仅在**回收不了**的死隧道上使用（隧道是在已经关掉的事件循环里开的）。
+    """
+    module = sys.modules.get("pymobiledevice3.remote.userspace_tunnel")
+    if module is not None:
+        # 模块属性在 mypy 里没声明，用 getattr 取到模块对象再赋值可以同时满足
+        # ruff（禁止 setattr 常量名）和 mypy（禁止未知属性）。
+        with contextlib_suppress():
+            vars(module)["_active_tunnel"] = None
+        with contextlib_suppress():
+            vars(module)["USERSPACE_ACTIVE"] = False
+    with contextlib_suppress():
+        from pymobiledevice3.remote import tunnel_service
+
+        tunnel_service.USE_USERSPACE_TUNNEL = False
+
+
+def _clear_dead_stack() -> None:
+    """把死循环里留下的 PyTCP 子系统收干净，允许重新建栈。
+
+    PyTCP 的 ARP/ND worker 是绑在**创建它们的事件循环**上的 Task：循环已经关掉时，
+    这些 Task 永远不会变成 ``done()``，于是下一次 ``add_interface`` 会在
+    ``subsystem.start()`` 的 double-start 断言上直接炸。这里按接口逐个处理：
+    先在新循环里 cancel（cancel 本身不依赖旧循环调度），再清掉接口表与任务引用。
+    """
+
+    def _stop_subsystems() -> None:
+        try:
+            from pmd_pytcp import stack as pytcp_stack
+        except Exception:
+            return
+        for ifindex in list(pytcp_stack.interfaces.keys()):
+            handler = pytcp_stack.interfaces[ifindex]
+            for name in ("_arp_cache", "_nd_cache", "_arp_rx", "_arp_tx", "_ip6_nd_rx", "_ip6_nd_tx"):
+                subsystem = getattr(handler, name, None)
+                task = getattr(subsystem, "_task", None) if subsystem is not None else None
+                if task is not None and subsystem is not None:
+                    with contextlib_suppress():
+                        task.cancel()
+                    with contextlib_suppress():
+                        subsystem._task = None  # 死循环里的 Task 永远不会 done()
+
+    async def _inside_loop() -> None:
+        _stop_subsystems()
+
+    with contextlib_suppress():
+        _run_isolated(_inside_loop(), timeout=10.0)
+    _stop_subsystems()  # 兜底：循环外也能 cancel
+
+    with contextlib_suppress():
+        from pmd_pytcp import stack as pytcp_stack
+
+        for ifindex in list(pytcp_stack.interfaces.keys()):
+            with contextlib_suppress():
+                pytcp_stack.interfaces.pop(ifindex)
+        vars(pytcp_stack)["_pmd3_inited"] = False
+
+
 def _friendly_tunnel_error(exc: BaseException) -> BaseException:
     """库里那条单例异常翻成人话（最后一道兜底：前面的清理都失败时也不能直接糊英文）。"""
-    if "userspace tunnel is already active" not in str(exc):
+    text = str(exc)
+    if "ARP Cache.start() called while a worker is still running" in text or "ND Cache.start()" in text:
+        logger.warning("PyTCP 栈里还留着上一条隧道的 worker: %s", text)
+        return RuntimeError(
+            "上一条 iOS 隧道所在的 PyTCP 栈没能停干净（上一次引擎异常退出留下的）。"
+            "请重启引擎后再连接；如果仍不行，请重新插拔 iPhone。"
+        )
+    if "userspace tunnel is already active" not in text:
         return exc
     # 原文留在日志里：界面上说人话，排障时还看得到是单例冲突
     logger.warning("pymobiledevice3 用户态隧道单例冲突: %s", exc)
@@ -126,7 +193,86 @@ def _friendly_tunnel_error(exc: BaseException) -> BaseException:
     )
 
 
+def _force_release_stale_tunnel(udid: str) -> None:
+    """把同一台设备遗留的用户态隧道彻底拆掉（幂等，没残留就立刻返回）。
+
+    pymobiledevice3 是进程级单例，而且 PyTCP 的 ARP/会话 worker 必须在**创建它的
+    那个事件循环**里停掉。所以顺序是：
+    1. 先让旧 TunnelSession 自己 close（停采集、拆 DVT、关隧道、停循环）；
+    2. 若库里还挂着句柄，再用一次性隔离循环补最后一刀。
+    """
+    stale = _live_session()
+    if stale is not None and stale.udid == udid:
+        logger.warning("发现同一台设备的旧会话，先拆掉: %s", udid)
+        with contextlib_suppress():
+            stale.close()
+        _clear_live_session(stale)
+
+    handle = _active_tunnel_handle()
+    if handle is None:
+        return
+    if getattr(handle, "serial", None) not in (None, udid):
+        return
+    logger.warning("发现同一台设备的残留隧道，自动回收: %s", udid)
+
+    async def _release() -> None:
+        with contextlib_suppress():
+            await handle.aclose()
+        with contextlib_suppress():
+            temp = _active_tunnel_handle()
+            if temp is not None and temp is not handle:
+                await temp.aclose()
+
+    # PyTCP 的 worker 绑在创建它们的事件循环上，必须在**那个循环**里 stop 才会
+    # 真正 done()。所以能拿到旧循环时，优先在原循环里收。
+    owner_loop = _loop_owning_tunnel(handle)
+    if owner_loop is not None and not owner_loop.is_closed() and owner_loop.is_running():
+        with contextlib_suppress():
+            future = asyncio.run_coroutine_threadsafe(_release(), owner_loop)
+            future.result(timeout=20.0)
+
+    if _userspace_tunnel_released():
+        return
+
+    with contextlib_suppress():
+        _run_isolated(_release(), timeout=20.0)
+    if _userspace_tunnel_released():
+        return
+
+    logger.warning("残留隧道所属事件循环已关闭，清理 PyTCP 栈与库单例: %s", udid)
+    _clear_dead_stack()
+    _reset_tunnel_globals()
+    if not _userspace_tunnel_released():
+        raise RuntimeError(
+            "上一次 iOS 隧道是在已经关闭的事件循环里开的，PyTCP 的工作线程无法安全回收。"
+            "请重启引擎（或重新插拔 iPhone）后再连接。"
+        )
+
+
+def _loop_owning_tunnel(handle: Any) -> Any:
+    """找到创建这条隧道的事件循环（PyTCP worker 必须在它上面 stop）。"""
+    for session in (_live_session(),):
+        if session is not None and getattr(session, "_tunnel", None) is handle:
+            loop = getattr(session, "_loop", None)
+            if loop is not None and not loop.is_closed():
+                return loop
+    return None
+
+
+def _userspace_tunnel_released() -> bool:
+
+    """库级句柄确实没了，且 PyTCP 没有还挂着的接口。"""
+    if _active_tunnel_handle() is not None:
+        return False
+    try:
+        from pmd_pytcp import stack as pytcp_stack
+    except Exception:
+        return True
+    return len(pytcp_stack.interfaces) == 0
+
+
 def _claim_tunnel_slot(udid: str, name: str) -> None:
+
     """占额度：被别的设备占着就报「先断开哪一台」。
 
     额度空着但库里的隧道还活着（上一次没关干净）也要在这里说清楚：同一台设备的
@@ -140,6 +286,13 @@ def _claim_tunnel_slot(udid: str, name: str) -> None:
         if _userspace_tunnel_active():
             stale = _live_session()
             handover = stale is not None and stale.udid == udid
+            if not handover:
+                # 是不是**同一台设备**的残留？是就再给一次回收机会，不打断用户
+                handle = _active_tunnel_handle()
+                same_device = handle is not None and getattr(handle, "serial", None) in (None, udid)
+                if same_device:
+                    _force_release_stale_tunnel(udid)
+                    handover = True
             if not handover and not _wait_userspace_released(1.5):
                 raise RuntimeError(_stale_tunnel_message(owner[1] if owner else ""))
         _TUNNEL_SLOT = (udid, name)
@@ -269,8 +422,19 @@ def _version_tuple(text: str) -> tuple[int, ...]:
     return tuple(int(item) for item in parts[:3]) or (0,)
 
 
+def version_known(version: str) -> bool:
+    """版本号是否真的读到了（空串 = lockdown 没读到，不代表版本低）。"""
+    return bool(re.search(r"\d", version or ""))
+
+
 def version_supported(version: str) -> bool:
-    """是否达到最低版本要求（iOS ≥ 17.4）。"""
+    """是否达到最低版本要求（iOS ≥ 17.4）。
+
+    版本未知时返回 True：读不到版本通常是上一轮隧道残留/设备忙，
+    把它误报成"只支持 17.4+"会把真正的连接原因盖掉。
+    """
+    if not version_known(version):
+        return True
     return _version_tuple(version) >= IOS_MIN_VERSION
 
 
@@ -301,44 +465,65 @@ class IosDevice:
         return version_supported(self.version)
 
 
+async def _read_lockdown_info(udid: str, connection: str) -> dict[str, Any]:
+    """在同一个事件循环里创建、读取并关闭 lockdown。"""
+    from pymobiledevice3.lockdown import create_using_usbmux
+
+    lockdownd = await asyncio.wait_for(
+        create_using_usbmux(serial=udid, autopair=False, connection_type=connection),
+        timeout=3,
+    )
+    try:
+        return dict(lockdownd.short_info or {})
+    finally:
+        with contextlib.suppress(Exception):
+            await lockdownd.close()
+
+
+def normalize_udid(value: str) -> str:
+    """统一 UDID 写法：iOS 的 UDID 是 8-16 位十六进制，界面上常带横线。
+
+    ``00008150000E348811C0401C`` 与 ``00008150-000E348811C0401C`` 是同一台设备，
+    比较时必须归一化，否则会出现"设备明明在列表里却说找不到"。
+    """
+    return (value or "").replace("-", "").strip().lower()
+
+
 def list_devices() -> list[IosDevice]:
-    """`pymobiledevice3 usbmux list` → 设备列表（解析 JSON）。"""
-    binary = _pymobiledevice3_cli()
-    if binary is None:
-        return []
-    try:
-        result = subprocess.run(
-            [binary, "usbmux", "list"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("pymobiledevice3 usbmux list 失败: %s", exc)
-        return []
-    text = result.stdout.strip()
-    if not text:
-        return []
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        logger.warning("usbmux list 输出不是 JSON: %s", text[:200])
-        return []
+    """通过 pymobiledevice3 的进程内 usbmux 客户端读取设备；不需要 iTunes。
+
+    冻结包和开发态走同一条路径。曾经调用 `python -m pymobiledevice3 ...`，
+    冻结后 `-m` 会被 PyInstaller 丢掉，CLI 打印帮助后还返回 0，将真实错误
+    伪装成“没有 iPhone”。这里直接调用库，异常交给设备发现的 iOS 分支展示。
+    """
+    from pymobiledevice3 import usbmux
+
+    payload = _run_isolated(asyncio.wait_for(usbmux.list_devices(), timeout=15), timeout=20.0)
     devices: list[IosDevice] = []
-    for item in payload if isinstance(payload, list) else []:
-        if not isinstance(item, dict):
-            continue
-        udid = str(item.get("Identifier") or item.get("UniqueDeviceID") or "")
+    for item in payload:
+        udid = str(item.serial or "")
         if not udid:
             continue
+        connection = str(item.connection_type or "USB")
+        try:
+            # 创建和关闭必须在同一个事件循环里：跨线程 close 会让
+            # Windows proactor 的 socket transport 失去归属，GC 时报未关闭。
+            info = _run_isolated(
+                _read_lockdown_info(udid, connection),
+                timeout=10.0,
+            )
+        except Exception as exc:
+            # 未信任/离线设备仍然应出现在列表里，后续连接会给出准确修复建议。
+            logger.debug("读取 iOS %s 基础信息失败: %s", udid, exc)
+            info = {}
+        finally:
+            pass
         devices.append(
             IosDevice(
                 udid=udid,
-                name=str(item.get("DeviceName") or item.get("ProductType") or "iOS 设备"),
-                version=str(item.get("ProductVersion") or ""),
-                connection=str(item.get("ConnectionType") or "USB"),
+                name=str(info.get("DeviceName") or info.get("ProductType") or "iOS 设备"),
+                version=str(info.get("ProductVersion") or ""),
+                connection=connection,
             )
         )
     return devices
@@ -363,13 +548,56 @@ def screen_size(udid: str) -> Size | None:
     if cached is not None:
         return cached
     try:
-        size = asyncio.run(_read_screen_size(udid))
+        size: Size | None = _run_isolated(_read_screen_size(udid), timeout=20.0)
     except Exception as exc:  # 任何失败都只是"拿不到"：发现流程不能因为它挂掉
         logger.debug("读取 iOS 屏幕尺寸失败 %s: %s", udid, exc)
         return None
     if size is not None:
         _SCREEN_SIZE_CACHE[udid] = size
     return size
+
+
+def _run_isolated(coro: Any, timeout: float = 20.0) -> Any:
+    """在自己的线程里跑完一个协程，并彻底关掉事件循环。
+
+    为什么不用 ``asyncio.run``：Windows 的 Proactor 事件循环收尾时偶尔会留下
+    未关闭的 socket transport，GC 才报 ``unclosed transport``。发现阶段会反复调用
+    这里，泄漏会一路带进 pytest 和长时间运行。独立线程 + 显式 close 能收干净。
+    """
+    box: dict[str, Any] = {}
+    finished = threading.Event()
+
+    def runner() -> None:
+        # 显式用 ProactorEventLoop：Windows 上 new_event_loop() 的默认策略
+        # 在关闭后偶尔会把 socket transport 留到 GC，触发 unclosed transport。
+        loop = asyncio.ProactorEventLoop() if hasattr(asyncio, "ProactorEventLoop") else asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            box["value"] = loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
+        except BaseException as exc:  # 原样交回调用方
+            box["error"] = exc
+        finally:
+            # 关键：transport.close() 是异步的。协程返回后立刻 close() 循环，
+            # 关闭回调没机会跑，Windows proactor 就会在 GC 时报
+            # "unclosed transport"。先让循环空转一小会儿把它排干。
+            with contextlib.suppress(Exception):
+                loop.run_until_complete(asyncio.sleep(0.25))
+            with contextlib.suppress(Exception):
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            with contextlib.suppress(Exception):
+                loop.run_until_complete(loop.shutdown_default_executor())
+            asyncio.set_event_loop(None)
+            with contextlib.suppress(Exception):
+                loop.close()
+            finished.set()
+
+    thread = threading.Thread(target=runner, name="ios-async-once", daemon=True)
+    thread.start()
+    if not finished.wait(timeout + 5.0):
+        raise TimeoutError("iOS 异步任务超时")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 async def _read_screen_size(udid: str) -> Size | None:
@@ -391,10 +619,23 @@ async def _read_screen_size(udid: str) -> Size | None:
     return None
 
 
+def _collect_transports() -> None:
+    """回收 asyncio proactor 遗留的 socket transport（只回收已关闭的）。"""
+    import gc
+
+    gc.collect()
+
+
 def discover() -> list[DeviceInfo]:
     """给 device.list 用的发现函数（只返回达标的设备）。"""
     out: list[DeviceInfo] = []
-    for device in list_devices():
+    try:
+        devices = list_devices()  # 内部已经是隔离事件循环，收尾干净
+    finally:
+        # Windows 的 proactor 收尾偶尔会留下未关闭的 socket transport；
+        # 发现会被反复调用，这里主动回收一次，别把泄漏带进长时间运行。
+        _collect_transports()
+    for device in devices:
         out.append(
             DeviceInfo(
                 id=f"{KIND_IOS}:{device.udid}",
@@ -422,6 +663,9 @@ class TunnelSession:
         self.size: Size = (0, 0)
         self.fps_actual = 0.0
         self.frames = 0
+        #: 最近两帧的**到达**时间（采集线程写入，不是 screenshot() 的调用时间）
+        self._last_arrival_at = 0.0
+        self._prev_arrival_at = 0.0
         self.error: str | None = None
         self._loop: Any = None
         self._thread: threading.Thread | None = None
@@ -556,8 +800,14 @@ class TunnelSession:
         window_count = 0
         while not self._stop.is_set():
             begin = time.time()
+            shot = self._shot  # 采集线程可能正被 close()/_reopen_dvt() 拆掉
+            if shot is None:
+                if self._stop.is_set():
+                    break
+                await asyncio.sleep(0.2)
+                continue
             try:
-                raw = await self._shot.get_screenshot()
+                raw = await shot.get_screenshot()
                 image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
                 if image is not None:
                     with self._lock:
@@ -566,7 +816,9 @@ class TunnelSession:
                         self._encoded = bytes(raw)
                         self._frame_id += 1
                         self.size = (int(image.shape[1]), int(image.shape[0]))
-                    self.last_frame_at = time.time()
+                    self.last_frame_at = now_arrival = time.time()
+                    self._prev_arrival_at = self._last_arrival_at
+                    self._last_arrival_at = now_arrival
                     self.failures = 0
                     self._event.set()
                     self.frames += 1
@@ -754,7 +1006,11 @@ class HidBridge:
         except Exception as exc:  # 按键不可用不该挡住触摸
             logger.warning("Indigo（按键）不可用: %s", exc)
             self._indigo = None
-        logger.info("iOS HID 就绪: %s（触摸 ✓%s）", self.udid, " 按键 ✓" if self._indigo else "")
+        logger.info(
+            "iOS HID 已连接: %s（触摸服务 ✓%s）；触摸是否落地取决于系统 auth gate，见 touch_gate_note",
+            self.udid,
+            " 按键 ✓" if self._indigo else "",
+        )
 
     @property
     def alive(self) -> bool:
@@ -849,15 +1105,36 @@ class HidBridge:
 
 
 def contextlib_suppress() -> Any:
+    """吞掉清理阶段的任何异常（含 CancelledError）。
+
+    这里不能用 ``suppress(Exception)``：协程被 cancel 时抛的是 ``BaseException``
+    的 ``CancelledError``，一旦漏出去，后面的 ``aclose()`` 就不会执行 —— 表现就是
+    "额度已还、库里的隧道还挂着"，下一次连接直接失败。
+    """
     import contextlib
 
-    return contextlib.suppress(Exception)
+    return contextlib.suppress(BaseException)
 
 
 async def asyncio_sleep(seconds: float) -> None:
     import asyncio
 
     await asyncio.sleep(seconds)
+
+
+#: iOS 27 之前 `startmediastream` 会被设备拒绝（错误码 9021）。这条流同时是
+#: Universal HID 触摸的 auth gate：流开不起来时，触摸报告会被 backboardd 静默丢弃。
+def touch_gate_message(version: str = "") -> str:
+    """触摸不生效时的说明（带上实际系统版本，别写死某个版本号）。"""
+    ver = f"iOS {version} " if version else "当前系统"
+    return (
+        f"触摸未生效：{ver}拒绝了 startmediastream（9021），"
+        "而 Universal HID 触摸必须由这条流打开 auth gate；"
+        "Indigo 硬件按键（Home/音量/锁屏）与截图不受影响"
+    )
+
+
+TOUCH_GATE_BLOCKED = touch_gate_message()
 
 
 @register
@@ -868,7 +1145,14 @@ class IosController(Controller):
     kind = "ios"
     description = "iPhone / iPad（DVT 采集 + pymobiledevice3 HID，仅 17.4+）"
 
-    def __init__(self, device_id: str = "", udid: str = "", fps: float = 8.0, **options: Any) -> None:
+    def __init__(
+        self,
+        device_id: str = "",
+        udid: str = "",
+        fps: float = 8.0,
+        quicktime: bool = False,
+        **options: Any,
+    ) -> None:
         super().__init__(device_id or f"{KIND_IOS}:{udid}", **options)
         self.udid = udid
         self._display_name = ""
@@ -889,6 +1173,17 @@ class IosController(Controller):
         self._oriented_size: Size | None = None
         self._frame_seq = 0
         self._fps = fps
+        # QuickTime（设备直推 H.264）优先；失败自动降到 DVT 截图，并把原因留给界面
+        #: 是否尝试 QuickTime 码流（默认关：依赖私有 USB 配置，失败会拉低 usbmux）
+        self._qt_enabled = bool(quicktime)
+        self._qt: QuickTimeCapture | None = None
+        #: QT 配置下把 0xFE 接口包装成本地 usbmuxd，保住控制通道
+        self._mux: MuxBridge | None = None
+        self._qt_degraded: str = ""
+        self._qt_attempted = False
+        #: 触摸可能"发送成功但不生效"时的说明（界面要能看见，不能假装正常）
+        self.touch_gate_note: str = ""
+        self._version: str = ""
 
     @property
     def display_name(self) -> str:
@@ -897,20 +1192,36 @@ class IosController(Controller):
     # ---------- 连接 ----------
 
     def connect(self) -> None:
-        device = next((item for item in list_devices() if item.udid == self.udid), None)
+        self._recover_from_quicktime_config()
+        # 从 QT 配置切回来后，usbmux 需要一点时间重新挂上设备
+        device = None
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            wanted = normalize_udid(self.udid)
+            device = next((item for item in list_devices() if normalize_udid(item.udid) == wanted), None)
+            if device is not None:
+                break
+            time.sleep(0.5)
         if device is None:
             raise RuntimeError(
                 f"找不到 iOS 设备: {self.udid}（`pymobiledevice3 usbmux list` 里没有）。"
                 "常见原因：线只能充电、手机锁着、没点『信任此电脑』，"
                 "或者设备被切到了没有数据通路的 USB 配置（跑 `python -m gamepilot.devices.ios_usb` 看一眼）"
             )
-        if not device.supported():
+        if version_known(device.version) and not device.supported():
             raise RuntimeError(
                 f"这台设备是 iOS {device.version}，只支持 {IOS_MIN_VERSION[0]}.{IOS_MIN_VERSION[1]}+"
                 "（低版本没有用户态 RSD 隧道）"
             )
+        if not version_known(device.version):
+            # 读不到版本不等于版本低：继续连，真不行会在建隧道那一步给出准确原因。
+            logger.warning("没有读到 iOS 版本（%s），按支持版本继续尝试连接", self.udid)
+        self._version = device.version or ""
         self._display_name = f"{device.name} (iOS {device.version})" if device.version else device.name
 
+        # 同一台设备上一次没收到尾（引擎里还挂着隧道）：先接管并拆掉，
+        # 再占额度。顺序反了会在"没有 live session 的残留"上直接报错。
+        _force_release_stale_tunnel(self.udid)
         # 先占进程级额度，再碰隧道：第二台在这里就被挡下（不会走到隧道那一步）
         _claim_tunnel_slot(self.udid, self._display_name)
         try:
@@ -929,6 +1240,11 @@ class IosController(Controller):
             bridge.attach(session)
             bridge.connect()
             self._hid = bridge
+            # 注意：这里**不要**去探测 startmediastream。那条调用会占用设备的媒体会话，
+            # 反而把触控/截图这条本来能用的链路搅乱。
+            # 所以只在显式开启时才试；默认保住截图 + 触控这条能用链路。
+            if self._qt_enabled:
+                self._try_quicktime()
             try:  # 首次必须拿到方向（横屏下第一次触摸就要对），这里同步等一小会儿
                 self._orientation = self._session.run(self._aquery_orientation(), timeout=6)
                 logger.info("iOS 界面方向: %s", ORIENTATION_NAMES.get(self._orientation, self._orientation))
@@ -999,7 +1315,7 @@ class IosController(Controller):
             logger.debug("USB 配置测绘失败: %s", exc)
             return
         if not devices:
-            self.usb_report = "USB 层没看到 Apple 设备"
+            self.usb_report = "libusb0 未枚举到设备（不影响截图/触控）"
             return
         if len(devices) > 1:
             # 测绘结果里没有 udid，插了多台 Apple 设备时分不清哪条是这台：
@@ -1029,7 +1345,177 @@ class IosController(Controller):
 
     @property
     def link_fps(self) -> float:
-        return float(self._session.fps_actual) if self._session is not None else 0.0
+        qt = self._qt
+        if qt is not None and qt.alive:
+            return float(qt.fps)
+        session = self._session
+        if session is None:
+            return 0.0
+        if session.fps_actual:
+            return float(session.fps_actual)
+        # 采样窗口（2s）还没满时，用最近两帧的**到达间隔**估计。
+        # 不能用 screenshot() 的耗时：它是取缓存帧，会算出几百 fps 的假数字。
+        last = session._last_arrival_at
+        prev = session._prev_arrival_at
+        if last > 0 and prev > 0 and last > prev:
+            return round(min(60.0, 1.0 / (last - prev)), 1)
+        return 0.0
+
+    def _recover_from_quicktime_config(self) -> None:
+        """设备若还停在 QT 隐藏配置（上一次没收到尾），先把它放回普通配置。
+
+        不这么做的话，`usbmux` 里根本看不到设备，连接会以"找不到设备"失败 ——
+        而真正的原因是上一次 QuickTime 会话没清理干净。
+        """
+        try:
+            from . import ios_qt
+
+            device = ios_qt.open_apple_device(self.udid)
+            if device is None:
+                return
+            found = ios_qt.find_quicktime_interface(device)
+            if found is None:
+                return
+            logger.warning("设备仍在 QuickTime 配置（%s），先恢复普通配置", found[0])
+            ios_qt.request_quicktime_config(False)
+            # 句柄必须释放：否则 libusb0 还占着设备，Apple 服务重挂不上，
+            # 紧接着的 list_devices() 就会看到空列表。
+            with contextlib_suppress():
+                import usb.util
+
+                usb.util.dispose_resources(device)
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                probe = ios_qt.open_apple_device(self.udid)
+                if probe is not None and ios_qt.find_quicktime_interface(probe) is None:
+                    with contextlib_suppress():
+                        import usb.util
+
+                        usb.util.dispose_resources(probe)
+                    logger.info("已恢复普通配置")
+                    return
+                time.sleep(0.5)
+            logger.warning("恢复普通配置超时，设备可能仍需重新插拔")
+        except Exception as exc:
+            logger.debug("检查 QT 配置状态失败: %s", exc)
+
+    # ---------- QuickTime（设备直推 H.264） ----------
+
+    def _try_quicktime(self) -> None:
+        """尝试切到 QuickTime 码流；失败就留在 DVT 截图，并把原因写进 link_note。
+
+        为什么值得试：DVT 是「每次让手机合成一整张 PNG」（实测单帧 562ms / 5.4MB，
+        约 1.3fps）；QuickTime 是设备持续推 H.264，主机只解码。
+
+        关键约束：解锁 QT 配置会让设备**重新枚举并离开 usbmux**，所以这条路上
+        原来的 RSD 隧道和 HID 一定失效。要么整条重建，要么彻底回滚到截图通道，
+        不能留下半死状态。
+        """
+        if self._qt_attempted and self._qt is not None:
+            return
+        self._qt_attempted = True
+        previous_note = self.link_note
+        session = self._session
+        size = session.size if session is not None else (0, 0)
+
+        # 顺序很关键：
+        #   1) QuickTimeCapture.start() 负责解锁 QT 配置并 claim 0x2A；
+        #   2) 配置切过去之后 Apple 的 usbmux 就不管这台设备了，
+        #      立刻用 0xFE 自建 usbmuxd，把 RSD/HID 接回来。
+        # 反过来先起 mux 桥会因为还没进 QT 配置而拿不到 0xFE 接口。
+        capture = QuickTimeCapture(
+            self.udid,
+            display_size=(float(size[0] or 1206), float(size[1] or 2622)),
+        )
+        try:
+            capture.start(timeout=20.0)
+        except Exception as exc:
+            with contextlib_suppress():
+                capture.close()
+            self._qt_degraded = str(exc)
+            self.channel = "dvt"
+            logger.warning("QuickTime 不可用，继续用 DVT 截图: %s", exc)
+            self._restore_after_quicktime(previous_note, exc)
+            return
+
+        self._qt = capture
+        # QT 配置已经生效，现在接管 0xFE 保住控制
+        try:
+            self._mux = MuxBridge(self.udid)
+            self._mux.start(timeout=15.0)
+            logger.info("mux 桥就绪: %s", self._mux.address)
+        except Exception as exc:
+            logger.warning("mux 桥启动失败（控制会断）: %s", exc)
+            with contextlib_suppress():
+                if self._mux is not None:
+                    self._mux.stop()
+            self._mux = None
+        rebuilt = self._restore_after_quicktime(previous_note, None)
+        self.channel = "quicktime"
+        self.link_note = f"QuickTime 码流（{capture.width}x{capture.height}）"
+        if self.usb_report:
+            self.link_note += f" · {self.usb_report}"
+        if not rebuilt:
+            logger.warning("QuickTime 已出画面，但触控通道没能重建")
+        logger.info("iOS 已切到 QuickTime 采集: %sx%s", capture.width, capture.height)
+
+    def _restore_after_quicktime(self, previous_note: str, error: Exception | None) -> bool:
+        """QT 切换后重建 RSD 隧道 + HID；返回触控是否可用。"""
+        old_hid = self._hid
+        self._hid = None
+        if old_hid is not None:
+            with contextlib_suppress():
+                old_hid.close()
+        old_session = self._session
+        self._session = None
+        if old_session is not None:
+            with contextlib_suppress():
+                old_session.close()
+
+        session: TunnelSession | None = None
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            probe = TunnelSession(self.udid, fps=self._fps, name=self._display_name)
+            try:
+                probe.start(timeout=20.0)
+            except Exception as exc:
+                with contextlib_suppress():
+                    probe.close()
+                logger.debug("QuickTime 切换后重建隧道未成功: %s", exc)
+                time.sleep(2.0)
+                continue
+            session = probe
+            break
+
+        if session is None:
+            self.channel = "dvt"
+            self.link_note = f"截图通道中断（QuickTime 切换后无法恢复）：{error or '隧道未就绪'}"
+            self._qt_degraded = str(error or "QuickTime 切换后隧道无法恢复")
+            logger.error("QuickTime 切换后无法恢复隧道，请重新插拔设备")
+            return False
+
+        self._session = session
+        self._oriented_size = None
+        bridge = HidBridge(self.udid)
+        bridge.attach(session)
+        ok = True
+        try:
+            bridge.connect()
+        except Exception as exc:
+            ok = False
+            logger.warning("QuickTime 切换后 HID 重建失败: %s", exc)
+        self._hid = bridge if ok else None
+
+        if error is None:
+            self.link_note = previous_note
+        else:
+            self.channel = "dvt"
+            self.link_note = (
+                f"截图兜底（{session.size[0]}x{session.size[1]}，约 1fps / 单帧约 0.6s）：{error}"
+            )
+            if not ok:
+                self.link_note += " · 触控通道未恢复，请重新插拔"
+        return ok
 
     def _stalled(self, seconds: float = 6.0) -> bool:
         session = self._session
@@ -1060,8 +1546,26 @@ class IosController(Controller):
             raise
         self._hid = bridge
         self.link_note = f"DVT 采集（{session.size[0]}x{session.size[1]}，已重连）"
+        self._qt_attempted = False
+        self._try_quicktime()
 
     def screenshot(self) -> np.ndarray:
+        qt = self._qt
+        if qt is not None and qt.alive:
+            frame = qt.latest_frame(timeout=0.05)
+            if frame is not None:
+                presented = self._present_frame(frame)
+                self._last_frame = presented
+                self._frame_seq = qt.frame_id
+                return presented
+            # 码流停了：立刻降回截图，别让界面停在最后一帧上装死
+            logger.warning("QuickTime 画面中断，降级到 DVT 截图")
+            self._qt_degraded = "QuickTime 画面中断"
+            qt.close()
+            self._qt = None
+            self.channel = "dvt"
+            if self._session is not None:
+                self.link_note = f"截图兜底（已从码流降级）：{self._qt_degraded}"
         if self._session is None:
             raise RuntimeError("iOS 采集未启动")
         size = self._session.size
@@ -1092,6 +1596,8 @@ class IosController(Controller):
             {
                 "channel": self.channel,
                 "linkNote": self.link_note,
+                "qtDegraded": self._qt_degraded or None,
+                "touchGate": self.touch_gate_note or None,
                 "linkFps": round(self.link_fps, 1),
                 "udid": self.udid,
                 "usb": self.usb_report,
@@ -1199,6 +1705,14 @@ class IosController(Controller):
         self._with_hid("text", lambda hid: hid.text(value))
 
     def close(self) -> None:
+        if self._mux is not None:
+            with contextlib_suppress():
+                self._mux.stop()
+            self._mux = None
+        if self._qt is not None:
+            with contextlib_suppress():
+                self._qt.close()
+            self._qt = None
         if self._hid is not None:
             self._hid.close()
             self._hid = None
@@ -1207,3 +1721,6 @@ class IosController(Controller):
             self._session = None
         _release_tunnel_slot(self.udid)
         super().close()
+
+
+

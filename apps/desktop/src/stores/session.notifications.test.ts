@@ -53,6 +53,16 @@ describe('截图失败与恢复通知', () => {
     useEventStore.setState({ events: {}, seq: 0 });
   });
 
+  it('设备列表变化通知请求刷新，扫描中也保留这次变化', () => {
+    const scan = vi.spyOn(useDeviceStore.getState(), 'scan').mockResolvedValue();
+    try {
+      notify('device.list.changed', { provider: 'android' });
+      expect(scan).toHaveBeenCalledWith(true);
+    } finally {
+      scan.mockRestore();
+    }
+  });
+
   it('相同的失败只提示一次，画面恢复后重新显示已连接并更新通道说明', () => {
     const failure = {
       deviceId: DEVICE.id,

@@ -25,6 +25,7 @@ import { ScreenPane } from '@/features/device/ScreenPane';
 import { useDeviceStore } from '@/stores/device.store';
 import { useGraphStore } from '@/stores/graph.store';
 import { useSessionStore, type FrameState } from '@/stores/session.store';
+import { useOcrStore } from '@/stores/ocr.store';
 import { useUiStore } from '@/stores/ui.store';
 import type { RecordDraft } from '@/types';
 
@@ -84,7 +85,11 @@ const TILES: readonly TileSpec[] = [
   { id: DEVICE_B, name: NAME_B, image: IMAGE_B },
 ];
 
-function frameAt(index: number, resolution: Size): FrameState {
+function frameAt(
+  index: number,
+  resolution: Size,
+  detections: FrameState['detections'] = [],
+): FrameState {
   return {
     imageUrl: 'data:image/jpeg;base64,AAAA',
     index,
@@ -94,9 +99,18 @@ function frameAt(index: number, resolution: Size): FrameState {
     tick: 0,
     fps: 12,
     captureMs: 1,
-    detections: [],
+    detections,
     ts: 0,
   };
+}
+
+/** 一条命中的识别结果（AI 识别器常见形态：标签 + 归一化框 + 分数）。 */
+function hit(
+  label: string,
+  rect: readonly [number, number, number, number],
+  state: 'confirmed' | 'pending' = 'confirmed',
+): FrameState['detections'][number] {
+  return { label, rect, score: 0.9, source: 'yolo', state };
 }
 
 /** 按真实签名打桩（`session.store.touch`）：断言里才不用碰 any。 */
@@ -222,7 +236,7 @@ async function swipe(target: HTMLElement, from: Point, to: Point): Promise<void>
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
-  fireEvent.pointerMove(target, { clientX: to.x, clientY: to.y, pointerId: 1 });
+  fireEvent.pointerMove(target, { clientX: to.x, clientY: to.y, pointerId: 1, buttons: 1 });
   fireEvent.pointerUp(target, { clientX: to.x, clientY: to.y, pointerId: 1 });
 }
 
@@ -246,6 +260,66 @@ describe('多开网格：瓦片结构按契约（testid / img alt）', () => {
       expect(screen.getByTestId(`grid-screen-${tile.id}`)).toBeInTheDocument();
       expect(screen.getByAltText(`${tile.name} 画面`)).toBeInTheDocument();
     }
+  });
+});
+
+describe('多开网格：识别框（AI/模板/颜色）必须画在各自瓦片上', () => {
+  beforeEach(resetStores);
+
+  /**
+   * 用户报的「多开时 AI 识别没有框」：引擎的 frame 里一直带着 detections，
+   * 但网格分支只画了图 / OCR / 选区，漏了识别框。这里用非空 detections 守着。
+   */
+  it('AI 命中：瓦片上画出框和标签，坐标按该瓦片的画面区换算（不是整个容器）', () => {
+    renderGrid();
+
+    act(() => {
+      useSessionStore.setState({
+        frames: {
+          [DEVICE_A]: frameAt(9, IMAGE_A, [hit('ai_1', [0.25, 0.25, 0.5, 0.5])]),
+          [DEVICE_B]: frameAt(9, IMAGE_B, []),
+        },
+      });
+    });
+
+    const tile = within(screenOf(DEVICE_A));
+    const box = tile.getByTestId('detection-ai_1-0');
+    // A 的画面区是 left=20 的 360x640：归一化 (0.25,0.25,0.5,0.5) → (110,160,180,320)
+    expect(box.style.left).toBe('110px');
+    expect(box.style.top).toBe('160px');
+    expect(box.style.width).toBe('180px');
+    expect(box.style.height).toBe('320px');
+    expect(box.textContent).toContain('ai_1');
+    expect(box.className).toContain('border-confirmed');
+
+    // 没有命中的那台不能凭空多出框
+    expect(within(screenOf(DEVICE_B)).queryByTestId(/^detection-/)).toBeNull();
+  });
+
+  it('多个同分候选：每个候选都画出来，并显示「共 N 个」', () => {
+    renderGrid();
+
+    act(() => {
+      useSessionStore.setState({
+        frames: {
+          [DEVICE_A]: frameAt(11, IMAGE_A, [
+            {
+              ...hit('ai_2', [0.1, 0.1, 0.2, 0.2]),
+              ambiguous: true,
+              candidates: [
+                [0.1, 0.1, 0.2, 0.2],
+                [0.5, 0.5, 0.2, 0.2],
+              ],
+            },
+          ]),
+          [DEVICE_B]: frameAt(11, IMAGE_B, []),
+        },
+      });
+    });
+
+    const tile = within(screenOf(DEVICE_A));
+    expect(tile.getByTestId('detection-ai_2-0').textContent).toContain('共 2 个');
+    expect(tile.getByTestId('detection-ai_2-1').textContent).toContain('#2');
   });
 });
 
@@ -453,6 +527,35 @@ describe('多开网格：录制模式（框选 / 点选）', () => {
     expect(rect?.[2]).toBeCloseTo(120 / 720, 6);
     expect(rect?.[3]).toBeCloseTo(120 / 1280, 6);
   });
+
+  it('OCR 扫描结果显示在对应瓦片，并可点击文字框产生 OCR 草稿', () => {
+    renderGrid();
+
+    act(() => {
+      useOcrStore.setState({
+        scanVisual: { id: 1, deviceId: DEVICE_B, rect: null },
+        pickBoxes: {
+          [DEVICE_B]: [{ text: '进入背包', score: 0.98, rect: [0.15, 0.25, 0.22, 0.08] }],
+        },
+      });
+    });
+
+    const tile = screen.getByTestId(`grid-tile-${DEVICE_B}`);
+    expect(within(tile).getByTestId('ocr-scan-effect')).toBeInTheDocument();
+    expect(within(tile).getByTestId('ocr-pick-box')).toHaveTextContent('进入背包');
+    expect(screen.queryAllByTestId('ocr-pick-box')).toHaveLength(1);
+
+    act(() => {
+      fireEvent.click(within(tile).getByTestId('ocr-pick-box'));
+    });
+
+    expect(useUiStore.getState().draft).toMatchObject({
+      deviceId: DEVICE_B,
+      kind: 'ocr',
+      text: '进入背包',
+      rect: [0.15, 0.25, 0.22, 0.08],
+    });
+  });
 });
 
 describe('多开网格：控制关了只切设备', () => {
@@ -655,5 +758,6 @@ function resetStores(): void {
     // 录制要落盘进当前工作流
     currentWorkflow: WORKFLOW_PROJECT,
   });
+  useOcrStore.setState({ scanVisual: null, pickBoxes: {} });
   useUiStore.setState({ draft: null, recordMode: 'off', controlMode: true, recordActionMode: false });
 }

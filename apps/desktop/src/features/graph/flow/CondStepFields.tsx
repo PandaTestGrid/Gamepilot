@@ -301,10 +301,7 @@ export function CondStepFields({
       </button>
 
       {!compact ? (
-        <StepSearchScope
-          value={params.search}
-          onChange={(search) => onPatch({ ...params, search: search === 'auto' ? undefined : search })}
-        />
+        <StepSearchScope value={params.search} onChange={(search) => onPatch({ ...params, search })} />
       ) : null}
     </div>
   );

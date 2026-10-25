@@ -188,7 +188,6 @@ export function ModulePalette({
         )}
       </div>
       <div className="border-t border-line px-2 py-1 text-[10px] leading-snug text-faint">
-        拖到空白处 = 未接入 · 拖到模块的出口/入口/身上 = 自动接线 · 双击 = 追加到链尾
       </div>
     </aside>
   );

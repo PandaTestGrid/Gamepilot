@@ -255,28 +255,6 @@ export function RecordOverlay({
         />
       </Field>
 
-      <Field
-        label={
-          <div className="flex items-center justify-between gap-2">
-            <span className="shrink-0">模板默认搜索范围</span>
-            <span className="shrink-0 text-[10px] text-faint">
-              {draft.search === 'full' ? '整帧搜索' : '只在框选区'}
-            </span>
-          </div>
-        }
-      >
-        <div className="space-y-1" data-testid="draft-search-control">
-          <Check
-            checked={draft.search === 'full'}
-            onChange={(checked) => updateDraft({ search: checked ? 'full' : 'region' })}
-            label="全屏"
-          />
-          <p className="text-[10px] leading-snug text-faint">
-            步骤里可覆盖。框选贴紧目标，别带会滚动的背景；目标被边缘裁掉也认不到。
-          </p>
-        </div>
-      </Field>
-
       {!flowMode && (
         <>
           <Field label="注册为">

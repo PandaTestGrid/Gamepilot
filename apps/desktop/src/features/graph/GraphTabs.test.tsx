@@ -252,7 +252,7 @@ describe('状态图标签条', () => {
 
 describe('图栏与标签的接线（GraphPane）', () => {
   beforeEach(() => {
-    useUiStore.setState({ openWorkflowTabs: [] });
+    useUiStore.setState({ openWorkflowTabs: [], startPageOpen: false });
     useSessionStore.setState({
       currentWorkflow: null,
       switchingWorkflow: false,
@@ -266,7 +266,21 @@ describe('图栏与标签的接线（GraphPane）', () => {
     });
   });
 
-  it('当前是哪张图，它就在标签条里（右栏点一下 = 中间开一个，不用每个调用点各写一遍）', () => {
+  it('启动时停在开始页（最近 / 历史），不替用户自动开图', () => {
+    useUiStore.setState({ openWorkflowTabs: [], startPageOpen: true });
+    useSessionStore.setState({
+      currentWorkflow: workflowInfo(A),
+      switchWorkflow: vi.fn(() => Promise.resolve()),
+    });
+    render(<GraphPane />);
+
+    expect(useUiStore.getState().openWorkflowTabs).toEqual([]);
+    expect(screen.getByText('打开工作区')).toBeInTheDocument();
+    expect(screen.getByText('历史')).toBeInTheDocument();
+  });
+
+  it('已经开着标签时，当前那张一定在标签条里', () => {
+    useUiStore.setState({ openWorkflowTabs: [A] });
     useSessionStore.setState({
       currentWorkflow: workflowInfo(A),
       switchWorkflow: vi.fn(() => Promise.resolve()),
@@ -275,22 +289,44 @@ describe('图栏与标签的接线（GraphPane）', () => {
 
     expect(useUiStore.getState().openWorkflowTabs).toEqual([A]);
     expect(screen.getByText('斗技')).toBeInTheDocument(); // 标签条在面板头的位置
-    expect(screen.queryByText('没有打开的工作流')).not.toBeInTheDocument();
+    expect(screen.queryByText('打开工作区')).not.toBeInTheDocument();
   });
 
-  it('全部关掉 → 画布盖一层空态；点「重新打开」还能把它开回来（不是死路）', async () => {
-    const user = userEvent.setup();
+  it('全局配置贴在画布右侧，不挤进控制台、也不占详情那一行', () => {
+    useUiStore.setState({ openWorkflowTabs: [A], flowGlobalSettingsOpen: true, flowDockOpen: true });
     useSessionStore.setState({
       currentWorkflow: workflowInfo(A),
       switchWorkflow: vi.fn(() => Promise.resolve()),
     });
     render(<GraphPane />);
 
-    await user.click(screen.getByTitle('关闭这个标签（只是关掉界面，文件还在）'));
-    expect(screen.getByText('没有打开的工作流')).toBeInTheDocument();
+    const drawer = screen.getByTestId('flow-global-settings-drawer');
+    // 在画布这一格里（和画布并排），不在详情/控制台那一格
+    expect(drawer.closest('[data-panel]')?.id).toBe('canvas');
+    expect(drawer.contains(screen.getByTestId('dock-tab-console'))).toBe(false);
+    expect(screen.getByTestId('flow-canvas-wrap').closest('[data-panel]')?.id).toBe('canvas');
+  });
 
-    await user.click(screen.getByText('重新打开「斗技」'));
+  it('全部关掉 → 画布盖一层开始页；点「最近」里那条还能把它开回来（不是死路）', async () => {
+    const user = userEvent.setup();
+    useUiStore.setState({ openWorkflowTabs: [A] });
+    useSessionStore.setState({
+      currentWorkflow: workflowInfo(A),
+      // 真实现会在 switchWorkflow 里 openWorkflowTab；这里只验"点一下能开回来"这条链路
+      switchWorkflow: vi.fn((root: string) => {
+        useUiStore.getState().openWorkflowTab(root);
+        return Promise.resolve();
+      }),
+    });
+    render(<GraphPane />);
+
+    await user.click(screen.getByTitle('关闭这个标签（只是关掉界面，文件还在）'));
+    expect(screen.getByText('打开工作区')).toBeInTheDocument();
+    expect(screen.getByText('最近')).toBeInTheDocument();
+    expect(screen.getByText('历史')).toBeInTheDocument();
+
+    await user.click(screen.getByText('斗技'));
     expect(useUiStore.getState().openWorkflowTabs).toEqual([A]);
-    expect(screen.queryByText('没有打开的工作流')).not.toBeInTheDocument();
+    expect(screen.queryByText('打开工作区')).not.toBeInTheDocument();
   });
 });

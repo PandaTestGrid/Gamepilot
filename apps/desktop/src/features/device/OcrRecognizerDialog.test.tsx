@@ -76,6 +76,12 @@ describe('OcrRecognizerDialog 文字识别', () => {
     expect(useUiStore.getState().draft?.ocrMode).toBe('equals');
   });
 
+  it('没有搜索范围选项：只在步骤里配', () => {
+    renderOcr();
+    expect(screen.queryByTestId('draft-search-control')).toBeNull();
+    expect(screen.queryByText('搜索范围')).toBeNull();
+  });
+
   it('取消：草稿直接丢掉，不落盘', () => {
     renderOcr();
 

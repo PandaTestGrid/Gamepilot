@@ -40,7 +40,16 @@ describe('顶部设备标签：哪台在执行哪份工作流', () => {
     });
   });
 
-  it('正在执行的设备标工作流名；空闲设备仍显示 fps', () => {
+  it('顶栏从设备标签开始，不重复渲染原生标题栏里的品牌标', () => {
+    render(<DeviceTabs />);
+    expect(screen.queryByRole('img', { name: 'GamePilot' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('device-tab-dev-a')).toBeInTheDocument();
+    expect(screen.getByTestId('device-tab-dev-a').parentElement?.firstElementChild).toBe(
+      screen.getByTestId('device-tab-dev-a'),
+    );
+  });
+
+  it('正在执行的设备标工作流名；空闲设备不再标 fps（帧率只在底栏一处）', () => {
     render(<DeviceTabs />);
 
     expect(screen.getByText('MuMu').className).toContain('truncate');
@@ -48,7 +57,7 @@ describe('顶部设备标签：哪台在执行哪份工作流', () => {
     expect(screen.getByTestId('device-tab-dev-a').querySelector('button')?.getAttribute('title')).toContain(
       'MuMu · 运行中 · 斗技',
     );
-    expect(screen.getByTestId('device-tab-dev-b')).toHaveTextContent('fps');
+    expect(screen.getByTestId('device-tab-dev-b')).not.toHaveTextContent('fps');
     expect(screen.getByTestId('device-tab-dev-b')).not.toHaveTextContent('斗技');
     expect(screen.getByText('2 台已连接 · 1 台在执行')).toBeInTheDocument();
     expect(screen.queryByText(/台运行中/)).not.toBeInTheDocument();

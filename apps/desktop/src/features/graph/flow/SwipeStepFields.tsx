@@ -1,29 +1,23 @@
 /**
  * 滑动模块：
  *   - 顶部选择框分「点对点滑动」（两点直线 + 常用方向）和「连续滑动」（录制轨迹）；
- *   - 时长两种方式共用；「按住」只属于连续方式（点对点录制只记起止点与时长）；
- *   - 详细配置（非 compact）里可覆盖拟人贝塞尔轨迹；画布卡片只显示跟随/开关摘要。
+ *   - 时长与末端按住共用；触点由运行时在并行滑动时自动分配；
+ *   - 拟人（贝塞尔轨迹、缓动、末端摆动）只在「全局设置 → 拟人」配，节点里不出现。
  */
 import { Move, Route } from 'lucide-react';
 import { type ReactNode } from 'react';
 
 import { clampUnitCoord, formatCoordPair } from '@/features/graph/flow/flow-coord-utils';
-import { resolveFlowGlobalDefaults } from '@/features/graph/flow/FlowGlobalSettingsDrawer';
 import {
   matchingSwipePresetId,
-  parseSwipeEasing,
   parseSwipeHoldMs,
   resolveSwipeMode,
-  swipeBezierMode,
   swipeTrackPointCount,
-  SWIPE_EASING_OPTIONS,
   SWIPE_MODE_OPTIONS,
   SWIPE_PRESETS,
   type SwipeMode,
 } from '@/features/graph/flow/flow-swipe-params';
 import { cn } from '@/lib/utils';
-import { useDeviceStore } from '@/stores/device.store';
-import { rawFor, SCRIPT_SCOPE, useGraphStore } from '@/stores/graph.store';
 import { useUiStore } from '@/stores/ui.store';
 
 function CoordPair({
@@ -103,16 +97,11 @@ export function SwipeStepFields({
   const beginRecordSwipe = useUiStore((state) => state.beginRecordSwipeForFlowStep);
   const recordingSwipe = useUiStore((state) => state.pendingFlowSwipeStepId === stepId);
   const recordingMode = useUiStore((state) => state.pendingFlowSwipeMode);
-  const activeId = useDeviceStore((state) => state.activeId);
-  const rawDefaults = useGraphStore((state) => rawFor(state, activeId || SCRIPT_SCOPE)?.defaults);
-  const globalCfg = resolveFlowGlobalDefaults(rawDefaults);
-  const bezierMode = swipeBezierMode(params);
   const inputClass = cn(
     'nodrag nopan rounded-sm border border-line bg-canvas px-1 text-fg focus:border-brand focus:outline-none',
     compact ? 'h-5 text-[11px]' : 'h-5 text-badge',
   );
   const activePreset = matchingSwipePresetId(params);
-  const bezierOn = bezierMode === 'on' || (bezierMode === 'global' && globalCfg.swipe_bezier);
   const trackPoints = swipeTrackPointCount(params);
   const holdMs = parseSwipeHoldMs(params);
   const mode = resolveSwipeMode(params);
@@ -142,8 +131,8 @@ export function SwipeStepFields({
           onChange={(event) => {
             const next = event.target.value as SwipeMode;
             if (next === 'point') {
-              // 切回点对点：留着旧轨迹/末端按住的话，回放还是会按 path 走弧线或拖住不放
-              onPatch({ swipe_mode: 'point', path: undefined, hold_ms: undefined });
+              // 切回点对点只清轨迹；末端按住和手指两种方式共用。
+              onPatch({ swipe_mode: 'point', path: undefined });
             } else {
               onPatch({ swipe_mode: 'track' });
             }
@@ -219,8 +208,8 @@ export function SwipeStepFields({
         <span className="text-faint">ms</span>
       </label>
 
-      {mode === 'track' ? (
-        <>
+
+      <>
           <label className={cn('flex items-center gap-1 text-dim', compact && 'text-[11px]')}>
             按住
             <input
@@ -248,8 +237,7 @@ export function SwipeStepFields({
               秒会自动填进来。
             </div>
           )}
-        </>
-      ) : null}
+      </>
 
       {mode === 'track' ? (
         trackPoints >= 3 ? (
@@ -306,190 +294,16 @@ export function SwipeStepFields({
       {compact ? null : (
         <div className="text-[10px] text-faint">
           {mode === 'point'
-            ? '点对点 = 拖一下就松手，只记起止点与时长，按直线（可开拟人贝塞尔）回放。'
+            ? '点对点 = 拖一下就松手，只记起止点与时长；曲率/缓动按「全局设置 → 拟人」回放。'
             : '连续 = 拖出轨迹；按住 Shift 拖 = 起止直线；到终点先停 0.2 秒再松手会记「按住」。'}
         </div>
       )}
 
-      {mode === 'track' ? (
-        compact ? null : (
-          <div className="text-[10px] text-faint" data-testid="swipe-bezier-track-note">
-            连续滑动按录制的轨迹回放；有轨迹后不再套拟人贝塞尔。
-          </div>
-        )
-      ) : compact ? (
-        <div className="text-[10px] text-faint" data-testid="swipe-bezier-compact">
-          拟人轨迹：
-          {bezierMode === 'off'
-            ? '关（直线匀速）'
-            : bezierMode === 'on'
-              ? '开'
-              : globalCfg.swipe_bezier
-                ? '跟随全局（开）'
-                : '跟随全局（关）'}
+      {mode === 'track' && !compact ? (
+        <div className="text-[10px] text-faint" data-testid="swipe-bezier-track-note">
+          连续滑动按录制的轨迹回放；有轨迹后不再套全局的贝塞尔曲线。
         </div>
-      ) : (
-        <div className="space-y-1.5 border-t border-line/70 pt-1.5" data-testid="swipe-bezier-fields">
-          <div className="text-faint">拟人贝塞尔轨迹</div>
-          <label className="flex items-center gap-1 text-dim">
-            模式
-            <select
-              data-testid="swipe-bezier-mode"
-              value={bezierMode}
-              onChange={(event) => {
-                const next = event.target.value;
-                if (next === 'on') {
-                  onPatch({ bezier: true });
-                } else if (next === 'off') {
-                  onPatch({ bezier: false });
-                } else {
-                  onPatch({ bezier: undefined });
-                }
-              }}
-              className={cn(inputClass, 'w-full')}
-            >
-              <option value="global">跟随全局（{globalCfg.swipe_bezier ? '开' : '关'}）</option>
-              <option value="on">强制拟人轨迹</option>
-              <option value="off">强制直线匀速</option>
-            </select>
-          </label>
-          {bezierOn ? (
-            <>
-              <label className="flex items-center gap-1 text-dim">
-                阶数
-                <input
-                  type="number"
-                  min={1}
-                  max={8}
-                  step={1}
-                  data-testid="swipe-bezier-order"
-                  placeholder={`跟随全局 (${globalCfg.swipe_bezier_order})`}
-                  value={optionalNumber(params.bezier_order)}
-                  onChange={(event) => {
-                    const raw = event.target.value.trim();
-                    onPatch({
-                      bezier_order:
-                        raw === '' ? undefined : Math.min(8, Math.max(1, Math.round(Number(raw) || 1))),
-                    });
-                  }}
-                  className={cn(inputClass, 'w-20')}
-                />
-              </label>
-              <label className="flex items-center gap-1 text-dim">
-                波动
-                <input
-                  type="number"
-                  min={0}
-                  max={80}
-                  step={1}
-                  data-testid="swipe-bezier-deviation"
-                  placeholder={`跟随全局 (${globalCfg.swipe_bezier_deviation_px})`}
-                  value={optionalNumber(params.bezier_deviation_px)}
-                  onChange={(event) => {
-                    const raw = event.target.value.trim();
-                    onPatch({
-                      bezier_deviation_px:
-                        raw === '' ? undefined : Math.min(80, Math.max(0, Math.round(Number(raw) || 0))),
-                    });
-                  }}
-                  className={cn(inputClass, 'w-20')}
-                />
-                <span className="text-faint">px</span>
-              </label>
-              <label className="flex items-center gap-1 text-dim">
-                位置
-                <input
-                  type="number"
-                  min={0.05}
-                  max={0.95}
-                  step={0.05}
-                  data-testid="swipe-bezier-bias"
-                  placeholder={`跟随全局 (${globalCfg.swipe_bezier_bias})`}
-                  value={optionalNumber(params.bezier_bias)}
-                  onChange={(event) => {
-                    const raw = event.target.value.trim();
-                    onPatch({
-                      bezier_bias:
-                        raw === ''
-                          ? undefined
-                          : Math.min(0.95, Math.max(0.05, Number(Number(raw).toFixed(2)))),
-                    });
-                  }}
-                  className={cn(inputClass, 'w-20')}
-                />
-              </label>
-              <label className="flex items-center gap-1 text-dim">
-                速度
-                <select
-                  data-testid="swipe-bezier-easing"
-                  value={
-                    typeof params.bezier_easing === 'string' || typeof params.bezier_easing === 'number'
-                      ? parseSwipeEasing(params.bezier_easing)
-                      : ''
-                  }
-                  onChange={(event) => {
-                    const next = event.target.value;
-                    onPatch({ bezier_easing: next === '' ? undefined : next });
-                  }}
-                  className={cn(inputClass, 'min-w-0 flex-1')}
-                >
-                  <option value="">
-                    跟随全局（{SWIPE_EASING_OPTIONS.find((item) => item.id === globalCfg.swipe_easing)?.label}
-                    ）
-                  </option>
-                  {SWIPE_EASING_OPTIONS.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex items-center gap-1 text-dim">
-                摆动
-                <input
-                  type="number"
-                  min={0}
-                  max={8}
-                  step={1}
-                  data-testid="swipe-bezier-wobble"
-                  placeholder={`跟随全局 (${globalCfg.swipe_end_wobble})`}
-                  value={optionalNumber(params.bezier_end_wobble)}
-                  onChange={(event) => {
-                    const raw = event.target.value.trim();
-                    onPatch({
-                      bezier_end_wobble:
-                        raw === '' ? undefined : Math.min(8, Math.max(0, Math.round(Number(raw) || 0))),
-                    });
-                  }}
-                  className={cn(inputClass, 'w-20')}
-                />
-                <span className="text-faint">次</span>
-              </label>
-              <label className="flex items-center gap-1 text-dim">
-                摆幅
-                <input
-                  type="number"
-                  min={0}
-                  max={80}
-                  step={1}
-                  data-testid="swipe-bezier-wobble-px"
-                  placeholder={`跟随全局 (${globalCfg.swipe_end_wobble_px})`}
-                  value={optionalNumber(params.bezier_end_wobble_px)}
-                  onChange={(event) => {
-                    const raw = event.target.value.trim();
-                    onPatch({
-                      bezier_end_wobble_px:
-                        raw === '' ? undefined : Math.min(80, Math.max(0, Math.round(Number(raw) || 0))),
-                    });
-                  }}
-                  className={cn(inputClass, 'w-20')}
-                />
-                <span className="text-faint">px</span>
-              </label>
-            </>
-          ) : null}
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }

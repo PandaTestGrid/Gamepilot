@@ -34,6 +34,7 @@ Windows 侧同一套接口，换成 `EnumWindows` / `PrintWindow`+`BitBlt` / `Se
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -136,6 +137,7 @@ class MacWindow:
             "width": round(self.width),
             "height": round(self.height),
             "uri": f"Mac:///?window={self.handle}",
+            "deviceId": f"{KIND_MACOS}:{self.handle}",
         }
 
 
@@ -212,6 +214,26 @@ def discover() -> list[DeviceInfo]:
             error=None,
         )
     ]
+
+
+def window_list_payload(include_own: bool = False) -> dict[str, Any]:
+    """`window.list` 的 macOS 分支（界面直接拿 `uri`/`deviceId` 连接）。"""
+    if not available():
+        return {
+            "platform": "darwin" if sys.platform == "darwin" else sys.platform,
+            "allowed": False,
+            "note": "macOS 窗口自动化只在 macOS 上可用",
+            "windows": [],
+        }
+    allowed = screen_capture_allowed()
+    windows = list_windows(include_own=include_own)
+    note = f"{len(windows)} 个可选窗口" if allowed else "缺少「屏幕录制」权限：能连上，但抓到的画面是空白"
+    return {
+        "platform": "darwin",
+        "allowed": allowed,
+        "note": note,
+        "windows": [item.to_dict() for item in windows],
+    }
 
 
 @register

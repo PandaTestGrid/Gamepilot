@@ -25,6 +25,29 @@ def step(step_id: str, kind: str, **params: Any) -> dict[str, Any]:
     return {"id": step_id, "type": kind, "params": params}
 
 
+@pytest.mark.parametrize("by", ["recognizer", "coord", "region"])
+@pytest.mark.parametrize("kind", ["click", "hold"])
+def test_click_target_mode_accepts_only_english_enum(kind: str, by: str) -> None:
+    raw = flow(step("trigger", "manual"), step("action", kind, by=by))
+    kept = validate_flow(raw, set())["steps"]
+    assert kept[1]["params"]["by"] == by
+
+
+@pytest.mark.parametrize("by", ["识别器", "坐标", "随机范围", "unknown", "", None, 1, True])
+@pytest.mark.parametrize("kind", ["click", "hold"])
+@pytest.mark.parametrize("strict", [False, True])
+def test_explicit_invalid_target_mode_is_rejected_even_with_inferable_fields(kind: str, by: Any, strict: bool) -> None:
+    raw = flow(step("trigger", "manual"), step("action", kind, by=by, rec="按钮", rect=[0, 0, 0.2, 0.2]))
+    with pytest.raises(ValueError, match="点击定位方式 by 必须是"):
+        validate_flow(raw, {"按钮"}, strict=strict)
+
+
+def test_click_target_mode_can_be_omitted() -> None:
+    raw = flow(step("trigger", "manual"), step("action", "click", rec="按钮"))
+    kept = validate_flow(raw, {"按钮"})["steps"]
+    assert "by" not in kept[1]["params"]
+
+
 def test_accepts_a_normal_chain() -> None:
     raw = flow(
         step("s1", "schedule", at="06:00"),
@@ -301,3 +324,46 @@ def test_end_step_is_a_known_kind_and_anywhere_in_the_chain() -> None:
     )
     kept = validate_flow(data, labels={"主城"})["steps"]
     assert [item["id"] for item in kept] == ["s1", "s2", "s3", "s4", "s5"]
+
+
+def test_human_params_are_stripped_from_steps() -> None:
+    """拟人参数只属于全局设置：老 graph.json 里节点上的残留保存时清掉。"""
+    flow = validate_flow(
+        {
+            "steps": [
+                {"id": "s1", "type": "manual", "params": {}},
+                {
+                    "id": "s2",
+                    "type": "click",
+                    "params": {
+                        "by": "coord",
+                        "x": 0.5,
+                        "y": 0.5,
+                        "click_jitter_px": 9,
+                        "tap_duration_ms": 90,
+                        "click_micro_px": 4,
+                    },
+                },
+                {
+                    "id": "s3",
+                    "type": "swipe",
+                    "params": {
+                        "x": 0.5,
+                        "y": 0.8,
+                        "to_x": 0.5,
+                        "to_y": 0.2,
+                        "duration_ms": 300,
+                        "bezier": False,
+                        "bezier_order": 5,
+                        "bezier_easing": "linear",
+                    },
+                },
+            ]
+        },
+        set(),
+    )
+    click = flow["steps"][1]["params"]
+    assert click == {"by": "coord", "x": 0.5, "y": 0.5}
+    swipe = flow["steps"][2]["params"]
+    assert "bezier" not in swipe and "bezier_order" not in swipe and "bezier_easing" not in swipe
+    assert swipe["duration_ms"] == 300

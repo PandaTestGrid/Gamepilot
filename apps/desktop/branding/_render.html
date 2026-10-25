@@ -1,0 +1,56 @@
+<!doctype html><html><head><meta charset="utf-8"/></head><body><script>
+const ASSETS = {"installer/header.bmp":{"w":150,"h":57,"svg":"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"150\" height=\"57\"><rect width=\"150\" height=\"57\" fill=\"#171b1a\"/><g transform=\"translate(12 14) scale(0.0283203125)\"><rect width=\"1024\" height=\"1024\" rx=\"96\" fill=\"#171b1a\"/>
+  <rect x=\"170\" y=\"120\" width=\"684\" height=\"784\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"38\"/>
+  <path d=\"M694 344 A250 250 0 1 0 710 620 H548\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"68\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>
+  <path d=\"M335 562 C422 466 520 382 631 302 M631 302 H713 V384\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"52\" stroke-linecap=\"butt\" stroke-linejoin=\"miter\"/></g><text x=\"48\" y=\"30\" font-family=\"Georgia, serif\" font-size=\"19\" fill=\"#171b1a\">GamePilot</text><text x=\"49\" y=\"48\" font-family=\"Consolas, monospace\" font-size=\"5\" letter-spacing=\"0.7\" fill=\"#6f7a71\">FIELDNOTES / AUTOMATION</text></svg>"},"installer/sidebar.bmp":{"w":164,"h":314,"svg":"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"164\" height=\"314\"><rect width=\"164\" height=\"314\" fill=\"#171b1a\"/><g transform=\"translate(22 22) scale(0.064453125)\"><rect width=\"1024\" height=\"1024\" rx=\"96\" fill=\"#171b1a\"/>
+  <rect x=\"170\" y=\"120\" width=\"684\" height=\"784\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"38\"/>
+  <path d=\"M694 344 A250 250 0 1 0 710 620 H548\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"68\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>
+  <path d=\"M335 562 C422 466 520 382 631 302 M631 302 H713 V384\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"52\" stroke-linecap=\"butt\" stroke-linejoin=\"miter\"/></g><text x=\"22\" y=\"96\" font-family=\"Georgia, serif\" font-size=\"18\" fill=\"#c0cbaa\">GamePilot</text><text x=\"22\" y=\"119\" font-family=\"Consolas, monospace\" font-size=\"7\" letter-spacing=\"0.4\" fill=\"#c0cbaa\">FIELDNOTES / AUTOMATION</text><text x=\"22\" y=\"167\" font-family=\"Segoe UI, sans-serif\" font-size=\"10\" fill=\"#6f7a71\">投屏 · 识别 · 录制</text><text x=\"22\" y=\"185\" font-family=\"Segoe UI, sans-serif\" font-size=\"10\" fill=\"#6f7a71\">状态机 / 流程编排</text><text x=\"22\" y=\"203\" font-family=\"Segoe UI, sans-serif\" font-size=\"10\" fill=\"#6f7a71\">框一下就能跑</text><text x=\"22\" y=\"292\" font-family=\"Segoe UI, sans-serif\" font-size=\"10\" fill=\"#4b554e\">v0.0.1</text></svg>"},"installer/wix-banner.bmp":{"w":493,"h":58,"svg":"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"493\" height=\"58\"><rect width=\"493\" height=\"58\" fill=\"#171b1a\"/><g transform=\"translate(14 14) scale(0.029296875)\"><rect width=\"1024\" height=\"1024\" rx=\"96\" fill=\"#171b1a\"/>
+  <rect x=\"170\" y=\"120\" width=\"684\" height=\"784\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"38\"/>
+  <path d=\"M694 344 A250 250 0 1 0 710 620 H548\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"68\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>
+  <path d=\"M335 562 C422 466 520 382 631 302 M631 302 H713 V384\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"52\" stroke-linecap=\"butt\" stroke-linejoin=\"miter\"/></g><text x=\"50\" y=\"30\" font-family=\"Georgia, serif\" font-size=\"18\" fill=\"#171b1a\">GamePilot</text><text x=\"50\" y=\"47\" font-family=\"Consolas, monospace\" font-size=\"6\" letter-spacing=\"0.8\" fill=\"#6f7a71\">FIELDNOTES / AUTOMATION</text></svg>"},"installer/wix-dialog.bmp":{"w":493,"h":312,"svg":"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"493\" height=\"312\"><rect width=\"493\" height=\"312\" fill=\"#171b1a\"/><g transform=\"translate(202 55) scale(0.0869140625)\"><rect width=\"1024\" height=\"1024\" rx=\"96\" fill=\"#171b1a\"/>
+  <rect x=\"170\" y=\"120\" width=\"684\" height=\"784\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"38\"/>
+  <path d=\"M694 344 A250 250 0 1 0 710 620 H548\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"68\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>
+  <path d=\"M335 562 C422 466 520 382 631 302 M631 302 H713 V384\" fill=\"none\" stroke=\"#c0cbaa\" stroke-width=\"52\" stroke-linecap=\"butt\" stroke-linejoin=\"miter\"/></g><text x=\"246\" y=\"168\" text-anchor=\"middle\" font-family=\"Georgia, serif\" font-size=\"26\" fill=\"#171b1a\">GamePilot</text><text x=\"246\" y=\"190\" text-anchor=\"middle\" font-family=\"Consolas, monospace\" font-size=\"8\" letter-spacing=\"0.9\" fill=\"#6f7a71\">FIELDNOTES / AUTOMATION</text></svg>"}};
+const svgUrl = (s) => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(s);
+
+function toBmp(bytes, w, h) {
+  const rowSize = ((w * 3 + 3) >> 2) << 2;
+  const pixelSize = rowSize * h;
+  const buf = new Uint8Array(54 + pixelSize);
+  const dv = new DataView(buf.buffer);
+  buf[0] = 0x42; buf[1] = 0x4d;                       // BM
+  dv.setUint32(2, 54 + pixelSize, true);
+  dv.setUint32(10, 54, true);
+  dv.setUint32(14, 40, true);                          // BITMAPINFOHEADER
+  dv.setInt32(18, w, true); dv.setInt32(22, h, true);
+  dv.setUint16(26, 1, true); dv.setUint16(28, 24, true);
+  dv.setUint32(34, pixelSize, true);
+  dv.setInt32(38, 2835, true); dv.setInt32(42, 2835, true);
+  for (let y = 0; y < h; y++) {
+    const src = (h - 1 - y) * w * 4;                   // bottom-up
+    const dst = 54 + y * rowSize;
+    for (let x = 0; x < w; x++) {
+      buf[dst + x * 3 + 0] = bytes[src + x * 4 + 2];   // B
+      buf[dst + x * 3 + 1] = bytes[src + x * 4 + 1];   // G
+      buf[dst + x * 3 + 2] = bytes[src + x * 4 + 0];   // R
+    }
+  }
+  let s = ''; for (const b of buf) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
+async function render(svg, w, h, png) {
+  const img = new Image();
+  img.src = svgUrl(svg);
+  await img.decode();
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  return png ? c.toDataURL('image/png').split(',')[1] : toBmp(data, w, h);
+}
+window.__render = render;
+window.__assets = ASSETS;
+</script></body></html>

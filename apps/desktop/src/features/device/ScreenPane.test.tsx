@@ -187,12 +187,12 @@ async function swipe(viewport: HTMLElement, from: Point, to: Point): Promise<voi
   fireEvent.pointerMove(viewport, {
     clientX: (from.x + to.x) / 2,
     clientY: (from.y + to.y) / 2,
-    pointerId: 1,
+    pointerId: 1, buttons: 1,
   });
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
-  fireEvent.pointerMove(viewport, { clientX: to.x, clientY: to.y, pointerId: 1 });
+  fireEvent.pointerMove(viewport, { clientX: to.x, clientY: to.y, pointerId: 1, buttons: 1 });
   fireEvent.pointerUp(viewport, { clientX: to.x, clientY: to.y, pointerId: 1 });
 }
 
@@ -262,12 +262,12 @@ describe('画面栏控制手势的反馈', () => {
     useUiStore.setState({ pendingFlowSwipeStepId: 'sw1', pendingFlowSwipeMode: 'track' });
 
     fireEvent.pointerDown(viewport, { clientX: 110, clientY: 500, pointerId: 1, button: 0 });
-    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1 });
+    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1, buttons: 1 });
     // move 有节流（约 60fps）：两次 move 之间要隔一点时间，否则第二段直接被吞掉
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    fireEvent.pointerMove(viewport, { clientX: 240, clientY: 440, pointerId: 1 });
+    fireEvent.pointerMove(viewport, { clientX: 240, clientY: 440, pointerId: 1, buttons: 1 });
 
     // 引导条同时报数：拖的过程中就能看出"已经成线了"（否则用户不知道该继续拖还是能松手）
     expect(screen.getByTestId('swipe-record-progress')).toHaveTextContent('正在记轨迹：3 点');
@@ -334,7 +334,7 @@ describe('画面栏控制手势的反馈', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    fireEvent.pointerMove(viewport, { clientX: start.x + 1, clientY: start.y + 1, pointerId: 1 });
+    fireEvent.pointerMove(viewport, { clientX: start.x + 1, clientY: start.y + 1, pointerId: 1, buttons: 1 });
     fireEvent.pointerUp(viewport, { clientX: start.x + 1, clientY: start.y + 1, pointerId: 1 });
 
     expect(screen.getAllByTestId('touch-tap')).toHaveLength(1);
@@ -357,6 +357,29 @@ describe('画面栏控制手势的反馈', () => {
     await waitFor(() =>
       expect(recordStep).toHaveBeenLastCalledWith(DEVICE, { type: 'click', x: 0.25, y: 0.5 }),
     );
+  });
+
+  it('主键已经松开（pointerup 丢了）后的 pointermove 不再往设备发 move（否则兼容模式会把鼠标吸到游戏窗口）', () => {
+    const { viewport, touch } = renderScreen();
+
+    fireEvent.pointerDown(viewport, { clientX: 110, clientY: 320, pointerId: 1, button: 0 });
+    // 兼容模式抢焦点时 pointerup 可能丢到别的窗口：之后的 hover 是 buttons=0
+    fireEvent.pointerMove(viewport, { clientX: 160, clientY: 340, pointerId: 1, buttons: 0 });
+
+    expect(touch.mock.calls.map((call) => call[1])).toEqual(['down']);
+  });
+
+  it('录制模式下的 pointermove 绝不发控制（否则框选时会把鼠标吸走、录不了）', () => {
+    const { viewport, touch } = renderScreen();
+    act(() => {
+      useUiStore.setState({ recordMode: 'marquee' });
+    });
+
+    // 上一笔残留的 down（模拟控制手势没收到 up）后再进录制
+    fireEvent.pointerDown(viewport, { clientX: 110, clientY: 320, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1, buttons: 1 });
+
+    expect(touch).not.toHaveBeenCalled();
   });
 });
 
@@ -533,8 +556,10 @@ describe('画面左下角浮层：帧信息 + 运行态合成一条（曾经两�
     expect(overlay).toHaveTextContent('帧 #9');
     expect(overlay).toHaveTextContent('node=main');
     expect(overlay).toHaveTextContent('pending→battle');
-    // 同一段文字里出现两次 fps 就是又叠了一层
-    expect(overlay.textContent?.match(/fps/g)).toHaveLength(1);
+    // 同一段文字里出现两次 node= / 帧 # 就是又叠了一层（fps 已经只在底栏显示，浮层里没有）
+    expect(overlay.textContent?.match(/node=/g)).toHaveLength(1);
+    expect(overlay.textContent?.match(/帧 #/g)).toHaveLength(1);
+    expect(overlay.textContent).not.toContain('fps');
   });
 });
 
@@ -752,8 +777,8 @@ describe('录制滑动的两种方式', () => {
   /** 沿一条弯线拖：起点 → 拐一下 → 终点。 */
   function dragCurve(viewport: HTMLElement): void {
     fireEvent.pointerDown(viewport, { clientX: 110, clientY: 500, pointerId: 1, button: 0 });
-    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1 });
-    fireEvent.pointerMove(viewport, { clientX: 240, clientY: 440, pointerId: 1 });
+    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1, buttons: 1 });
+    fireEvent.pointerMove(viewport, { clientX: 240, clientY: 440, pointerId: 1, buttons: 1 });
     fireEvent.pointerUp(viewport, { clientX: 240, clientY: 400, pointerId: 1 });
   }
 
@@ -784,7 +809,7 @@ describe('录制滑动的两种方式', () => {
       fireEvent.pointerMove(viewport, {
         clientX: center.x + Math.cos(angle) * 60,
         clientY: center.y + Math.sin(angle) * 60,
-        pointerId: 1,
+        pointerId: 1, buttons: 1,
       });
       // 节流（约 60fps）：每次 move 之间隔开一点，否则只有第一段被采样
       await act(async () => {
@@ -811,12 +836,12 @@ describe('录制滑动的两种方式', () => {
   it('连续录制 + Shift：屏幕上画直线，写进步骤的 path 也是共线三点', async () => {
     const viewport = startRecording('track');
     fireEvent.pointerDown(viewport, { clientX: 110, clientY: 500, pointerId: 1, button: 0, shiftKey: true });
-    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1, shiftKey: true });
+    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1, buttons: 1, shiftKey: true });
     // move 有节流（约 60fps）：两次 move 之间要隔一点时间，否则第二段直接被吞掉
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    fireEvent.pointerMove(viewport, { clientX: 240, clientY: 420, pointerId: 1, shiftKey: true });
+    fireEvent.pointerMove(viewport, { clientX: 240, clientY: 420, pointerId: 1, buttons: 1, shiftKey: true });
 
     // 按住 Shift 时屏幕上的线 = 会写进步骤的线：起止直线，不画手指的弯线
     expect(screen.queryByTestId('touch-swipe-path')).toBeNull();
@@ -843,12 +868,12 @@ describe('录制滑动的两种方式', () => {
   it('单次录制：屏幕上画的是起止直线，手指拖出的弯线不会被画成轨迹', async () => {
     const viewport = startRecording('single');
     fireEvent.pointerDown(viewport, { clientX: 110, clientY: 500, pointerId: 1, button: 0 });
-    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1 });
+    fireEvent.pointerMove(viewport, { clientX: 180, clientY: 500, pointerId: 1, buttons: 1 });
     // move 有节流（约 60fps）：两次 move 之间要隔一点时间，否则第二段直接被吞掉
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    fireEvent.pointerMove(viewport, { clientX: 240, clientY: 440, pointerId: 1 });
+    fireEvent.pointerMove(viewport, { clientX: 240, clientY: 440, pointerId: 1, buttons: 1 });
 
     // 屏幕上的线 = 会写进步骤的线：点对点只写起止点，所以这里必须是直线
     expect(screen.queryByTestId('touch-swipe-path')).toBeNull();

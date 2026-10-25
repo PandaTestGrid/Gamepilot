@@ -40,6 +40,8 @@ interface Metric {
  * "现在在哪 / 跑没跑" 都必须看得见。每枚都 `shrink-0 whitespace-nowrap`：
  * 宁可少显示一枚，也不许把文字折行或压成竖排。
  */
+const FAST_CHANNELS = new Set(['scrcpy', 'quicktime']);
+
 export function StatusBar(): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
@@ -61,8 +63,8 @@ export function StatusBar(): ReactNode {
     { key: 'vote', value: showRunning ? '2/2' : '-', hideBelow: '@max-[520px]:hidden' },
     {
       key: 'link',
-      value: link ? `${link.channel}${link.channel === 'scrcpy' ? '' : '（慢）'}` : '-',
-      bad: Boolean(link && link.channel !== 'scrcpy'),
+      value: link ? `${link.channel}${FAST_CHANNELS.has(link.channel) ? '' : '（慢）'}` : '-',
+      bad: Boolean(link && !FAST_CHANNELS.has(link.channel)),
       hideBelow: '@max-[450px]:hidden',
     },
     {

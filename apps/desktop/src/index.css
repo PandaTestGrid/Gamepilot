@@ -156,6 +156,15 @@
   }
 }
 
+@keyframes startup-progress {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(290%);
+  }
+}
+
 @keyframes touch-ping {
   from {
     transform: translate(-50%, -50%) scale(0.45);

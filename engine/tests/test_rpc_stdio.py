@@ -29,6 +29,7 @@ def _spawn() -> subprocess.Popen[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         bufsize=1,
         env={
             **os.environ,

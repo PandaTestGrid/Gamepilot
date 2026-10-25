@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from '@/App';
 import { useDeviceStore } from '@/stores/device.store';
+import { useEngineStore } from '@/stores/engine.store';
 import { useSessionStore } from '@/stores/session.store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve({})) }));
@@ -27,6 +28,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 function resetStores(): void {
+  useEngineStore.setState({ status: 'ready', info: 'engine test', notifications: [], missingMethods: [] });
   useSessionStore.setState({
     ready: {},
     frames: {},

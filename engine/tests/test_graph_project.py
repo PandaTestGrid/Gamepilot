@@ -67,6 +67,53 @@ def _graph_json(project_dir: Path) -> dict[str, Any]:
     return payload
 
 
+@pytest.mark.parametrize("device_params", [{}, {"deviceId": ""}, {"deviceId": "offline-device"}])
+def test_yolo_detail_reads_saved_examples_without_connected_device(
+    tmp_path: Path, device_params: dict[str, Any]
+) -> None:
+    import cv2
+    import numpy as np
+
+    server, out = _server(tmp_path)
+    templates = tmp_path / "templates"
+    templates.mkdir(exist_ok=True)
+    image_path = templates / "挑战_ai0.png"
+    assert cv2.imwrite(str(image_path), np.zeros((12, 20, 3), dtype=np.uint8))
+    graph = server.sessions.project_graph()
+    graph.add_recognizer(
+        "挑战",
+        {
+            "type": "yolo",
+            "threshold": 0.63,
+            "examples": [{"template": "templates/挑战_ai0.png", "rect": [0.1, 0.2, 0.3, 0.4], "label": "挑战"}],
+        },
+    )
+    graph.save()
+    before = (tmp_path / "graph.json").read_bytes()
+    response = _call(server, out, "recognizer.detail", {"label": "挑战", **device_params})
+    assert "error" not in response, response
+    detail = response["result"]
+    assert detail["threshold"] == 0.63
+    assert len(detail["examples"]) == 1
+    example = detail["examples"][0]
+    assert example["image"].startswith("data:image/jpeg;base64,")
+    assert (example["width"], example["height"]) == (20, 12)
+    assert example["rect"] == [0.1, 0.2, 0.3, 0.4]
+    assert not server.sessions.sessions
+    assert (tmp_path / "graph.json").read_bytes() == before
+
+
+def test_yolo_detail_without_device_preserves_recognizer_validation(tmp_path: Path) -> None:
+    server, out = _server(tmp_path)
+    missing = _call(server, out, "recognizer.detail", {"label": "missing"})
+    assert "识别器不存在" in missing["error"]["message"]
+    graph = server.sessions.project_graph()
+    graph.add_recognizer("plain", {"type": "color", "roi": [0, 0, 1, 1], "target_bgr": [0, 0, 0]})
+    graph.save()
+    wrong_type = _call(server, out, "recognizer.detail", {"label": "plain"})
+    assert "不是 AI 识别器" in wrong_type["error"]["message"]
+
+
 def test_graph_node_update_persists_event_at(tmp_path: Path) -> None:
     server, out = _server(tmp_path)
     created = _call(server, out, "graph.node.add", {"name": "晨间签到"})

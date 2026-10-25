@@ -52,7 +52,7 @@ STEP_KINDS = (
 | B3 颜色与像素判断 | **部分** | `recognizer.py:249-278` `ColorRecognizer`（`tolerance=30`、`min_pixels=60`，`mask.sum()` 判定）；录制时低方差自动降级（`session.py:889-905`） | 只有"指定颜色±容差+最小像素数"；**无区域变化/差分检测**（`core/` 内无 absdiff）；颜色识别器不允许整帧搜索（`graph.py:281-283`） |
 | B4 目标出现/消失等待 | **完整（出现）/ 靠变通（消失）** | 出现：`flow_engine.py:651-668` `_try_wait`（`stable_frames` 投票、超时 `wait_timeout_ms` 默认 20000）、`:741-767`（点击目标自动等）；条件限时 `conditions.py:176-185` `ConditionTimer.check() -> "ok"/"wait"/"timeout"`；消失：`conditions.py:130-131` `none_of`，老状态机的 settle 边 `state_machine.py:293-297` | 没有独立的「等待消失」模块；步骤链里表达不了 recovery 边 |
 | B5 分辨率自适应 | **完整（A5）** | 坐标层完整：`geometry.py:16-74` `Rect` 全 `[0,1]` 归一化 + `to_pixels/from_pixels`；但尺度层：`recognizer.py:71` `scales: Sequence[float] = (1.0,)`、`:118` `for scale in self.scales`、`:351` 读 `spec["scales"]` | 录制写 `recorded_size`（`session.record_template`），`TemplateRecognizer._scales_for(frame)` 按 `帧宽/录制宽` 生成主尺度 + ±6% 容错；显式 `scales` 仍然优先（手调） |
-| B6 多目标匹配 | **部分** | `recognizer.py:136` `kept = _nms(hits)[:4]`（内部留多条）；`frame.py:76-83` `best_per_label` | 对外**每个标签只留最高分 1 条**（`session.py:423,476`）→ UI 与动作拿不到"多个目标列表"，只有 OCR 全屏返回 `items[]` |
+| B6 多目标匹配 | **完整（选点）** | `recognizer.py` 保留 `MAX_CANDIDATES=24` 条；`frame.py` 的 `best_per_label` 把不同位置收进 `Detection.candidates`（阅读顺序）；`core/selection.py` 的 11 种策略（auto / nearest / first / last / nth / 极值 / random / all）；步骤 `params.strategy` + `params.index`；`engine.frame.detections[].candidates` 给界面画多个框；动作事件 `extra.picked` 记录点了哪几个 | `wait` / `cond` 仍只判"有没有命中"，不参与选点；`all` 的候选来自同一帧，点完会重排的界面要配合循环 |
 | B7 阈值/ROI/算法可配 | **部分** | 阈值滑块 `RecognizerPicker.tsx:245-380` → `graph.py:266-272`；ROI `recognizer.py:95-98`；搜索范围 `SEARCH_MODES=("region","full")`（`:43`）+ 步骤级覆盖 `flow_engine.py:190-259` | 算法**硬编码** `TM_CCOEFF_NORMED`，无算法选择；粗搜常数不可配 |
 | B8 实时框/相似度/坐标 | **部分** | 框 + 分数 + 状态色 `ScreenPane.tsx:890-914`；读数列表 `:1626-1717`；`pass = item.score >= item.threshold`（`:1627`） | 框、分数、绿/橙/虚线都有；**检测框不显示数字坐标**（坐标只在录制准星 `:916-931` 与草稿框 `SelectionBox.tsx:270-275`） |
 
@@ -78,7 +78,7 @@ STEP_KINDS = (
 | D6 任务队列与定时 | **部分** | `schedule`（daily/once/weekly/monthly）+ `interval` 触发器（`flow_trigger.py:21,58-136`）；到点自动 `start_run`（`session.py:592-614`）；步骤重试 `flow_engine.py:898-924` | **没有队列/调度器**：无 cron 库、无持久队列、无跨设备编排；每 session 只有一个 `_auto_at`；应用关闭期间漏跑不补 |
 | D7 导入导出/API | **部分** | 导出/导入是**纯前端**：`features/library/workflow-io.ts:1-51`（Blob 下载 / FileReader 读 `graph.json`）+ `WorkspacePanel.tsx:839,848` | 后端无 export/import RPC；**无 HTTP/WS/CLI 入站**；唯一对外通道是 stdio JSON-RPC（前端私有，`rpc/stdio.py:1-16`） |
 
-**设备后端现状**：Android adb（完整）/ scrcpy 通道（完整）/ iOS 17.4+（部分，一进程一台）/ macOS 窗口（完整）/ Mock（仅测试）/ **Windows 无实现**（`macos.py:30` 只留了一句 TODO）。
+**设备后端现状**：Android adb（完整）/ scrcpy 通道（完整）/ iOS 17.4+（部分，一进程一台）/ macOS 窗口（完整）/ **Windows 窗口（2026-10-22 已实现：EnumWindows + PrintWindow/BitBlt + SendInput/PostMessage，真实引擎+Tk 窗口冒烟通过）** / Mock（仅测试）。
 
 ---
 
@@ -146,7 +146,8 @@ STEP_KINDS = (
 
 - **主战场是 Android 手游**：scrcpy 通道（点击 0.1ms、解码 28fps）是唯一做了深度优化的路径，真机实测记录在 `README.md:332-349`。
 - **iOS 可做但受限**：一进程一台（`devices/ios.py:129-146`），~8fps，适合单机自动化，不适合多设备农场。
-- **PC 游戏只是半个**：macOS 窗口能抓能点（`devices/macos.py`），**Windows 完全没有实现**。如果你的目标是 PC 游戏，路线要改：Windows 控制器是必须先补的地基，而不是排在第 12 位之后。
+- **PC 游戏：地基已补（2026-10-22）**：`devices/windows.py` 支持按窗口句柄绑定、`PrintWindow`/`BitBlt` 抓图、
+  `SendInput`/`PostMessage` 双输入；**真实游戏尚未逐款验证**（独占全屏、反作弊/管理员权限是已知边界）。
 - **QA/兼容性测试**是天然的第二个场景：`workspace`/`workflow` 目录化 + `graph.json` 可 git diff（`library.py:33`、`graph.py:220-250`）本来就像一个测试资产管理器，缺的只是批量执行与报告（第 8、9 项）。
 
 **建议的答案组合**：Android 手游 + 挂机/日常/刷关；若同时要做兼容性测试，第 8 项（批量 + 汇总）优先级提到迭代 B 最前面。

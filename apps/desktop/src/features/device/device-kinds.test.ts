@@ -2,8 +2,8 @@
  * 设备分类/过滤/排序的纯逻辑测试。
  *
  * 为什么值得单测：设备来源已经有 安卓 / 模拟器 / iOS / 本机窗口 四种，
- * 而 macOS 是"一个伪设备 + 一串窗口"两条数据路径 —— 分错类、把伪设备当可连设备、
- * 打开弹层落在空分类，都是用户直接能感觉到的"交互很差"。
+ * 而本机窗口是"一个伪设备 + 一串窗口"两条数据路径（Windows 与 macOS 同一套形状）——
+ * 分错类、把伪设备当可连设备、打开弹层落在空分类，都是用户直接能感觉到的"交互很差"。
  */
 import { describe, expect, it } from 'vitest';
 
@@ -11,8 +11,10 @@ import {
   buildDeviceTabs,
   connectableDevices,
   filterByTab,
-  isMacPicker,
+  isWindowDevice,
+  isWindowPicker,
   matchDeviceQuery,
+  normalizeDeviceTab,
   resolveTab,
   sortForDisplay,
   statusTone,
@@ -46,16 +48,36 @@ const MAC_PICKER = device({
   status: 'discovered',
 });
 const MAC_WINDOW = device({ id: 'macos:89', kind: 'windows', name: 'Safari', status: 'connected' });
+const WINDOWS_PICKER = device({
+  id: 'windows:picker',
+  kind: 'windows',
+  name: '本机窗口（Windows）· 7 个可选窗口',
+  status: 'discovered',
+});
+const WINDOWS_WINDOW = device({
+  id: 'windows:6698742',
+  kind: 'windows',
+  name: '某游戏',
+  status: 'connected',
+});
 const SPARE = device({ id: 'android:0009', kind: 'android', name: 'Pixel 7', status: 'discovered' });
 
-const ALL = [ANDROID, EMULATOR, IPHONE, MAC_PICKER, MAC_WINDOW];
+const ALL = [ANDROID, EMULATOR, IPHONE, MAC_PICKER, MAC_WINDOW, WINDOWS_PICKER, WINDOWS_WINDOW];
 
 describe('设备分类', () => {
-  it('macOS 的伪设备（picker）不算可连设备，真正的窗口才算', () => {
-    expect(isMacPicker(MAC_PICKER)).toBe(true);
+  it('本机窗口的伪设备（picker）不算可连设备，Windows / macOS 真窗口才算', () => {
+    expect(isWindowPicker(MAC_PICKER)).toBe(true);
+    expect(isWindowPicker(WINDOWS_PICKER)).toBe(true);
+    expect(isWindowPicker(MAC_WINDOW)).toBe(false);
+    expect(isWindowDevice(MAC_WINDOW)).toBe(true);
+    expect(isWindowDevice(WINDOWS_WINDOW)).toBe(true);
+    expect(isWindowDevice(ANDROID)).toBe(false);
+
     const connectable = connectableDevices(ALL);
     expect(connectable.map((item) => item.id)).not.toContain('macos:picker');
+    expect(connectable.map((item) => item.id)).not.toContain('windows:picker');
     expect(connectable.map((item) => item.id)).toContain('macos:89');
+    expect(connectable.map((item) => item.id)).toContain('windows:6698742');
   });
 
   it('模拟器附屏也是可连设备，选择器按窗口分行', () => {
@@ -65,15 +87,15 @@ describe('设备分类', () => {
     expect(buildDeviceTabs([...ALL, EMULATOR_SCREEN]).find((tab) => tab.id === 'emulator')?.count).toBe(2);
   });
 
-  it('Tab 只列有内容的分类，并带上数量（模拟器有自己的 Tab）', () => {
+  it('Tab 只列有内容的分类，并带上数量（本机窗口 Windows + macOS 合并成一个 Tab）', () => {
     const tabs = buildDeviceTabs(ALL);
     const byId = Object.fromEntries(tabs.map((tab) => [tab.id, tab.count]));
 
-    expect(byId.all).toBe(4); // picker 不是可连设备
+    expect(byId.all).toBe(5); // 两个 picker 不是可连设备
     expect(byId.android).toBe(1); // 只有真机
     expect(byId.emulator).toBe(1);
     expect(byId.ios).toBe(1);
-    expect(byId.mac).toBe(2); // picker + 已连窗口
+    expect(byId.window).toBe(4); // Windows / macOS 各一个 picker + 一个已连窗口
     expect(byId.other).toBeUndefined(); // 没有内容就不出现
   });
 
@@ -82,8 +104,13 @@ describe('设备分类', () => {
     expect(tabs.map((tab) => tab.id)).toEqual(['all', 'android']);
   });
 
-  it('按分类过滤：本机窗口 Tab 只给 macos:*', () => {
-    expect(filterByTab(ALL, 'mac').map((item) => item.id)).toEqual(['macos:picker', 'macos:89']);
+  it('按分类过滤：本机窗口 Tab 只给 macos:* / windows:*', () => {
+    expect(filterByTab(ALL, 'window').map((item) => item.id)).toEqual([
+      'macos:picker',
+      'macos:89',
+      'windows:picker',
+      'windows:6698742',
+    ]);
     expect(filterByTab(ALL, 'android').map((item) => item.id)).toEqual(['android:3387980']);
     expect(filterByTab(ALL, 'emulator').map((item) => item.id)).toEqual(['emulator:5554']);
     expect(filterByTab(ALL, 'ios').map((item) => item.id)).toEqual(['ios:000081']);
@@ -94,6 +121,17 @@ describe('设备分类', () => {
     expect(resolveTab('ios', tabs)).toBe('android'); // iOS 空了 → 退到有内容的
     expect(resolveTab('emulator', tabs)).toBe('emulator'); // 有内容就保持不变
     expect(resolveTab('all', [])).toBe('all');
+  });
+});
+
+describe('设备弹层分类迁移', () => {
+  it('macOS 专用时期存下的 mac 迁移成通用的 window，未知值退化成 all', () => {
+    expect(normalizeDeviceTab('mac')).toBe('window');
+    expect(normalizeDeviceTab('window')).toBe('window');
+    expect(normalizeDeviceTab('all')).toBe('all');
+    expect(normalizeDeviceTab('nope')).toBe('all');
+    expect(normalizeDeviceTab(null)).toBe('all');
+    expect(normalizeDeviceTab(undefined)).toBe('all');
   });
 });
 

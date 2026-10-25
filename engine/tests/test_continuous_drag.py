@@ -195,6 +195,6 @@ def test_execute_swipe_routes_explicit_path_through_drag(sleeps: list[float]) ->
 
 def test_execute_swipe_without_path_keeps_legacy_call() -> None:
     controller = SwipeOnlyController()
-    execute_swipe(controller, (0.1, 0.1), (0.9, 0.9), 0.2, {"bezier": False}, {})
+    execute_swipe(controller, (0.1, 0.1), (0.9, 0.9), 0.2, {}, {"swipe_bezier": False})
     assert len(controller.calls) == 1
     assert controller.calls[0]["path"] is None

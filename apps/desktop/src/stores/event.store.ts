@@ -10,6 +10,17 @@ import type { TraceEventType, TraceEventView } from '@/types';
 
 export type EventFilter = 'all' | 'failed' | 'recovery' | 'device';
 
+interface EngineEvent {
+  deviceId: string;
+  seq: number;
+  ts: number;
+  type: TraceEventType;
+  node: string | null;
+  edge: string | null;
+  message: string;
+  extra?: Readonly<Record<string, unknown>>;
+}
+
 interface EventState {
   readonly events: Readonly<Record<string, readonly TraceEventView[]>>;
   readonly filter: EventFilter;
@@ -24,16 +35,8 @@ interface EventState {
   /** 接入真引擎时清掉该设备的 mock 事件（避免真假事件混在一起） */
   readonly clearDevice: (deviceId: string) => void;
   /** 引擎推来的事件（seq 由引擎维护，前端只做展示与去重） */
-  readonly appendEngineEvent: (payload: {
-    deviceId: string;
-    seq: number;
-    ts: number;
-    type: TraceEventType;
-    node: string | null;
-    edge: string | null;
-    message: string;
-    extra?: Readonly<Record<string, unknown>>;
-  }) => void;
+  readonly appendEngineEvent: (payload: EngineEvent) => void;
+  readonly appendEngineEvents: (payloads: readonly EngineEvent[]) => void;
 }
 
 export function matchFilter(event: TraceEventView, filter: EventFilter): boolean {
@@ -84,25 +87,32 @@ export const useEventStore = create<EventState>()((set, get) => ({
 
   clearDevice: (deviceId) => set((state) => ({ events: { ...state.events, [deviceId]: [] } })),
 
-  appendEngineEvent: (payload) =>
+  appendEngineEvent: (payload) => get().appendEngineEvents([payload]),
+
+  appendEngineEvents: (payloads) =>
     set((state) => {
-      const list = state.events[payload.deviceId] ?? [];
-      if (list.some((item) => item.seq === payload.seq && item.type === payload.type)) {
-        return state;
+      const additions = new Map<string, TraceEventView[]>();
+      const seen = new Map<string, Set<string>>();
+      let seq = state.seq;
+      for (const payload of payloads) {
+        let keys = seen.get(payload.deviceId);
+        if (!keys) {
+          keys = new Set((state.events[payload.deviceId] ?? []).map((item) => `${item.seq}:${item.type}`));
+          seen.set(payload.deviceId, keys);
+        }
+        const key = `${payload.seq}:${payload.type}`;
+        if (keys.has(key)) continue;
+        keys.add(key);
+        const list = additions.get(payload.deviceId) ?? [];
+        list.push({ ...payload });
+        additions.set(payload.deviceId, list);
+        seq = Math.max(seq, payload.seq);
       }
-      const event: TraceEventView = {
-        seq: payload.seq,
-        ts: payload.ts,
-        type: payload.type,
-        deviceId: payload.deviceId,
-        node: payload.node,
-        edge: payload.edge,
-        message: payload.message,
-        extra: payload.extra,
-      };
-      return {
-        seq: Math.max(state.seq, payload.seq),
-        events: { ...state.events, [payload.deviceId]: [...list, event].slice(-500) },
-      };
+      if (additions.size === 0) return state;
+      const events = { ...state.events };
+      for (const [deviceId, list] of additions) {
+        events[deviceId] = [...(events[deviceId] ?? []), ...list].slice(-500);
+      }
+      return { seq, events };
     }),
 }));

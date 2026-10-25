@@ -13,7 +13,7 @@ import { create } from 'zustand';
 
 import { androidAddress, isSecondaryAndroidDisplay } from '@/features/device/emulator-displays';
 import { type DeviceInfoPayload, listDevices } from '@/lib/rpc';
-import type { DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
+import type { DeviceCapabilities, DeviceKind, DeviceRuntime, DeviceStatus } from '@/types';
 
 /*
  * 白名单写成"穷举 Record"而不是数组：`DeviceKind` 里加了新来源（比如 ios、以后的 harmony），
@@ -56,7 +56,7 @@ interface DeviceState {
   readonly lastScanAt: number | null;
   /** 模拟器屏号枚举偶尔只返回主屏；移除活会话前要复核一次。 */
   readonly missingDisplays: Readonly<Record<string, number>>;
-  readonly scan: () => Promise<void>;
+  readonly scan: (queueIfBusy?: boolean) => Promise<void>;
   readonly setActive: (id: string) => void;
   readonly connect: (id: string) => void;
   readonly markConnected: (id: string) => void;
@@ -66,6 +66,7 @@ interface DeviceState {
     uri?: string,
     name?: string,
     kind?: DeviceKind,
+    capabilities?: DeviceCapabilities,
   ) => void;
   readonly failConnect: (id: string, error: string) => void;
   readonly disconnect: (id: string) => void;
@@ -90,6 +91,7 @@ export function toRuntimeDevice(info: DeviceInfoPayload): DeviceRuntime {
     model: info.model ?? undefined,
     error: info.error ?? undefined,
     suggestedFix: info.suggestedFix ?? undefined,
+    ...(info.capabilities ? { capabilities: info.capabilities } : {}),
   };
 }
 
@@ -111,7 +113,14 @@ export function mergeScan(
     .map((device) => {
       const fresh = scanned.get(device.id);
       // 逻辑屏号会重排，但物理 id 不变；保留会话态，更新屏号/URI/窗口名。
-      return fresh ? { ...device, name: fresh.name, uri: fresh.uri } : device;
+      return fresh
+        ? {
+            ...device,
+            name: fresh.name,
+            uri: fresh.uri,
+            ...(fresh.capabilities ? { capabilities: fresh.capabilities } : {}),
+          }
+        : device;
     });
   const liveIds = new Set(live.map((device) => device.id));
   const devices = [...live, ...incoming.filter((device) => !liveIds.has(device.id))];
@@ -126,6 +135,7 @@ export function mergeScan(
 export function vanishedEmulatorDisplays(
   current: readonly DeviceRuntime[],
   incoming: readonly DeviceRuntime[],
+  pendingAndroidSerials: readonly string[] = [],
 ): DeviceRuntime[] {
   const seen = new Set(incoming.map((device) => device.id));
   const emulatorSerials = new Set(
@@ -133,7 +143,8 @@ export function vanishedEmulatorDisplays(
       .filter((device) => device.kind === 'emulator')
       .map((device) => androidAddress(device.uri))
       .filter((address) => address?.display === 0)
-      .map((address) => address?.serial),
+      .map((address) => address?.serial)
+      .filter((serial) => serial && !pendingAndroidSerials.includes(serial)),
   );
   return current.filter((device) => {
     if (!isSecondaryAndroidDisplay(device) || seen.has(device.id)) {
@@ -144,9 +155,36 @@ export function vanishedEmulatorDisplays(
   });
 }
 
+/** Android primary devices can disappear from adb entirely when unplugged. */
+export function vanishedAndroidDevices(
+  current: readonly DeviceRuntime[],
+  incoming: readonly DeviceRuntime[],
+  pendingAndroidSerials: readonly string[] = [],
+): DeviceRuntime[] {
+  const seen = new Set(incoming.map((device) => device.id));
+  const pending = new Set(pendingAndroidSerials);
+  return current.filter((device) => {
+    if ((device.kind !== 'android' && device.kind !== 'emulator') || seen.has(device.id)) return false;
+    const address = androidAddress(device.uri);
+    return Boolean(address?.serial && !pending.has(address.serial));
+  });
+}
+
+function vanishedDevices(
+  current: readonly DeviceRuntime[],
+  incoming: readonly DeviceRuntime[],
+  pendingAndroidSerials: readonly string[] = [],
+): DeviceRuntime[] {
+  const secondary = vanishedEmulatorDisplays(current, incoming, pendingAndroidSerials);
+  const primary = vanishedAndroidDevices(current, incoming, pendingAndroidSerials);
+  return [...new Map([...secondary, ...primary].map((device) => [device.id, device])).values()];
+}
+
 function patch(list: readonly DeviceRuntime[], id: string, value: Partial<DeviceRuntime>): DeviceRuntime[] {
   return list.map((device) => (device.id === id ? { ...device, ...value } : device));
 }
+
+let scanQueued = false;
 
 export const useDeviceStore = create<DeviceState>()((set, get) => ({
   devices: [],
@@ -158,8 +196,11 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
   lastScanAt: null,
   missingDisplays: {},
 
-  scan: async () => {
-    if (get().scanState === 'scanning') return;
+  scan: async (queueIfBusy = false) => {
+    if (get().scanState === 'scanning') {
+      if (queueIfBusy) scanQueued = true;
+      return;
+    }
     set({ scanState: 'scanning', scanError: null });
     try {
       let result = await listDevices(true);
@@ -167,7 +208,11 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
       const androidFailed = result.errors.some((error) => error.provider === 'android');
       const firstMissing = androidFailed
         ? []
-        : vanishedEmulatorDisplays(initial, result.devices.map(toRuntimeDevice));
+        : vanishedDevices(
+            initial,
+            result.devices.map(toRuntimeDevice),
+            result.pendingAndroidSerials,
+          );
       const confirmed = new Set<string>();
       if (firstMissing.length > 0) {
         // 一次 dumpsys 抖动不能把活会话踢掉；同一轮刷新里复核一次，
@@ -178,7 +223,11 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
         } else {
           result = checked;
           const absent = new Set(
-            vanishedEmulatorDisplays(initial, checked.devices.map(toRuntimeDevice)).map((item) => item.id),
+            vanishedDevices(
+              initial,
+              checked.devices.map(toRuntimeDevice),
+              checked.pendingAndroidSerials,
+            ).map((item) => item.id),
           );
           for (const item of firstMissing) {
             if (absent.has(item.id)) confirmed.add(item.id);
@@ -192,7 +241,7 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
       set((state) => {
         const missing = result.errors.some((error) => error.provider === 'android')
           ? []
-          : vanishedEmulatorDisplays(state.devices, incoming);
+          : vanishedDevices(state.devices, incoming, result.pendingAndroidSerials);
         const counts = Object.fromEntries(
           missing.map((device) => [
             device.id,
@@ -229,6 +278,11 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ scanState: 'error', scanError: message });
+    } finally {
+      if (scanQueued) {
+        scanQueued = false;
+        void get().scan();
+      }
     }
   },
 
@@ -245,7 +299,7 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
       devices: patch(state.devices, id, { status: 'connected', fps: 10, error: undefined }),
     })),
 
-  markConnectedWith: (id, resolution, uri, name, kind) =>
+  markConnectedWith: (id, resolution, uri, name, kind, capabilities) =>
     set((state) => {
       // 直接按 URI 连接时，设备可能还不在列表里（没扫描过）→ 补一条，保证 UI 有的显示
       if (!state.devices.some((device) => device.id === id)) {
@@ -260,13 +314,21 @@ export const useDeviceStore = create<DeviceState>()((set, get) => ({
               kind: kind ?? 'remote',
               status: 'connected' as const,
               resolution,
+              ...(capabilities ? { capabilities } : {}),
               fps: 0,
             },
           ],
           activeId: state.activeId || id,
         };
       }
-      return { devices: patch(state.devices, id, { status: 'connected', resolution, error: undefined }) };
+      return {
+        devices: patch(state.devices, id, {
+          status: 'connected',
+          resolution,
+          error: undefined,
+          ...(capabilities ? { capabilities } : {}),
+        }),
+      };
     }),
 
   failConnect: (id, error) =>

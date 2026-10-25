@@ -31,7 +31,8 @@ import { isTriggerType, newStepId } from '@/features/graph/flow/flow-step-meta';
 import {
   isBranchSourceHandle,
   normalizeTargetHandle,
-  sourcePortsForStepType,
+  sourcePortsForStep,
+  parallelBranchCount,
   type FlowSourceHandleId,
 } from '@/features/graph/flow/flow-step-ports';
 import type { FlowStep } from '@/types';
@@ -47,7 +48,16 @@ export interface FlowEdge {
 const FLOW_OUT_PARAM = '_out';
 
 /** 写 `_out` 时固定按这个顺序，保证同一张图存出来的参数完全一样（幂等）。 */
-const HANDLE_ORDER: readonly FlowSourceHandleId[] = ['out', 'then', 'else', 'body'];
+const HANDLE_ORDER: readonly FlowSourceHandleId[] = [
+  'out',
+  'then',
+  'else',
+  'body',
+  'branch1',
+  'branch2',
+  'branch3',
+  'branch4',
+];
 
 export type { StructureResult } from '@/features/graph/flow/flow-structure-core';
 
@@ -98,7 +108,7 @@ function sanitizeFlowEdges(steps: readonly FlowStep[], edges: readonly FlowEdge[
       continue;
     }
     const handle = isBranchSourceHandle(edge.sourceHandle) ? edge.sourceHandle : 'out';
-    if (!sourcePortsForStepType(source.type).some((port) => port.id === handle)) {
+    if (!sourcePortsForStep(source).some((port) => port.id === handle)) {
       continue;
     }
     const key = `${edge.source}|${handle}`;
@@ -302,6 +312,18 @@ export function legacyFlowEdges(steps: readonly FlowStep[]): FlowEdge[] {
   };
 
   for (const block of parseBlocks(steps)) {
+    if (block.kind === 'parallel') {
+      const head = steps[block.headIndex]!;
+      const after = continueAfter(steps, block.endIndex + 1);
+      if (after && !after.backToLoop) add(head, 'out', after.target);
+      for (const branch of block.branches ?? []) {
+        const first = steps
+          .slice(branch.markerIndex + 1, branch.endIndex)
+          .find((item) => !isHiddenFlowMark(item.type));
+        if (first) add(head, `branch${branch.branch}` as FlowSourceHandleId, first);
+      }
+      continue;
+    }
     if (block.kind === 'loop') {
       addLoopEdges(block);
       continue;
@@ -310,6 +332,9 @@ export function legacyFlowEdges(steps: readonly FlowStep[]): FlowEdge[] {
   }
 
   const skipSequential = (from: FlowStep, to: FlowStep): boolean =>
+    isHiddenFlowMark(from.type) ||
+    isHiddenFlowMark(to.type) ||
+    from.type === 'parallel' ||
     from.type === 'end' ||
     from.type === 'cond' ||
     from.type === 'loop' ||
@@ -459,6 +484,7 @@ function emitStep(ctx: EmitContext, step: FlowStep): { steps: FlowStep[]; afterI
     if (step.type === 'loop') {
       return emitLoop(ctx, step);
     }
+    if (step.type === 'parallel') return emitParallel(ctx, step);
     const afterId = step.type === 'end' || step.type === 'loopbreak' ? null : targetOf(ctx, step.id, 'out');
     return { steps: [cleanStep(step)], afterId };
   } finally {
@@ -544,6 +570,35 @@ function emitCond(ctx: EmitContext, cond: FlowStep): { steps: FlowStep[]; afterI
   steps.push(...elseChain.steps, takeMark(ctx, cond, 'condend', block));
   // 显式连线模型：块后面接谁只看真实出线，不靠"数组里它正好排在后面"
   return { steps, afterId: afterInBranch };
+}
+
+function emitParallel(ctx: EmitContext, head: FlowStep): { steps: FlowStep[]; afterId: string | null } {
+  const block = ctx.blocks.find((item) => item.kind === 'parallel' && item.headId === head.id);
+  const after = targetOf(ctx, head.id, 'out');
+  const stops = new Set<string>();
+  if (after) stops.add(after);
+  const produced: FlowStep[] = [cleanStep(head)];
+  for (let n = 1; n <= parallelBranchCount(head); n++) {
+    const existing = block?.branches?.find((branch) => branch.branch === n);
+    const mark = existing ? ctx.byId.get(existing.markerId) : undefined;
+    produced.push(
+      mark
+        ? commitMark(ctx, mark)
+        : { id: newStepId(), type: 'parallelbranch', params: { parallel: head.id, branch: n } },
+    );
+    const start = targetOf(ctx, head.id, `branch${n}` as FlowSourceHandleId);
+    if (start && start !== after) {
+      const chain = emitChain(ctx, start, stops, null);
+      if (chain.stopId && chain.stopId !== after)
+        throw new LinearizeError('并行分支只能在并行模块的下一步汇合');
+      produced.push(...chain.steps);
+    }
+  }
+  const end = block ? ctx.byId.get(block.endId) : undefined;
+  produced.push(
+    end ? commitMark(ctx, end) : { id: newStepId(), type: 'parallelend', params: { parallel: head.id } },
+  );
+  return { steps: produced, afterId: after };
 }
 
 function emitLoop(ctx: EmitContext, loop: FlowStep): { steps: FlowStep[]; afterId: string | null } {
@@ -708,6 +763,7 @@ export function linearizeFlow(steps: readonly FlowStep[], edges: readonly FlowEd
           ctx.emitted.add(block.elseId);
         }
         ctx.emitted.add(block.endId);
+        for (const branch of block.branches ?? []) ctx.emitted.add(branch.markerId);
       }
     }
     const ordered = [...main.steps];
@@ -726,7 +782,7 @@ export function linearizeFlow(steps: readonly FlowStep[], edges: readonly FlowEd
       if (ctx.emitted.has(step.id)) {
         continue;
       }
-      if (step.type === 'cond' || step.type === 'loop') {
+      if (step.type === 'cond' || step.type === 'loop' || step.type === 'parallel') {
         try {
           appendTail(emitStep(ctx, step).steps);
           continue;
@@ -788,7 +844,7 @@ function rejectConnect(
   if (isBlockMark(source.type) || isBlockMark(target.type)) {
     return '这是「条件 / 循环」的结构标记，不能直接连线';
   }
-  if (!sourcePortsForStepType(source.type).some((port) => port.id === sourceHandle)) {
+  if (!sourcePortsForStep(source).some((port) => port.id === sourceHandle)) {
     return '这个出口不属于该模块';
   }
   return null;

@@ -30,11 +30,7 @@ import {
 } from '@/features/graph/flow/flow-palette-insert';
 import { disconnectSteps } from '@/features/graph/flow/flow-disconnect';
 import { structureFromCanvasLink, structureFromStepReorder } from '@/features/graph/flow/flow-mutations';
-import {
-  migrateFlowSteps,
-  removeStepKeepingGap,
-  removeStepsFromChain,
-} from '@/features/graph/flow/flow-structure';
+import { migrateFlowSteps, removeStepsFromChain } from '@/features/graph/flow/flow-structure';
 import { sanitizeCondParamsForSave } from '@/features/graph/flow/flow-cond-params';
 import type { FlowSourceHandleId } from '@/features/graph/flow/flow-step-ports';
 import { type PaletteModule } from '@/features/graph/flow/flow-step-meta';
@@ -53,6 +49,7 @@ interface DeviceLive {
   readonly node: string | null;
   readonly pending: string | null;
   readonly detections: ReadonlyArray<{ label: string; score: number; state: string }>;
+  readonly activeStepIds?: readonly string[];
 }
 
 interface WorkflowSnapshot {
@@ -73,8 +70,6 @@ interface GraphState {
   /** 换工作流 / 热重载后清掉各设备的运行态缓存（结构由下一次 load 写入） */
   readonly clearDeviceLive: () => void;
   readonly updateRecognizerThreshold: (deviceId: string, label: string, threshold: number) => void;
-  /** 切换搜索范围（region = 只在 roi 里找；full = 整帧找） */
-  readonly updateRecognizerSearch: (deviceId: string, label: string, search: 'region' | 'full') => void;
   /** 兼容引擎仍可能带回 nodes 时的本地摆位（步骤链用 `node-positions` 的 step 键） */
   readonly moveNode: (deviceId: string, nodeId: string, x: number, y: number) => void;
   readonly selectNode: (nodeId: string | null) => void;
@@ -105,6 +100,7 @@ interface GraphState {
       node: string | null;
       pending: string | null;
       detections: ReadonlyArray<{ label: string; score: number; state: string }>;
+      activeStepIds?: readonly string[];
     },
   ) => void;
   /** 步骤链（Automa）：整链保存 */
@@ -140,8 +136,9 @@ interface GraphState {
   ) => Promise<void>;
   readonly removeFlowStep: (stepId: string) => Promise<void>;
   readonly removeFlowSteps: (stepIds: readonly string[]) => Promise<void>;
-  /** 删掉一个模块但保留缺口：下游就地变「未接入」，不会被自动接上 */
   readonly removeFlowStepKeepingGap: (stepId: string) => Promise<void>;
+  readonly updateRecognizerEnabled: (deviceId: string, label: string, enabled: boolean) => Promise<void>;
+  readonly updateRecognizerSearch: (deviceId: string, label: string, search: 'region' | 'full') => Promise<void>;
   /** 多选连续模块外包 loop/loopend（M2 套循环） */
   readonly wrapFlowSelectionInLoop: (count?: number) => Promise<string | null>;
   /** 出口 → 入口连线；成功返回 null，被拒绝返回原因（同时写进 `flowNotice`） */
@@ -189,11 +186,6 @@ export function graphForDevice(
     return state.graphs[deviceId];
   }
   return state.graphs[SCRIPT_SCOPE];
-}
-
-/** 连线/断开/删缺口后打一行结构（`*` = 未接入），排错时一眼能看出谁被自动接上了 */
-function flowStepDebug(steps: readonly FlowStep[]): string {
-  return steps.map((step) => `${step.id}${step.params?._pendingLink ? '*' : ''}`).join(' | ');
 }
 
 export function rawFor(
@@ -270,14 +262,9 @@ function mergeWorkflowSnapshot(
   };
 }
 
-/**
- * 旧图没有 flow 时写入的默认触发块（打开即落盘，不再保留 nodes/edges 编辑）。
- *
- * 触发方式必须是 `manual`：写 `schedule`（曾经是 `at: '09:00'`）等于"用户只是打开了一次旧图，
- * 就给它装了一个每天 9 点自动跑的定时任务"——引擎的 `_arm_auto_trigger` 会真的执行。
- */
+/** 旧图没有 flow 时写入的默认触发块（打开即落盘，不再保留 nodes/edges 编辑） */
 export const DEFAULT_WORKFLOW_FLOW: GraphPayload['flow'] = {
-  steps: [{ id: 'trigger', type: 'manual', params: {} }],
+  steps: [{ id: 'trigger', type: 'schedule', params: { at: '09:00' } }],
 };
 
 async function ensureFlowPayload(raw: GraphPayload): Promise<GraphPayload> {
@@ -641,35 +628,6 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
       return next ? mergeWorkflowSnapshot(state, next) : state;
     }),
 
-  updateRecognizerSearch: (_deviceId, label, search) =>
-    set((state) => {
-      const currentRaw = rawFor(state, SCRIPT_SCOPE);
-      const spec = currentRaw?.recognizers?.[label];
-      let nextRaw = currentRaw;
-      if (currentRaw && spec) {
-        const nextSpec: Record<string, unknown> = { ...spec };
-        if (search === 'full') {
-          nextSpec.search = 'full';
-        } else {
-          // 默认值不落盘（与引擎一致）：切回 region 就删掉，graph.json 保持干净
-          delete nextSpec.search;
-        }
-        nextRaw = {
-          ...currentRaw,
-          recognizers: { ...currentRaw.recognizers, [label]: nextSpec },
-        };
-      }
-      const next = patchScript(
-        state,
-        (script) => ({
-          ...script,
-          recognizers: script.recognizers.map((item) => (item.label === label ? { ...item, search } : item)),
-        }),
-        nextRaw,
-      );
-      return next ? mergeWorkflowSnapshot(state, next) : state;
-    }),
-
   moveNode: (_deviceId, nodeId, x, y) =>
     set((state) => {
       const script = scriptGraph(state);
@@ -995,27 +953,36 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
   removeFlowStep: async (stepId) => {
     await get().removeFlowSteps([stepId]);
   },
-
   removeFlowStepKeepingGap: async (stepId) => {
-    devLog(`删除并保留缺口: ${stepId}`);
-    const steps = flowStepsInStore(get());
-    if (steps.length <= 1) {
-      return;
-    }
-    const result = removeStepKeepingGap(steps, stepId);
-    if (!result.ok) {
-      get().reportFlowNotice(result.error);
-      return;
-    }
-    await get().saveFlowSteps(result.steps);
-    devLog(`删除后: ${flowStepDebug(result.steps)}`);
-    set((current) => {
-      const selectedNodeIds = current.selectedNodeIds.filter((id) => id !== stepId);
-      const selectedNodeId =
-        current.selectedNodeId === stepId ? (selectedNodeIds[0] ?? null) : current.selectedNodeId;
-      return { selectedNodeIds, selectedNodeId };
+    await get().removeFlowSteps([stepId]);
+  },
+  updateRecognizerEnabled: async (_deviceId, label, enabled) => {
+    set((state) => {
+      const currentRaw = rawFor(state, SCRIPT_SCOPE);
+      const nextRaw =
+        currentRaw && currentRaw.recognizers?.[label]
+          ? {
+              ...currentRaw,
+              recognizers: {
+                ...currentRaw.recognizers,
+                [label]: { ...currentRaw.recognizers[label], enabled },
+              },
+            }
+          : currentRaw;
+      const next = patchScript(
+        state,
+        (script) => ({
+          ...script,
+          recognizers: script.recognizers.map((item) =>
+            item.label === label ? { ...item, enabled } : item,
+          ),
+        }),
+        nextRaw,
+      );
+      return next ? mergeWorkflowSnapshot(state, next) : state;
     });
   },
+  updateRecognizerSearch: async (_deviceId, _label, _search) => {},
 
   wrapFlowSelectionInLoop: async (count = 10) => {
     const steps = flowStepsInStore(get());
@@ -1068,7 +1035,6 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
   },
 
   connectFlowSteps: async (sourceId, targetId, sourceHandle, targetHandle) => {
-    devLog(`连线: ${sourceId}.${sourceHandle ?? 'out'} → ${targetId}.${targetHandle ?? 'in'}`);
     const previousSteps = flowStepsInStore(get());
     if (previousSteps.length === 0) {
       return null;
@@ -1079,7 +1045,6 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
       return result.error;
     }
     await get().saveFlowSteps(result.steps);
-    devLog(`连线后: ${flowStepDebug(result.steps)}`);
     return null;
   },
 
@@ -1095,13 +1060,10 @@ export const useGraphStore = create<GraphState>()((set, get) => ({
       targetHandle,
     });
     if (!result.ok) {
-      devLog(`断开失败: ${sourceId} → ${targetId} (${result.error})`);
       get().reportFlowNotice(result.error);
       return result.error;
     }
-    devLog(`断开: ${sourceId}.${sourceHandle ?? 'out'} → ${targetId}.${targetHandle ?? 'in'}`);
     await get().saveFlowSteps(result.steps);
-    devLog(`断开后: ${flowStepDebug(result.steps)}`);
     return null;
   },
 
@@ -1156,7 +1118,11 @@ async function currentWorkflowIsLive(): Promise<boolean> {
   return isWorkflowLive(session.currentWorkflow?.root ?? '', session.runningWorkflowRoots);
 }
 
-function recordFlowHistory(set: StoreSet, get: () => GraphState, nextSteps: readonly FlowStep[]): void {
+function recordFlowHistory(
+  set: StoreSet,
+  get: () => GraphState,
+  nextSteps: readonly FlowStep[],
+): void {
   const root = getActiveWorkflowRoot();
   const current = flowStepsInStore(get());
   if (flowStepsEqual(current, nextSteps)) {

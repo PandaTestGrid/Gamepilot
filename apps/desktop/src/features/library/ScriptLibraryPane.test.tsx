@@ -7,10 +7,11 @@
  *
  * 外壳自己只负责：错误行（含"引擎是旧进程 → 重启引擎"）、底部"当前：…"回显。
  */
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { WorkspaceLibraryPane } from '@/features/library/WorkspaceLibraryPane';
+import { workspaceAdd, workspaceList, workspaceTree } from '@/lib/rpc';
 import { useEngineStore } from '@/stores/engine.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
@@ -39,6 +40,15 @@ vi.mock('@/lib/rpc', async () => {
         active: TREE.root,
         recommended: '/repo/workspaces/默认',
         items: WORKSPACES,
+      }),
+    ),
+    workspaceAdd: vi.fn(() =>
+      Promise.resolve({
+        root: '/repo/workspaces/默认',
+        name: '默认工作区',
+        current: '',
+        tree: { root: '/repo/workspaces/默认', workflows: [] },
+        items: [{ name: '默认工作区', root: '/repo/workspaces/默认', active: true, exists: true }],
       }),
     ),
     projectGet: vi.fn(() => Promise.resolve({ root: `${TREE.root}/斗技` })),
@@ -94,5 +104,27 @@ describe('工作区区域（右栏 Tab 内容）', () => {
     expect(screen.getByText(/当前工作流：/)).toBeInTheDocument();
     expect(screen.getByText(CURRENT)).toBeInTheDocument();
     expect(screen.queryByText('刷新')).not.toBeInTheDocument();
+  });
+
+  it('首次启动没有任何工作区时，自动创建并激活推荐的「默认工作区」', async () => {
+    vi.mocked(workspaceTree).mockResolvedValue({ root: '', workflows: [] });
+    vi.mocked(workspaceList).mockResolvedValue({
+      active: null,
+      recommended: '/repo/workspaces/默认',
+      items: [],
+    });
+    useLibraryStore.setState({
+      workspaceRoot: '',
+      workflows: [],
+      workspaces: [],
+      recommendedWorkspace: '',
+      error: null,
+    });
+
+    render(<WorkspaceLibraryPane />);
+
+    await waitFor(() => {
+      expect(workspaceAdd).toHaveBeenCalledWith('/repo/workspaces/默认', '默认工作区', true);
+    });
   });
 });

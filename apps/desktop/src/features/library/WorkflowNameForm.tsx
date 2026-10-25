@@ -29,9 +29,13 @@ export function WorkflowNameForm({
 }): ReactNode {
   const [name, setName] = useState(initial);
   const [description, setDescription] = useState(initialDescription);
+  /** 还没动手时不要把「名字不能为空」贴在一个空表单上（那是报错，不是提示）。 */
+  const [touched, setTouched] = useState(false);
   const problem = workflowNameError(name);
+  const visibleProblem = touched && problem ? problem : '';
 
   const submit = (): void => {
+    setTouched(true);
     if (!problem) {
       onSubmit(name.trim(), showDescription ? description.trim() : undefined);
     }
@@ -50,12 +54,15 @@ export function WorkflowNameForm({
         <input
           autoFocus
           value={name}
-          onChange={(event) => setName(event.target.value)}
+          onChange={(event) => {
+            setName(event.target.value);
+            setTouched(true);
+          }}
           spellCheck={false}
           placeholder="例如 斗技"
           className={cn(
             'h-6 min-w-0 flex-1 rounded-sm border bg-canvas px-1.5 text-body text-fg',
-            problem ? 'border-failed' : 'border-line',
+            visibleProblem ? 'border-failed' : 'border-line',
           )}
           onKeyDown={(event) => {
             if (event.key === 'Escape') {
@@ -87,7 +94,7 @@ export function WorkflowNameForm({
           className="h-6 rounded-sm border border-line bg-canvas px-1.5 text-badge text-fg"
         />
       )}
-      {problem && <div className="text-badge text-failed">{problem}</div>}
+      {visibleProblem && <div className="text-badge text-failed">{visibleProblem}</div>}
     </form>
   );
 }

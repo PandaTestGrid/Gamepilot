@@ -73,6 +73,18 @@ export const DOCK_LAYOUT: LayoutSpec = {
   panels: { main: 78, dock: 22 },
 };
 
+/** AI 识别弹窗：主区 / 时间轴抽屉（同一套拖拽 + 记忆） */
+export const YOLO_LAYOUT: LayoutSpec = {
+  id: 'gamepilot.layout.yolo.v1',
+  panels: { main: 74, dock: 26 },
+};
+
+/** AI 识别弹窗主区：画面 / 识别器配置 */
+export const YOLO_COLUMNS: LayoutSpec = {
+  id: 'gamepilot.layout.yolo.columns.v1',
+  panels: { canvas: 70, config: 30 },
+};
+
 export interface LayoutPreset {
   readonly id: string;
   readonly name: string;

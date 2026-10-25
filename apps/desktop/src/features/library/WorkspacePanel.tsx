@@ -17,7 +17,7 @@ import {
   Trash2,
 } from 'lucide-react';
 
-import { pickDirectory } from '@/features/library/native-dialog';
+import { pickDirectoryResult } from '@/features/library/native-dialog';
 import {
   downloadWorkflowJson,
   parseWorkflowJson,
@@ -39,6 +39,7 @@ import type { WorkflowSummary, WorkspaceSummary } from '@/lib/rpc';
 import { RunLiveDot } from '@/features/graph/flow/RunBusySpinner';
 import { RunTargetList, RunTargetsTrigger } from '@/features/graph/flow/RunTargetsMenu';
 import { useLiveWorkflow, useRunningDevicesForWorkflow } from '@/lib/useLiveWorkflow';
+import { useEngineStore } from '@/stores/engine.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
 
@@ -51,6 +52,12 @@ const WORKFLOW_ROW = 'flex h-[26px] w-full min-w-0 items-center gap-1.5 pr-2 pl-
 const ROW_ICON = 'rounded-sm text-faint hover:bg-raised hover:text-fg';
 const CONFIRM_BUTTON =
   'shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-badge text-dim hover:bg-raised hover:text-fg';
+/** 行内表单的按钮：主按钮撑满 + 取消固定宽（同 `RecordOverlay` 的「保存 / 取消」）。
+ *  组合宽度小于内容时**按钮自己不会被压**（`shrink-0`）—— 之前「取 / 消」被压成竖排两个字就是这么来的。 */
+const PRIMARY_BUTTON =
+  'h-6 min-w-0 flex-1 truncate rounded-sm bg-brand px-2 text-badge font-medium text-[#0b0d12] hover:opacity-90 disabled:opacity-50';
+const CANCEL_BUTTON =
+  'h-6 shrink-0 rounded-sm border border-line px-2 text-badge text-dim hover:bg-raised hover:text-fg';
 
 /** 添加工作区：`pick` = 正在挑目录（原生对话框拿不到时那里就是手输兜底） */
 type AddStep = 'closed' | 'pick';
@@ -72,6 +79,16 @@ export function WorkspacePanel(): ReactNode {
   /** 手输兜底的目录（'' = 还没输） */
   const [dir, setDir] = useState('');
   const [busy, setBusy] = useState(false);
+  const [exportNotice, setExportNotice] = useState('');
+  useEffect(() => {
+    const onExport = (event: Event): void => {
+      const message = (event as CustomEvent<string>).detail;
+      setExportNotice(message);
+      window.setTimeout(() => setExportNotice(''), 4000);
+    };
+    window.addEventListener('gamepilot:workflow-exported', onExport);
+    return () => window.removeEventListener('gamepilot:workflow-exported', onExport);
+  }, []);
   /** 有文件夹正拖在侧栏上方（松手即添加），用来给个明确的落点提示 */
   const [dropping, setDropping] = useState(false);
   /** 正在起名字的那个工作区（'' = 没在起名）；＋ 之后弹表单，提交才 `workflow.create` */
@@ -138,12 +155,20 @@ export function WorkspacePanel(): ReactNode {
     setSettingsOpen(false);
     setAddStep('pick');
     setDir('');
-    void pickDirectory().then((picked) => {
-      if (picked) {
-        void addDirectory(picked);
+    void pickDirectoryResult().then((picked) => {
+      if (picked.kind === 'picked') {
+        void addDirectory(picked.path);
+        setAddStep('closed');
         return;
       }
-      devLog('系统文件夹选择器不可用：改成手输目录路径（拖文件夹进来也行）');
+      if (picked.kind === 'cancelled') {
+        // 用户自己点了取消：收起表单，不要弹一句"选择器不可用"
+        setAddStep('closed');
+        devLog('系统文件夹选择器：用户取消');
+        return;
+      }
+      // 真的拿不到选择器：保留手输路径的表单（契约 v4 的兜底）
+      devLog(`系统文件夹选择器不可用（${picked.reason}）：改成手输目录路径（拖文件夹进来也行）`);
     });
   }, [addDirectory]);
 
@@ -155,10 +180,14 @@ export function WorkspacePanel(): ReactNode {
   const beginSession = useCallback(
     async (root: string, workspaceName: string, isCurrent: boolean): Promise<void> => {
       // 不是当前工作区就先切过去（幂等），否则新工作流会建到别的目录里
+      // （先拿返回值再弹表单：切失败时表单会挂在一个切不过去的目录上）
       if (!isCurrent) {
         setBusy(true);
-        await addWorkspace(root, workspaceName);
+        const ok = await addWorkspace(root, workspaceName);
         setBusy(false);
+        if (!ok) {
+          return;
+        }
       }
       setSessionIn(root);
     },
@@ -213,10 +242,14 @@ export function WorkspacePanel(): ReactNode {
     return () => document.removeEventListener('keydown', onKey);
   }, [beginAdd]);
 
-  // 区域一挂载就拉一次列表（别让用户自己点刷新）
+  // 引擎就绪后拉一次列表（别让用户自己点刷新；引擎没起来时拉会留下「引擎未启动」的假错误）
+  const engineStatus = useEngineStore((state) => state.status);
   useEffect(() => {
+    if (engineStatus !== 'ready') {
+      return;
+    }
     void refreshWorkspaces();
-  }, [refreshWorkspaces]);
+  }, [engineStatus, refreshWorkspaces]);
 
   /** 展开/收起一个工作区（点箭头，或点"已经在当前工作区"的名字）。 */
   const toggle = useCallback((root: string): void => {
@@ -314,6 +347,11 @@ export function WorkspacePanel(): ReactNode {
           松手就把它添加为工作区
         </div>
       )}
+      {exportNotice && (
+        <div role="status" className="shrink-0 border-b border-line bg-raised px-2 py-1 text-[10px] text-confirmed">
+          {exportNotice}
+        </div>
+      )}
       <div className="flex h-7 shrink-0 items-center gap-1 border-b border-line px-2">
         <span className="text-body text-fg">工作区</span>
         <span className="flex-1" />
@@ -367,42 +405,43 @@ export function WorkspacePanel(): ReactNode {
       {addStep === 'pick' && (
         <div className="border-b border-line bg-raised px-2 py-1.5">
           <div className="text-badge text-dim">添加工作区 · 选文件夹</div>
+          {/* 路径输入框独占一行：右栏最窄能拖到 16%（几百像素），跟按钮挤一行时路径只剩几个字 */}
+          <input
+            autoFocus
+            value={dir}
+            onChange={(event) => setDir(event.target.value)}
+            spellCheck={false}
+            placeholder="/Users/me/Documents/game-a"
+            className={cn(
+              'mt-1 h-6 w-full rounded-sm border bg-canvas px-1.5 text-badge text-fg',
+              dirProblem ? 'border-failed' : 'border-line',
+            )}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !dirProblem) {
+                event.preventDefault();
+                void addDirectory(dir);
+              }
+            }}
+          />
+          {dirProblem && dir.trim().length > 0 && (
+            <div className="mt-0.5 text-badge text-failed">{dirProblem}</div>
+          )}
+          {/* 动作单独一行：主按钮撑满 + 取消，取消是**按钮**（以前是行末一个裸文字，还被挤成竖排） */}
           <div className="mt-1 flex items-center gap-1">
-            <input
-              autoFocus
-              value={dir}
-              onChange={(event) => setDir(event.target.value)}
-              spellCheck={false}
-              placeholder="/Users/me/Documents/game-a"
-              className={cn(
-                'h-6 min-w-0 flex-1 rounded-sm border bg-canvas px-1.5 text-badge text-fg',
-                dirProblem ? 'border-failed' : 'border-line',
-              )}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !dirProblem) {
-                  event.preventDefault();
-                  void addDirectory(dir);
-                }
-              }}
-            />
             <button
               type="button"
               disabled={busy || Boolean(dirProblem) || dir.trim().length === 0}
               onClick={() => void addDirectory(dir)}
-              className="h-6 shrink-0 rounded-sm bg-brand px-2 text-badge font-medium text-[#0b0d12] hover:opacity-90 disabled:opacity-50"
+              className={PRIMARY_BUTTON}
             >
               添加这个工作区
             </button>
-          </div>
-          {dirProblem && dir.trim().length > 0 && (
-            <div className="mt-0.5 text-badge text-failed">{dirProblem}</div>
-          )}
-          <div className="mt-1 flex items-center gap-2 text-badge text-faint">
-            <span>系统文件夹选择器没弹出来？直接贴路径，或者把文件夹拖进这个列表</span>
-            <span className="flex-1" />
-            <button type="button" className="hover:text-fg" onClick={() => setAddStep('closed')}>
+            <button type="button" onClick={() => setAddStep('closed')} className={CANCEL_BUTTON}>
               取消
             </button>
+          </div>
+          <div className="mt-0.5 text-badge text-faint">
+            没弹出文件夹选择器？直接贴绝对路径，也可以把文件夹拖进列表。
           </div>
         </div>
       )}
@@ -696,8 +735,8 @@ export function WorkspacePanel(): ReactNode {
           </div>
         )}
 
-        {/* 一个工作区都没有：主按钮添加 + 次按钮用默认（底部那一项就是次按钮） */}
-        {workspaces.length === 0 && (
+        {/* 一个工作区都没有：主按钮添加（**手输表单已经开着时不再重复摆一个蓝色按钮**） */}
+        {workspaces.length === 0 && addStep === 'closed' && (
           <div className="px-2 pb-1">
             <button
               type="button"
@@ -755,6 +794,7 @@ function WorkflowRow({
     }
     const graph = await graphGet();
     downloadWorkflowJson(workflow.name, graph);
+    window.dispatchEvent(new CustomEvent('gamepilot:workflow-exported', { detail: `已导出「${workflow.name}.json」到浏览器默认下载文件夹` }));
   };
 
   const importJson = async (): Promise<void> => {

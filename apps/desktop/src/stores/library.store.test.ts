@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkflowSummary } from '@/lib/rpc';
+import { useEngineStore } from '@/stores/engine.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
@@ -73,6 +74,8 @@ describe('工作区 store（v4）', () => {
     });
     syncCurrentWorkflow.mockClear();
 
+    // 失败要能进错误行：这几条用例都是"引擎已就绪、某个写操作失败"
+    useEngineStore.setState({ status: 'ready' });
     useLibraryStore.setState({
       workspaceRoot: '',
       workflows: [],
@@ -109,6 +112,16 @@ describe('工作区 store（v4）', () => {
     expect(useLibraryStore.getState().workspaceRoot).toBe('');
   });
 
+  it('启动时 workspace.list 还没回来（workspaces 为空）但树已经有了：不能把标签清掉', () => {
+    // 真实启动顺序：workspace.tree 与 workspace.list 并发，tree 先回。
+    // 旧实现在这里 clearOpenWorkflowTabs()，于是「重启后标签全没了」。
+    useUiStore.setState({ openWorkflowTabs: [CURRENT, `${WS}/御魂`] });
+    useLibraryStore.setState({ workspaces: [], workspaceRoot: WS, workflows: WORKFLOWS });
+    useLibraryStore.getState().reconcileOpenWorkflowTabs();
+
+    expect(useUiStore.getState().openWorkflowTabs).toEqual([CURRENT, `${WS}/御魂`]);
+  });
+
   it('没有工作区或工作流时 reconcile 会清掉 localStorage 里的历史 Tab', () => {
     useUiStore.setState({ openWorkflowTabs: [`${WS}/asdasd`] });
     useLibraryStore.setState({ workspaces: [], workflows: [], workspaceRoot: '' });
@@ -117,10 +130,19 @@ describe('工作区 store（v4）', () => {
   });
 
   it('刷新失败：错误留在面板里，不抛给调用方', async () => {
-    reply('workspace.tree', null, '引擎未启动');
+    reply('workspace.tree', null, '工作区目录不存在');
     await useLibraryStore.getState().refresh();
 
-    expect(useLibraryStore.getState().error).toBe('引擎未启动');
+    expect(useLibraryStore.getState().error).toBe('工作区目录不存在');
+    expect(useLibraryStore.getState().loading).toBe(false);
+  });
+
+  it('引擎还没起来时的失败只写日志，不把「引擎未启动」挂到面板错误行上', async () => {
+    useEngineStore.setState({ status: 'connecting' });
+    reply('workspace.tree', null, '引擎没在运行（可能刚退出）：点「重启引擎」重开一次');
+    await useLibraryStore.getState().refresh();
+
+    expect(useLibraryStore.getState().error).toBeNull();
     expect(useLibraryStore.getState().loading).toBe(false);
   });
 

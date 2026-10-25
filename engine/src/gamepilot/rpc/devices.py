@@ -10,14 +10,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ..devices import scan
-from ..protocol import METHOD_DEVICE_LIST
+from ..devices.discovery import DeviceDiscovery
+from ..protocol import METHOD_DEVICE_LIST, NOTIFY_DEVICE_LIST_CHANGED
 
 if TYPE_CHECKING:  # 避免与 stdio 循环导入
     from .stdio import RpcServer
 
 
-def register(server: RpcServer) -> None:
+def register(server: RpcServer) -> DeviceDiscovery:
+    discovery = DeviceDiscovery(lambda provider: server.notify(NOTIFY_DEVICE_LIST_CHANGED, {"provider": provider}))
+
     @server.method(METHOD_DEVICE_LIST)
     def _device_list(params: dict[str, Any]) -> dict[str, Any]:
         """扫描可用设备。
@@ -32,8 +34,10 @@ def register(server: RpcServer) -> None:
         if params.get("scan", True) is False:
             result: dict[str, Any] = {"devices": [], "errors": []}
         else:
-            result = scan().to_dict()
+            result = discovery.snapshot()
         return _mark_connected(server, result)
+
+    return discovery
 
 
 def _mark_connected(server: RpcServer, result: dict[str, Any]) -> dict[str, Any]:

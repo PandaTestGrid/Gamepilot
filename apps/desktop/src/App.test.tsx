@@ -1,16 +1,22 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from '@/App';
 import { LAYOUT_PRESETS } from '@/layout/layout-specs';
 import { useDeviceStore } from '@/stores/device.store';
+import { useEngineStore } from '@/stores/engine.store';
 import { useSessionStore } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
 
 // 渲染测试不启动 Tauri：只验证主壳真的能挂载，且空态有明确引导
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve({})) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => undefined)) }));
+
+beforeEach(() => {
+  // 主壳测试关注加载完成后的工作台；启动门禁本身在 AppStartupScreen.test.tsx 里测。
+  useEngineStore.setState({ status: 'ready', info: 'engine test', notifications: [], missingMethods: [] });
+});
 
 describe('主壳渲染', () => {
   it('顶部条、三栏、底栏都在；中间那栏是当前工作流', () => {
@@ -137,7 +143,72 @@ describe('画面栏渲染（回归：曾经连上了也不出图）', () => {
     expect(screen.getByText('scrcpy')).toBeInTheDocument();
   });
 
-  it('导航键贴在投屏下面（居中）；「控制 / 多开 / 电源」留在画面栏头，「框选 / 点选 / 录操作」收进下方工作流详情坞', () => {
+  it('帧率全界面只出现一处：底栏指标行', () => {
+    useDeviceStore.setState({
+      devices: [
+        {
+          id: 'android:3387980',
+          name: 'OPPO A57',
+          uri: 'Android:///?serial=3387980',
+          kind: 'android',
+          status: 'connected',
+          resolution: [720, 1280],
+          fps: 14,
+        },
+      ],
+      activeId: 'android:3387980',
+      gridView: false,
+    });
+    useSessionStore.setState({
+      frames: {
+        'android:3387980': {
+          imageUrl: 'blob:gamepilot/frame',
+          index: 42,
+          resolution: [720, 1280],
+          node: 'home',
+          pending: null,
+          tick: 42,
+          fps: 14,
+          captureMs: 0.3,
+          detections: [],
+          ts: Date.now(),
+        },
+      },
+      links: { 'android:3387980': { channel: 'scrcpy', note: 'scrcpy 720×1280' } },
+    });
+
+    const { container } = render(<App />);
+
+    /*
+     * 用户反馈"这么多地方都在显示 fps，有一个地方就行"：
+     * 曾经同时有 5 处 —— 设备标签、多开格子头部、格子脚部、单画面左下浮层、底栏。
+     * 现在只留底栏（DESIGN §4.4 的指标行）：这一条断言就是防止它再长回来。
+     */
+    // 只看叶子节点（指标行是 "外层 span > [标签 span, 数值 span]"，外层也会匹配到）
+    const leaves = Array.from(container.querySelectorAll<HTMLElement>('span')).filter(
+      (node) => node.children.length === 0,
+    );
+    const mentions = leaves.filter((node) => /fps/i.test(node.textContent ?? ''));
+    expect(mentions.map((node) => node.textContent)).toEqual(['fps']);
+  });
+
+  it('导航键贴在投屏下面（居中）；「控制 / 多开 / 电源」留在画面栏头，「框选 / 点选 / 录操作」收进素材区头部右侧', () => {
+    // 这条用例要验证"有活动设备但未建立会话"：显式写前置状态，不能继承上一条测试的 session。
+    useDeviceStore.setState({
+      activeId: 'android:3387980',
+      devices: [
+        {
+          id: 'android:3387980',
+          name: 'OPPO A57',
+          uri: 'Android:///?serial=3387980',
+          kind: 'android',
+          status: 'connected',
+          resolution: [720, 1280],
+          fps: 14,
+        },
+      ],
+    });
+    useSessionStore.setState({ ready: {} });
     render(<App />);
 
     const bar = screen.getByTestId('device-controls');
@@ -170,9 +241,9 @@ describe('画面栏渲染（回归：曾经连上了也不出图）', () => {
     expect(within(header).queryByText('录操作')).not.toBeInTheDocument();
     expect(within(header).queryByText('返回')).not.toBeInTheDocument();
 
-    // 录制工具（框选 / 点选 / 录操作）统一放在工作流下方详情坞（「配置」前面，全部为图标按钮）
+    // 录制工具（框选 / 点选 / 录操作）统一放在画面栏「素材区」头部右侧（全部为图标按钮）
     // 设备未连接时三个录制按钮均禁用并提示未连接原因
-    for (const testId of ['dock-record-marquee', 'dock-record-pick', 'dock-record-action']) {
+    for (const testId of ['record-marquee', 'record-pick', 'record-action']) {
       const btn = screen.getByTestId(testId);
       expect(btn).toBeInTheDocument();
       expect(btn).toBeDisabled();
@@ -195,9 +266,9 @@ describe('画面栏渲染（回归：曾经连上了也不出图）', () => {
     });
     render(<App />);
 
-    const marqueeBtn = screen.getByTestId('dock-record-marquee');
-    const pickBtn = screen.getByTestId('dock-record-pick');
-    const actionBtn = screen.getByTestId('dock-record-action');
+    const marqueeBtn = screen.getByTestId('record-marquee');
+    const pickBtn = screen.getByTestId('record-pick');
+    const actionBtn = screen.getByTestId('record-action');
 
     fireEvent.click(marqueeBtn);
     expect(useUiStore.getState().recordMode).toBe('marquee');
@@ -227,7 +298,7 @@ describe('画面栏渲染（回归：曾经连上了也不出图）', () => {
     });
     render(<App />);
 
-    const marqueeBtn = screen.getByTestId('dock-record-marquee');
+    const marqueeBtn = screen.getByTestId('record-marquee');
     fireEvent.click(marqueeBtn);
     expect(useUiStore.getState().recordMode).toBe('marquee');
 
@@ -237,7 +308,7 @@ describe('画面栏渲染（回归：曾经连上了也不出图）', () => {
     fireEvent.pointerDown(screen.getByTestId('flow-canvas-wrap'));
     expect(useUiStore.getState().recordMode).toBe('off');
 
-    fireEvent.click(screen.getByTestId('dock-record-action'));
+    fireEvent.click(screen.getByTestId('record-action'));
     expect(useUiStore.getState().recordActionMode).toBe(true);
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(useUiStore.getState().recordActionMode).toBe(false);

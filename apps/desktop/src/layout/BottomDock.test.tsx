@@ -4,7 +4,7 @@
  * 这是"调试信息集中到下面一处"的落地：事件流 / 日志 / 控制台 / 运行记录四个 Tab，
  * 收起时只占 28px（状态行），点开才拉开。
  */
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RefObject } from 'react';
@@ -72,6 +72,40 @@ describe('底部调试抽屉', () => {
       const button = screen.getByText(label).closest('button');
       expect(button?.className, `${label} 按钮应当不压缩`).toContain('shrink-0');
       expect(button?.className, `${label} 按钮应当不换行`).toContain('whitespace-nowrap');
+    }
+  });
+
+  it('收起时不挂事件列表/不格式化；全局继续收集，再打开保留事件', async () => {
+    const { ref } = fakePanelRef();
+    useDeviceStore.setState({ activeId: 'dev' });
+    const format = vi.fn(() => '12:00:00');
+    const spy = vi.spyOn(
+      Intl.DateTimeFormat.prototype as unknown as { readonly format: unknown },
+      'format',
+      'get',
+    ).mockReturnValue(format);
+    try {
+      render(<BottomDock panelRef={ref} />);
+      expect(screen.queryByText('没有事件')).not.toBeInTheDocument();
+      act(() => useEventStore.getState().append('dev', 'step_started', { message: 'collected-closed' }));
+      expect(format).not.toHaveBeenCalled();
+      await userEvent.setup().click(screen.getByText('事件流'));
+      expect(screen.getByText('1 条')).toBeInTheDocument();
+      expect(format).toHaveBeenCalledTimes(1);
+      await userEvent.setup().click(screen.getByText('事件流'));
+      format.mockClear();
+      act(() => useEventStore.getState().append('dev', 'step_finished', { message: 'collected-later' }));
+      expect(format).not.toHaveBeenCalled();
+      expect(screen.queryByText('2 条')).not.toBeInTheDocument();
+      await userEvent.setup().click(screen.getByText('事件流'));
+      expect(screen.getByText('2 条')).toBeInTheDocument();
+      expect(useEventStore.getState().events.dev?.map((item) => item.message)).toEqual([
+        'collected-closed',
+        'collected-later',
+      ]);
+      expect(format).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
     }
   });
 

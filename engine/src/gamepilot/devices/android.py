@@ -32,6 +32,8 @@ from .base import (
     DeviceInfo,
     Size,
     register,
+    validate_touch_identity,
+    validate_touch_owner,
 )
 
 logger = logging.getLogger("gamepilot.devices.android")
@@ -75,6 +77,27 @@ def friendly_name(serial: str, model: str = "", product: str = "") -> str:
     """优先展示人能认出的型号名，拿不到才退回 serial。"""
     pretty = (model or product).replace("_", " ").strip()
     return pretty or serial
+
+
+def device_info(serial: str, state: str, tags: dict[str, str]) -> DeviceInfo:
+    """ADB 列表 / track-devices 共用的状态映射，不执行设备命令。"""
+    model = str(tags.get("model", "") or "")
+    product = str(tags.get("product", "") or "")
+    info = DeviceInfo(
+        id=make_device_id(serial),
+        uri=make_uri(serial),
+        name=friendly_name(serial, model, product),
+        kind=classify_kind(serial, model, product),
+        status=STATUS_DISCOVERED,
+        serial=serial,
+        model=model or None,
+        product=product or None,
+    )
+    if state != "device":
+        info.status, info.error, info.suggested_fix = _STATE_MAP.get(
+            state, (STATUS_FAILED, f"adb 状态异常: {state}", "重新插拔设备或重启 adb server")
+        )
+    return info
 
 
 def parse_wm_size(output: str) -> Size | None:
@@ -195,22 +218,50 @@ def merge_displays(surfaceflinger: str, display: str = "", activities: str = "")
 
 
 def _adb_binary() -> str:
-    """adb 可执行文件：优先 adbutils 自带的那份，找不到再退回 PATH。"""
+    """adb 可执行文件：adbutils 的查找顺序（环境变量 → 系统 PATH → 自带），都没有才退回裸 "adb"。
+
+    退回裸 "adb" 意味着这台机器**一个 adb 都没有**：调用会以 FileNotFoundError 失败、
+    被各调用方当成"设备不可用"静默降级。所以这里第一次退回就 warning 一次，别让它无声无息。
+    """
     try:
         import adbutils
 
         return str(adbutils.adb_path())
-    except Exception:
+    except Exception as exc:
         import shutil
 
-        return shutil.which("adb") or "adb"
+        found = shutil.which("adb")
+        if found is None:
+            _warn_adb_once(
+                "no-adb",
+                "这台机器找不到 adb（自带的那份被删/隔离，PATH 上也没有）：设备会扫不到。（%s）",
+                exc,
+            )
+            return "adb"
+        return found
+
+
+#: 已经提醒过的 adb 子命令（"同一条命令只喊一次"，坏机器上别刷屏）
+_ADB_WARNED: set[str] = set()
+#: 超过这个秒数就记一条 warning：adb 正常是几十毫秒，慢成这样基本就是被拦/被抢端口/设备无响应
+ADB_SLOW_SECONDS = 3.0
+
+
+def _warn_adb_once(key: str, message: str, *args: Any) -> None:
+    if key in _ADB_WARNED:
+        logger.debug(message, *args)
+        return
+    _ADB_WARNED.add(key)
+    logger.warning(message, *args)
 
 
 def _adb_shell(serial: str, *args: str) -> str | None:
     """跑一次 `adb -s <serial> shell …`；失败返回 None（调用方各自降级）。"""
     import subprocess
+    import time
 
     command = [_adb_binary(), "-s", serial, "shell", *args]
+    started = time.monotonic()
     try:
         result = subprocess.run(
             command,
@@ -222,10 +273,32 @@ def _adb_shell(serial: str, *args: str) -> str | None:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception as exc:
-        logger.debug("adb shell %s 失败: %s", " ".join(args), exc)
+        # 以前这里只有 debug：INFO 级别的日志里什么都看不到，"引擎卡住/超时"就成了无头案
+        _warn_adb_once(
+            f"timeout:{args[0] if args else ''}",
+            "adb 命令超时(>15s): adb -s %s shell %s（adb 被杀软拦、5037 被别人占、手机无响应都会这样）: %s",
+            serial,
+            " ".join(args),
+            exc,
+        )
         return None
+    elapsed = time.monotonic() - started
+    if elapsed >= ADB_SLOW_SECONDS:
+        _warn_adb_once(
+            f"slow:{args[0] if args else ''}",
+            "adb 命令很慢(%.1fs): adb -s %s shell %s（正常是几十毫秒）",
+            elapsed,
+            serial,
+            " ".join(args),
+        )
     if result.returncode != 0:
-        logger.debug("adb shell %s 退出码 %s: %s", " ".join(args), result.returncode, result.stderr.strip()[:200])
+        _warn_adb_once(
+            f"exit:{args[0] if args else ''}",
+            "adb shell %s 退出码 %s: %s",
+            " ".join(args),
+            result.returncode,
+            result.stderr.strip()[:200],
+        )
         return None
     return result.stdout
 
@@ -353,6 +426,12 @@ def discover(include_resolution: bool = True) -> list[DeviceInfo]:
         logger.warning("未安装 adbutils，跳过 Android 扫描")
         return []
 
+    # 第一次扫设备时把"这台机器的 adb 环境"写进日志：别人电脑上引擎 timeout、
+    # 日志里却什么都没有，就是缺这一条（自带的 adb 被杀软拦 / 5037 被别人占 / 手机没授权）
+    from .env_report import log_once
+
+    log_once()
+
     devices: list[DeviceInfo] = []
     try:
         client = adbutils.AdbClient()
@@ -368,26 +447,9 @@ def discover(include_resolution: bool = True) -> list[DeviceInfo]:
         serial = entry.serial
         state = entry.state or "unknown"
         tags = getattr(entry, "tags", {}) or {}
-        model = str(tags.get("model", "") or "")
-        product = str(tags.get("product", "") or "")
-        info = DeviceInfo(
-            id=make_device_id(serial),
-            uri=make_uri(serial),
-            name=friendly_name(serial, model, product),
-            kind=classify_kind(serial, model, product),
-            status=STATUS_DISCOVERED,
-            serial=serial,
-            model=model or None,
-            product=product or None,
-        )
+        info = device_info(serial, state, tags)
 
         if state != "device":
-            status, error, fix = _STATE_MAP.get(
-                state, (STATUS_FAILED, f"adb 状态异常: {state}", "重新插拔设备或重启 adb server")
-            )
-            info.status = status
-            info.error = error
-            info.suggested_fix = fix
             devices.append(info)
             continue
 
@@ -408,7 +470,7 @@ def _query_resolution(serial: str) -> Size | None:
         import adbutils
 
         device = adbutils.adb.device(serial=serial)
-        return parse_wm_size(device.shell("wm size"))
+        return parse_wm_size(device.shell("wm size", timeout=3))
     except Exception as exc:
         logger.debug("查询 %s 分辨率失败: %s", serial, exc)
         return None
@@ -555,41 +617,70 @@ class AndroidController(Controller):
             # 逻辑屏号变了就不能再读旧 display_id 上的帧：重连时按新 id 重建服务
             self._lose_video("屏号已变化，请刷新窗口列表后重新添加")
 
-    def _start_scrcpy(self) -> None:
-        """必须收到第一张解码帧才算连接成功：拿不到画面直接报错，不降级到 adb 截图。"""
-        channel: Any = None
-        try:
-            from .scrcpy import ScrcpyChannel, find_server_jar
+    def _open_scrcpy(self, bit_rate: int | None = None) -> Any:
+        """起一条 scrcpy 通道并等到首帧；失败时关干净再抛。"""
+        from .scrcpy import ScrcpyChannel, find_server_jar
 
-            jar = find_server_jar()
-            if jar is None:
-                raise RuntimeError("未找到 scrcpy-server.jar，无法投屏；请重新安装 GamePilot")
-            channel = ScrcpyChannel(
-                serial=str(self.serial),
-                adb_path=self._adb_binary(),
-                server_jar=jar,
-                # 非主屏：只镜像这块屏，视频与触控都跟着走
-                display_id=self._display_info.id if self._display_info is not None else None,
-            )
+        jar = find_server_jar()
+        if jar is None:
+            raise RuntimeError("未找到 scrcpy-server.jar，无法投屏；请重新安装 GamePilot")
+        extra = {"bit_rate": bit_rate} if bit_rate is not None else {}
+        channel = ScrcpyChannel(
+            serial=str(self.serial),
+            adb_path=self._adb_binary(),
+            server_jar=jar,
+            # 非主屏：只镜像这块屏，视频与触控都跟着走
+            display_id=self._display_info.id if self._display_info is not None else None,
+            **extra,
+        )
+        try:
             channel.start()
-            first = channel.latest_frame(timeout=2.0)
+            # 首帧不能只等 2s：MuMu 编码器初始化（尤其刚有残留 server 占着编码器时）
+            # 经常要 1~6s，等太短会把慢连接误判成失败，而每次误判又可能留下一个
+            # 抢编码器的 server。上限在 ScrcpyChannel 里，可用环境变量调。
+            first_frame_timeout = float(getattr(channel, "first_frame_timeout", 5.0))
+            first = channel.latest_frame(timeout=first_frame_timeout)
             if first is None:
-                raise RuntimeError("视频首帧未到")
-            self._last_frame = first
-            self._frame_seq = int(channel.frame_id)
-            self._scrcpy = channel
-            self._video_error = ""
-            self.link_note = f"scrcpy {channel.video_size[0]}×{channel.video_size[1]}{self._display_suffix()}"
-            logger.info("投屏通道: scrcpy %s", channel.video_size)
-        except Exception as exc:
-            if channel is not None:
-                with contextlib.suppress(Exception):
-                    channel.close()
+                reason = str(getattr(channel, "error", "") or "").strip()
+                detail = (
+                    f"（{first_frame_timeout:g}s 内没解码出画面，{reason}）"
+                    if reason
+                    else f"（{first_frame_timeout:g}s 内没解码出画面）"
+                )
+                raise RuntimeError(f"视频首帧未到{detail}")
+            return channel, first
+        except Exception:
+            with contextlib.suppress(Exception):
+                channel.close()
+            raise
+
+    def _start_scrcpy(self) -> None:
+        """必须收到第一张解码帧才算连接成功：拿不到画面直接报错，不降级到 adb 截图。
+
+        先用配置码率（默认 20M，可被 GAMEPILOT_SCRCPY_BITRATE 覆盖）；如果模拟器编码器
+        不接受，自动回退 8M 再试一次 —— 避免"为了画质调高码率"反而连不上。
+        """
+        errors: list[str] = []
+        started: tuple[Any, Any] | None = None
+        for bit_rate in (None, 8_000_000):
+            try:
+                started = self._open_scrcpy(bit_rate)
+                break
+            except Exception as exc:
+                errors.append(str(exc))
+                logger.warning("scrcpy 启动失败（码率 %s）：%s", bit_rate or "默认", exc)
+        if started is None:
             self._scrcpy = None
-            self._video_error = f"scrcpy 投屏启动失败：{exc}"
+            self._video_error = "scrcpy 投屏启动失败：" + "；".join(errors)
             self.link_note = f"{self._video_error}{self._display_suffix()}"
-            logger.warning(self.link_note)
-            raise RuntimeError(self._video_error) from exc
+            raise RuntimeError(self._video_error)
+        channel, first = started
+        self._last_frame = first
+        self._frame_seq = int(channel.frame_id)
+        self._scrcpy = channel
+        self._video_error = ""
+        self.link_note = f"scrcpy {channel.video_size[0]}×{channel.video_size[1]}{self._display_suffix()}"
+        logger.info("投屏通道: scrcpy %s (码率 %s)", channel.video_size, getattr(channel, "bit_rate", "?"))
 
     def _lose_video(self, reason: str) -> NoReturn:
         """视频通道没了就彻底断开：清掉通道并抛错，让会话报 failed 触发重连。
@@ -621,7 +712,11 @@ class AndroidController(Controller):
 
     def _lose_control(self, exc: BaseException) -> NoReturn:
         """控制 socket 断了就报错重连：不再拿 adb input 顶上（那会把延迟藏起来）。"""
+        channel = self._scrcpy
         self._scrcpy = None
+        if channel is not None:
+            with contextlib.suppress(Exception):
+                channel.close()
         self.channel = "scrcpy"
         self._video_error = f"scrcpy 控制通道断开（{exc}），请重连设备{self._display_suffix()}"
         self.link_note = self._video_error
@@ -664,6 +759,50 @@ class AndroidController(Controller):
     def _to_pixels(self, x: float, y: float) -> tuple[int, int]:
         width, height = self.resolution
         return round(x * width), round(y * height)
+
+    @property
+    def max_touch_points(self) -> int:
+        channel = self._scrcpy
+        if not self._connected or channel is None or not channel.alive:
+            return 0
+        return int(getattr(channel, "max_touch_points", 0))
+
+    def touch_down(self, x: float, y: float, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        self._validate_scrcpy_target(force=True)
+        channel = self._require_control()
+        try:
+            channel.touch_down(x, y, pointer_id=pointer_id, owner=owner)
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
+            self._lose_control(exc)
+
+    def touch_move(self, x: float, y: float, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        self._validate_scrcpy_target()
+        channel = self._require_control()
+        try:
+            channel.touch_move(x, y, pointer_id=pointer_id, owner=owner)
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
+            self._lose_control(exc)
+
+    def touch_up(self, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        channel = self._require_control()
+        try:
+            channel.touch_up(pointer_id=pointer_id, owner=owner)
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
+            self._lose_control(exc)
+
+    def release_touches(self, *, owner: str | None = None) -> None:
+        if owner is not None:
+            validate_touch_owner(owner)
+        channel = self._scrcpy
+        if channel is None:
+            return
+        try:
+            channel.release_touches(owner=owner)
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
+            self._lose_control(exc)
 
     def touch(self, phase: str, x: float, y: float) -> None:
         """实时触控事件（down/move/up）：只走 scrcpy 控制通道。"""

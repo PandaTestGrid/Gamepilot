@@ -6,12 +6,15 @@ import {
 } from '@/features/graph/flow/flow-click-region';
 import { coerceStr } from '@/lib/coerce';
 
-/** 引擎 `flow_engine._spec_for` 只认 params.by ===「坐标」 */
-export const CLICK_BY_COORD = '坐标';
-export const CLICK_BY_RECOGNIZER = '识别器';
+/** 点击定位协议值；展示文案由 CLICK_TARGET_MODE_OPTIONS 单独提供。 */
+export const CLICK_BY_COORD = 'coord';
+export const CLICK_BY_RECOGNIZER = 'recognizer';
 export { CLICK_BY_REGION };
 
 export type ClickTargetMode = 'coord' | 'recognizer' | 'region';
+
+/** 识别类点击的细分：图像（模板/颜色/文字识别器） vs AI（YOLO 识别器）。 */
+export type ClickTargetKind = 'image' | 'ai';
 
 export type ClickEventKind = 'click' | 'double_click' | 'long_press';
 
@@ -24,15 +27,45 @@ export const CLICK_EVENT_OPTIONS: ReadonlyArray<{
   { id: 'long_press', label: '长按' },
 ];
 
-/** 点击方式：图像优先（新建节点默认也是图像） */
+/**
+ * 点击方式下拉项：识别类在这里拆成两项，用户不用先猜类别。
+ *
+ * 协议上两者都是 `by: "recognizer"`；细分只落在 `params.ai`（界面提示），
+ * 引擎不读它，也不会影响旧图的执行。`image` 缺省就不写这个字段。
+ */
 export const CLICK_TARGET_MODE_OPTIONS: ReadonlyArray<{
-  readonly id: ClickTargetMode;
+  readonly value: ClickTargetKind | 'coord' | 'region';
   readonly label: string;
 }> = [
-  { id: 'recognizer', label: '图像' },
-  { id: 'coord', label: '坐标点' },
-  { id: 'region', label: '范围内随机' },
+  { value: 'image', label: '图像识别' },
+  { value: 'ai', label: 'AI 识别' },
+  { value: 'coord', label: '坐标点' },
+  { value: 'region', label: '范围内随机' },
 ];
+
+/** 识别类点击的细分：显式 `ai` 优先，其次看选中的识别器类型。 */
+export function clickTargetKind(
+  params: Record<string, unknown> | undefined,
+  recognizerType?: string,
+): ClickTargetKind {
+  if (params?.ai === true) {
+    return 'ai';
+  }
+  return recognizerType === 'yolo' ? 'ai' : 'image';
+}
+
+/** 下拉框当前值（识别类返回细分，其余返回协议值；非法 by 返回 null）。 */
+export function clickSelectValue(
+  params: Record<string, unknown> | undefined,
+  recognizerType?: string,
+): ClickTargetKind | 'coord' | 'region' | null {
+  const mode = clickTargetMode(params);
+  if (mode === null) {
+    return null;
+  }
+  return mode === 'recognizer' ? clickTargetKind(params, recognizerType) : mode;
+}
+
 
 export function clickEventKind(
   params: Record<string, unknown> | undefined,
@@ -77,8 +110,9 @@ export function clickEventPatch(
   return { event };
 }
 
-export function clickTargetMode(params: Record<string, unknown> | undefined): ClickTargetMode {
-  const by = coerceStr(params?.by);
+/** 显式未知协议值返回 null，不能再按残留字段推断，避免旧值被静默当成可执行目标。 */
+export function clickTargetMode(params: Record<string, unknown> | undefined): ClickTargetMode | null {
+  const by = params?.by;
   if (by === CLICK_BY_RECOGNIZER) {
     return 'recognizer';
   }
@@ -88,10 +122,13 @@ export function clickTargetMode(params: Record<string, unknown> | undefined): Cl
   if (by === CLICK_BY_COORD) {
     return 'coord';
   }
-  if (isNormRect(params?.rect)) {
-    return 'region';
+  if (by !== undefined) {
+    return null;
   }
-  return coerceStr(params?.rec).trim() ? 'recognizer' : 'coord';
+  if (coerceStr(params?.rec).trim()) {
+    return 'recognizer';
+  }
+  return isNormRect(params?.rect) ? 'region' : 'coord';
 }
 
 export function clickModePatch(mode: ClickTargetMode): Record<string, unknown> {
@@ -116,8 +153,19 @@ function centerFromRect(params: Record<string, unknown>): { x: number; y: number
 export function mergeClickTargetParams(
   params: Record<string, unknown>,
   mode: ClickTargetMode,
+  kind: ClickTargetKind = 'image',
 ): Record<string, unknown> {
   const next: Record<string, unknown> = { ...params, ...clickModePatch(mode) };
+  if (mode === 'recognizer') {
+    next.ai = kind === 'ai' ? true : undefined;
+    next.rect = undefined;
+    next.screenAspect = undefined;
+    next.x = undefined;
+    next.y = undefined;
+    next.preview = undefined;
+    return next;
+  }
+  next.ai = undefined;
   if (mode === 'region') {
     next.x = undefined;
     next.y = undefined;
@@ -145,7 +193,11 @@ export function mergeClickTargetParams(
 }
 
 export function formatClickCoordSummary(params: Record<string, unknown> | undefined): string {
-  if (clickTargetMode(params) === 'region') {
+  const mode = clickTargetMode(params);
+  if (mode === null) {
+    return '无效点击方式';
+  }
+  if (mode === 'region') {
     return formatClickRegionSummary(params);
   }
   return formatCoordPair(params?.x, params?.y);

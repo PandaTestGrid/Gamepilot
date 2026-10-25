@@ -1,6 +1,13 @@
 /** 画布端口：与引擎线性结构一致，分支用多 source handle 表达 */
 
-export type FlowSourceHandleId = 'out' | 'then' | 'else' | 'body';
+import type { FlowStep } from '@/types';
+
+export type FlowSourceHandleId =
+  'out' | 'then' | 'else' | 'body' | 'branch1' | 'branch2' | 'branch3' | 'branch4';
+
+export function parallelBranchCount(step: Pick<FlowStep, 'params'>): number {
+  return Math.min(4, Math.max(2, Math.floor(Number(step.params?.branches) || 2)));
+}
 
 export type FlowTargetHandleId = 'in' | 'back';
 
@@ -32,11 +39,32 @@ const PORTS_BY_TYPE: Readonly<Record<string, readonly FlowSourcePort[]>> = {
 };
 
 export function sourcePortsForStepType(type: string): readonly FlowSourcePort[] {
-  return PORTS_BY_TYPE[type] ?? DEFAULT_SOURCES;
+  return sourcePortsForStep({ type });
+}
+
+export function sourcePortsForStep(step: Pick<FlowStep, 'type' | 'params'>): readonly FlowSourcePort[] {
+  if (step.type === 'parallel') {
+    const count = parallelBranchCount(step);
+    return [
+      { id: 'out', label: '汇合后下一步', topPercent: 12 },
+      ...Array.from({ length: count }, (_, i) => ({
+        id: `branch${i + 1}` as FlowSourceHandleId,
+        label: `分支 ${i + 1}`,
+        topPercent: 30 + (i * 60) / Math.max(1, count - 1),
+      })),
+    ];
+  }
+  return PORTS_BY_TYPE[step.type] ?? DEFAULT_SOURCES;
 }
 
 export function isBranchSourceHandle(handle: string | null | undefined): handle is FlowSourceHandleId {
-  return handle === 'out' || handle === 'then' || handle === 'else' || handle === 'body';
+  return (
+    handle === 'out' ||
+    handle === 'then' ||
+    handle === 'else' ||
+    handle === 'body' ||
+    /^branch[1-4]$/.test(handle ?? '')
+  );
 }
 
 export function normalizeTargetHandle(

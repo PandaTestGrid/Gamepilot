@@ -33,10 +33,30 @@ describe('引擎能力校验', () => {
       'workflow.delete',
       'workflow.duplicate',
       'recognizer.search',
+      'recognizer.create',
+      'yolo.status',
+      'yolo.warmup',
+      'yolo.install',
+      'yolo.remove',
+      'recognizer.preview',
+      'yolo.models',
+      'yolo.model.set',
+      'yolo.model.add',
+      'recognizer.detail',
+      'recognizer.update',
+      'recognizer.frames.meta',
+      'recognizer.frame',
+      'recording.start',
+      'recording.stop',
+      'recording.meta',
+      'recording.frameAt',
+      'recording.delete',
+      'window.list',
+      
     ]);
   });
 
-  it('能力清单 = v4 八个方法 + recognizer.search（老的层级名不该再出现）', () => {
+  it('能力清单 = v4 八个方法 + 识别器/组件/本机窗口方法（老的层级名不该再出现）', () => {
     expect([...REQUIRED_ENGINE_METHODS]).toEqual([
       'workspace.tree',
       'workspace.list',
@@ -47,6 +67,37 @@ describe('引擎能力校验', () => {
       'workflow.delete',
       'workflow.duplicate',
       'recognizer.search',
+      'recognizer.create',
+      'yolo.status',
+      'yolo.warmup',
+      'yolo.install',
+      'yolo.remove',
+      'recognizer.preview',
+      'yolo.models',
+      'yolo.model.set',
+      'yolo.model.add',
+      'recognizer.detail',
+      'recognizer.update',
+      'recognizer.frames.meta',
+      'recognizer.frame',
+      'recording.start',
+      'recording.stop',
+      'recording.meta',
+      'recording.frameAt',
+      'recording.delete',
+      'window.list',
+      
+    ]);
+  });
+
+  it('旧引擎即使支持原有方法，也必须提示缺少新录制接口', () => {
+    const old = REQUIRED_ENGINE_METHODS.filter((method) => !method.startsWith('recording.'));
+    expect(missingEngineMethods(old)).toEqual([
+      'recording.start',
+      'recording.stop',
+      'recording.meta',
+      'recording.frameAt',
+      'recording.delete',
     ]);
   });
 

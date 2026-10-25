@@ -5,6 +5,7 @@
 
 用法：
     engine/.venv/bin/python scripts/smoke-rpc.py
+    设置 GAMEPILOT_ENGINE_BIN 为打包后的引擎路径，可以对发布 sidecar 执行同一套验收。
 
 隔离：临时工作区目录 + 临时 config 目录（`GAMEPILOT_CONFIG_DIR`），
 绝不碰用户真实工作区与真实 config.json。退出码 0 = 全过。
@@ -49,7 +50,7 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 
 
 class Engine:
-    """一个真实的 `python -m gamepilot.rpc` 子进程。"""
+    """一个真实的引擎子进程（开发解释器或 GAMEPILOT_ENGINE_BIN 指定的发布 sidecar）。"""
 
     def __init__(self, config_dir: Path, env_extra: dict[str, str] | None = None) -> None:
         env = {
@@ -59,12 +60,15 @@ class Engine:
             "GAMEPILOT_LOG_LEVEL": "ERROR",
             **(env_extra or {}),
         }
+        engine_bin = os.environ.get("GAMEPILOT_ENGINE_BIN")
+        command = [engine_bin, "--stdio"] if engine_bin else [sys.executable, "-m", "gamepilot.rpc"]
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "gamepilot.rpc"],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
             env=env,
         )
         self._id = 0
@@ -86,7 +90,7 @@ class Engine:
         assert self.proc.stdin and self.proc.stdout
         self._id += 1
         request = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or {}}
-        self.proc.stdin.write(json.dumps(request) + "\n")
+        self.proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
         self.proc.stdin.flush()
         while True:
             line = self.proc.stdout.readline()

@@ -279,6 +279,7 @@ def _call_many(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         bufsize=1,
         env={
             **os.environ,
@@ -466,3 +467,23 @@ def test_parse_device_uri_keeps_udid_and_leading_zeros_as_string() -> None:
     assert options == {"serial": "0012"}
     _, options = parse_device_uri("iOS:///?udid=00008110-000665303413801E")
     assert options == {"udid": "00008110-000665303413801E"}
+
+
+def test_ios_usbmux_missing_does_not_hide_android(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没有 iTunes / Apple Mobile Device Service 时，只给 iOS 一条提示，Android 设备照常出现。"""
+
+    class ConnectionFailedToUsbmuxdError(Exception):
+        pass
+
+    def android() -> list[DeviceInfo]:
+        return [DeviceInfo(id="android:phone", uri="Android:///?serial=phone", name="Android Phone")]
+
+    def ios() -> list[DeviceInfo]:
+        raise ConnectionFailedToUsbmuxdError("usbmuxd is not running")
+
+    from gamepilot import devices
+
+    monkeypatch.setattr(devices, "_providers", lambda: [("android", android), ("ios", ios)])
+    result = devices.scan()
+    assert [item.id for item in result.devices] == ["android:phone"]
+    assert result.errors == [{"provider": "ios", "message": devices.IOS_APPLE_USBMUX_ERROR}]

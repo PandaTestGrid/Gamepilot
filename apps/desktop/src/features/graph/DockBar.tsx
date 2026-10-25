@@ -5,7 +5,7 @@
  * 详情坞显式展开/收起控制条。
  *
  * 行为：
- *   - 左侧 `leading`（工具图标，如框选/点选录制）+ `tabs`（配置 / 控制台）
+ *   - 左侧 `tabs`（配置 / 控制台）；录制工具已搬到画面栏「素材区」头部，这里不再有工具图标
  *   - 右侧显示当前"在编辑什么"（哪个节点/边），收起时也能一眼看到选中项
  *   - 最右是收起/展开**图标按钮**（不用文字按钮样式）：收起后仍留 28px 提示条，横线还能抓
  *     （展开高度由 Panel 自己记着 —— 不在这里读 ref，渲染期读 ref 是 React 的禁忌）
@@ -23,7 +23,6 @@ export function DockBar({
   subtitle,
   onToggle,
   tabs,
-  leading,
 }: {
   panelRef: RefObject<PanelImperativeHandle | null>;
   /** 收起时也显示：当前在编辑什么（节点名/边名） */
@@ -32,8 +31,6 @@ export function DockBar({
   onToggle?: (open: boolean) => void;
   /** Tab 条（配置 / 控制台） */
   tabs?: ReactNode;
-  /** Tab 左侧的工具图标（框选 / 点选录制） */
-  leading?: ReactNode;
 }): ReactNode {
   const [open, setOpen] = useState(false);
 
@@ -58,8 +55,6 @@ export function DockBar({
 
   return (
     <div className="flex h-[28px] shrink-0 items-center gap-1 border-b border-line bg-panel px-2">
-      {leading}
-      {leading && tabs ? <span className="mx-0.5 h-3.5 w-px shrink-0 bg-line" /> : null}
       {tabs}
       <span
         className="ml-auto min-w-0 truncate text-badge text-faint"

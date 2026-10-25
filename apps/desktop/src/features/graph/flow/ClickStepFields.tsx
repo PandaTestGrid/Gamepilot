@@ -5,6 +5,7 @@ import { Crosshair, MapPin, X } from 'lucide-react';
 import { type ReactNode } from 'react';
 
 import { ClickRegionPreview } from '@/features/graph/flow/ClickRegionPreview';
+import { TouchFingerFields } from '@/features/graph/flow/TouchFingerFields';
 import {
   CLICK_BY_COORD,
   CLICK_BY_RECOGNIZER,
@@ -13,35 +14,25 @@ import {
   CLICK_TARGET_MODE_OPTIONS,
   clickEventKind,
   clickEventPatch,
-  mergeClickTargetParams,
+  clickSelectValue,
+  clickTargetKind,
   clickTargetMode,
+  mergeClickTargetParams,
   type ClickEventKind,
+  type ClickTargetKind,
   type ClickTargetMode,
 } from '@/features/graph/flow/flow-click-params';
 import { isNormRect, type NormRect } from '@/features/graph/flow/flow-click-region';
-import { resolveFlowGlobalDefaults } from '@/features/graph/flow/FlowGlobalSettingsDrawer';
 import { StepSearchScope } from '@/features/graph/flow/StepSearchScope';
+import { StepSelectionStrategy } from '@/features/graph/flow/StepSelectionStrategy';
 import { RecognizerPicker } from '@/features/recognizers/RecognizerPicker';
 import { clampUnitCoord } from '@/features/graph/flow/flow-coord-utils';
 import { coerceStr } from '@/lib/coerce';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
-import { rawFor, SCRIPT_SCOPE, useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
-
-function optionalNumber(value: unknown): number | '' {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return '';
-}
 
 export function ClickStepFields({
   stepId,
@@ -82,18 +73,44 @@ export function ClickStepFields({
     (state) => state.pendingFlowClickCoordStepId === stepId && state.recordMode === 'pick',
   );
   const activeDeviceId = useDeviceStore((state) => state.activeId);
+  const graph = useGraphStore((state) => graphForDevice(state, activeDeviceId));
+  const recognizer = graph?.recognizers.find((item) => item.label === params.rec);
+  const isAi = recognizer?.type === 'yolo';
+  /** 识别类点击的细分：图像识别 / AI 识别（旧图没有 ai 字段时按识别器类型推断）。 */
+  const kind = clickTargetKind(params, recognizer?.type);
+  /**
+   * 识别器选择器只列当前细分类的识别器：以前图像模板和 AI 标记图片混在同一个网格里，
+   * 用户看不出点的是哪一类。没有 graph（理论上的空态）才退回父级给的整份标签。
+   */
+  const kindLabels = graph
+    ? graph.recognizers
+        .filter((item) => (kind === 'ai' ? item.type === 'yolo' : item.type !== 'yolo'))
+        .map((item) => item.label)
+    : recognizerLabels;
+  const selectValue = clickSelectValue(params, recognizer?.type);
+  const roi = recognizer?.roi;
+  const aiFullScreen = isAi && (!roi || (roi[0] === 0 && roi[1] === 0 && roi[2] === 1 && roi[3] === 1));
   const liveResolution = useSessionStore((state) =>
     activeDeviceId ? state.frames[activeDeviceId]?.resolution : undefined,
   );
-  const rawDefaults = useGraphStore((state) => rawFor(state, activeDeviceId || SCRIPT_SCOPE)?.defaults);
-  const globalCfg = resolveFlowGlobalDefaults(rawDefaults);
   const inputClass = cn(
     'nodrag nopan rounded-sm border border-line bg-canvas px-1 text-fg focus:border-brand focus:outline-none',
     compact ? 'h-5 min-w-0 flex-1 text-[11px]' : 'h-5 text-badge',
   );
 
   const setMode = (next: ClickTargetMode): void => {
-    onPatch(mergeClickTargetParams(params, next));
+    onPatch(mergeClickTargetParams(params, next, kind));
+  };
+
+  /** 切换「图像识别 / AI 识别」：顺手清掉不属于新细分类的识别器引用。 */
+  const setKind = (next: ClickTargetKind): void => {
+    const current = coerceStr(params.rec).trim();
+    const currentType = graph?.recognizers.find((item) => item.label === current)?.type;
+    const matches = next === 'ai' ? currentType === 'yolo' : currentType !== undefined && currentType !== 'yolo';
+    onPatch({
+      ...mergeClickTargetParams(params, 'recognizer', next),
+      rec: matches ? current : '',
+    });
   };
 
   const setEvent = (next: ClickEventKind): void => {
@@ -170,6 +187,8 @@ export function ClickStepFields({
         </div>
       )}
 
+      {showMode && <TouchFingerFields params={params} onPatch={onPatch} compact={compact} />}
+
       {showMode && eventKind === 'long_press' && (
         <label className={cn('flex items-center gap-1 text-dim', compact && 'text-[11px]')}>
           时长
@@ -200,16 +219,23 @@ export function ClickStepFields({
           <select
             data-testid="click-target-mode-select"
             className={cn(inputClass, 'block w-full max-w-none')}
-            value={mode}
+            value={selectValue ?? ''}
             onChange={(event) => {
               const value = event.target.value;
-              if (value === 'recognizer' || value === 'region' || value === 'coord') {
+              if (value === 'image' || value === 'ai') {
+                setKind(value);
+              } else if (value === 'region' || value === 'coord') {
                 setMode(value);
               }
             }}
           >
+            {selectValue === null && (
+              <option value="" disabled>
+                请选择有效点击方式
+              </option>
+            )}
             {CLICK_TARGET_MODE_OPTIONS.map((item) => (
-              <option key={item.id} value={item.id}>
+              <option key={item.value} value={item.value}>
                 {item.label}
               </option>
             ))}
@@ -217,26 +243,63 @@ export function ClickStepFields({
         </label>
       )}
 
+      {mode === null && (
+        <p role="alert" className="text-badge text-err">
+          无效点击方式，请重新选择；旧中文协议值不再支持。
+        </p>
+      )}
+
       {showImage && mode === 'recognizer' ? (
         <div className={cn('space-y-0.5 border-t border-line pt-1.5', compact && 'text-[11px]')}>
+          {!compact ? (
+            <div className="flex items-center justify-between gap-2 text-faint">
+              <span>{kind === 'ai' ? 'AI 识别器' : '图像识别器'}</span>
+              <span className="tabular-nums">{kindLabels.length} 个</span>
+            </div>
+          ) : null}
           <RecognizerPicker
             compact={compact}
             previewSide={previewSide}
             flowStepId={stepId}
             value={coerceStr(params.rec)}
-            labels={recognizerLabels}
+            labels={kindLabels}
             onChange={(rec) =>
               onPatch({
                 by: CLICK_BY_RECOGNIZER,
+                ai: kind === 'ai' ? true : undefined,
                 rec,
               })
             }
           />
+          {kindLabels.length === 0 ? (
+            <p className="text-[10px] leading-snug text-faint">
+              {kind === 'ai'
+                ? '还没有 AI 识别器：到素材区点「新建 AI 识别器」。'
+                : '还没有图像识别器：点「录制」在画面栏框选一个模板。'}
+            </p>
+          ) : null}
+          {isAi && !compact ? (
+            <p className="pt-2 text-badge font-medium text-dim">本步点击策略</p>
+          ) : null}
+          <StepSelectionStrategy
+            compact={compact}
+            value={params.strategy}
+            index={params.index}
+            onChange={(patch) => onPatch(patch)}
+          />
           {!compact ? (
-            <StepSearchScope
-              value={params.search}
-              onChange={(search) => onPatch({ search: search === 'auto' ? undefined : search })}
-            />
+            aiFullScreen ? (
+              <div data-testid="ai-search-fullscreen" className="space-y-1 pt-1 text-badge">
+                <div className="flex justify-between gap-2 text-dim">
+                  <span>搜索范围</span><span className="text-fg">全屏</span>
+                </div>
+                <p className="text-[10px] leading-snug text-dim">
+                  未设置独立搜索区域；标记图片仅用于识别目标外观。
+                </p>
+              </div>
+            ) : (
+              <StepSearchScope value={params.search} onChange={(search) => onPatch({ search })} />
+            )
           ) : null}
         </div>
       ) : null}
@@ -334,84 +397,6 @@ export function ClickStepFields({
               </button>
             ) : null}
           </div>
-        </div>
-      ) : null}
-
-      {showMode && compact ? (
-        <div className="text-[10px] text-faint" data-testid="click-human-compact">
-          拟人点击：偏移 {coerceStr(params.click_jitter_px, `全局${globalCfg.click_jitter_px}`)}px · 按下{' '}
-          {coerceStr(params.tap_duration_ms, `全局${globalCfg.tap_duration_ms}`)}ms
-        </div>
-      ) : null}
-
-      {showMode && !compact ? (
-        <div className="space-y-1.5 border-t border-line/70 pt-1.5" data-testid="click-human-fields">
-          <div className="text-faint">拟人点击</div>
-          <label className="flex items-center gap-1 text-dim">
-            偏移
-            <input
-              type="number"
-              min={0}
-              max={100}
-              step={1}
-              data-testid="click-jitter-px"
-              placeholder={`跟随全局 (${globalCfg.click_jitter_px})`}
-              value={optionalNumber(params.click_jitter_px)}
-              onChange={(event) => {
-                const raw = event.target.value.trim();
-                onPatch({
-                  click_jitter_px:
-                    raw === '' ? undefined : Math.min(100, Math.max(0, Math.round(Number(raw) || 0))),
-                });
-              }}
-              className={cn(inputClass, 'w-20 flex-none')}
-            />
-            <span className="text-faint">px</span>
-          </label>
-          {eventKind !== 'long_press' ? (
-            <label className="flex items-center gap-1 text-dim">
-              按下
-              <input
-                type="number"
-                min={10}
-                max={2000}
-                step={10}
-                data-testid="click-tap-duration"
-                placeholder={`跟随全局 (${globalCfg.tap_duration_ms})`}
-                value={optionalNumber(params.tap_duration_ms)}
-                onChange={(event) => {
-                  const raw = event.target.value.trim();
-                  onPatch({
-                    tap_duration_ms:
-                      raw === '' ? undefined : Math.min(2000, Math.max(10, Math.round(Number(raw) || 10))),
-                  });
-                }}
-                className={cn(inputClass, 'w-20 flex-none')}
-              />
-              <span className="text-faint">ms</span>
-            </label>
-          ) : null}
-          <label className="flex items-center gap-1 text-dim">
-            微移
-            <input
-              type="number"
-              min={0}
-              max={40}
-              step={1}
-              data-testid="click-micro-px"
-              placeholder={`跟随全局 (${globalCfg.click_micro_px})`}
-              value={optionalNumber(params.click_micro_px)}
-              onChange={(event) => {
-                const raw = event.target.value.trim();
-                onPatch({
-                  click_micro_px:
-                    raw === '' ? undefined : Math.min(40, Math.max(0, Math.round(Number(raw) || 0))),
-                });
-              }}
-              className={cn(inputClass, 'w-20 flex-none')}
-            />
-            <span className="text-faint">px</span>
-          </label>
         </div>
       ) : null}
 

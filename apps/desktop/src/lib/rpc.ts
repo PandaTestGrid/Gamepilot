@@ -10,7 +10,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 
-import type { DeviceKind, TraceEventType } from '@/types';
+import type { DeviceCapabilities, DeviceKind, TraceEventType } from '@/types';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { pushUiLog } from '@/lib/log-bus';
@@ -97,6 +97,11 @@ export interface PingResult {
   readonly ts: number;
 }
 
+/** 这台机器的运行环境快照（引擎 + adb 路径/版本、5037 占用、设备列表…）：跑不起来时先要它。 */
+export function engineDiagnostics(): Promise<Record<string, unknown>> {
+  return rpc<Record<string, unknown>>('engine.diagnostics', {});
+}
+
 /** 骨架自检用：确认「前端 → Rust → Python」三段链路通畅。 */
 export function ping(): Promise<PingResult> {
   return rpc<PingResult>('engine.ping');
@@ -115,6 +120,7 @@ export interface DeviceInfoPayload {
   readonly resolution: readonly [number, number] | null;
   readonly error: string | null;
   readonly suggestedFix: string | null;
+  readonly capabilities?: DeviceCapabilities;
 }
 
 export interface DeviceScanError {
@@ -125,9 +131,16 @@ export interface DeviceScanError {
 export interface DeviceListResult {
   readonly devices: readonly DeviceInfoPayload[];
   readonly errors: readonly DeviceScanError[];
+  /** 这些设备的首次多屏详情尚未就绪，不能把附屏缺席当作已关闭。 */
+  readonly pendingAndroidSerials?: readonly string[];
 }
 
-/** 扫描可用设备（adb 真机/模拟器 + iOS + macOS 窗口）。scan=false 时不扫描，直接返回空列表。 */
+/** `device.list.changed`：设备上下线、授权状态或后台详情变化，重新读取列表。 */
+export interface DeviceListChangedPayload {
+  readonly provider: 'android' | 'ios' | 'macos' | 'windows';
+}
+
+/** 扫描可用设备（adb 真机/模拟器 + iOS + Windows/macOS 本机窗口）。scan=false 时不扫描，直接返回空列表。 */
 export function listDevices(scan = true): Promise<DeviceListResult> {
   return rpc<DeviceListResult>('device.list', { scan });
 }
@@ -170,6 +183,7 @@ export interface ConnectResult {
   readonly name?: string;
   /** 设备类型（ios / windows / …），界面用来选对图标与文案 */
   readonly kind?: DeviceKind;
+  readonly capabilities?: DeviceCapabilities;
 }
 
 export interface RecordResult {
@@ -192,17 +206,25 @@ export interface FramePayload {
   readonly resolution: readonly [number, number];
   readonly node: string | null;
   readonly pending: string | null;
+  readonly activeStepIds?: readonly string[];
   readonly tick: number;
   readonly fps: number;
   readonly captureMs: number;
+  /** 权威运行快照；旧引擎没有这些字段，不能把缺省当成停止。 */
+  readonly workflowRoot?: string;
+  readonly running?: boolean;
+  readonly runningWorkflowRoots?: readonly string[];
+  readonly runRevision?: number;
   readonly detections: ReadonlyArray<{
     label: string;
     rect: readonly [number, number, number, number];
     score: number;
     source: string;
     state: 'confirmed' | 'pending' | 'idle';
-    /** 有多个同分且位置不同的候选（全屏搜索）：界面提示，点击会拒绝猜 */
+    /** 有多个同分且位置不同的候选（全屏搜索）：界面提示；步骤可配「多目标」策略 */
     ambiguous?: boolean;
+    /** 同一识别器的全部不同命中（只有一个命中时引擎不发这个字段） */
+    candidates?: ReadonlyArray<readonly [number, number, number, number]>;
   }>;
   /** 只有老引擎会塞在事件里；新引擎的帧走 `fetchFrame`（原始字节） */
   readonly jpeg?: string;
@@ -235,6 +257,7 @@ export interface DeviceNotificationPayload {
   readonly uri?: string;
   readonly name?: string;
   readonly kind?: DeviceKind;
+  readonly capabilities?: DeviceCapabilities;
   readonly phase?: string;
   readonly resolution?: readonly [number, number];
   readonly channel?: string;
@@ -401,26 +424,57 @@ export function renameRecognizer(
   return rpc<RenameRecognizerResult>('recognizer.rename', { deviceId, label, to });
 }
 
-/** macOS 本机窗口列表（界面上的窗口选择器；也可手动输句柄） */
-export interface MacWindowInfo {
+/**
+ * `window.list` 返回的一个本机窗口（跨平台统一模型）。
+ *
+ * Windows 的 `handle` 就是 `EnumWindows` 给的 `HWND`，macOS 的 `handle` 是
+ * `kCGWindowNumber`。每项都带 `uri` / `deviceId`：界面点一行直接
+ * `device.connect { uri }`，不需要自己拼。
+ */
+export interface WindowInfo {
   readonly handle: number;
+  /** Windows 的 HWND；macOS 没有这个字段 */
+  readonly hwnd?: number;
   readonly pid: number;
+  /** Windows 进程名（`Game.exe`）；macOS 没有这个字段 */
+  readonly process?: string;
   readonly app: string;
   readonly title: string;
+  /** Windows 窗口类名（`UnityWndClass` / `UnrealWindow`） */
+  readonly class?: string;
+  readonly className?: string;
   readonly label: string;
   readonly x: number;
   readonly y: number;
   readonly width: number;
   readonly height: number;
+  readonly clientWidth?: number;
+  readonly clientHeight?: number;
+  /** 最小化窗口可能抓到黑屏 */
+  readonly minimized?: boolean;
+  /** 目标可能以管理员权限运行（普通权限的输入会被 UIPI 拦下） */
+  readonly protected?: boolean;
+  /** 直接可连的 URI（`Windows:///?hwnd=<十进制>` / `Mac:///?window=<句柄>`） */
   readonly uri: string;
+  /** 已连接集合用的设备 id（`windows:6698742` / `macos:89`） */
+  readonly deviceId: string;
 }
 
-export function macWindows(): Promise<{
-  platform: string;
-  allowed: boolean;
-  windows: MacWindowInfo[];
-}> {
-  return rpc<{ platform: string; allowed: boolean; windows: MacWindowInfo[] }>('mac.windows', {});
+export interface WindowListResult {
+  /** `win32` / `darwin` / 其它（非 Windows/macOS 平台） */
+  readonly platform: string;
+  readonly allowed: boolean;
+  readonly note: string;
+  readonly windows: readonly WindowInfo[];
+}
+
+/**
+ * 本机窗口列表（Windows / macOS 统一入口，界面「本机窗口」Tab 用它）。
+ *
+ * `includeOwn` 默认 false：不列 GamePilot 自己的窗口，避免用户把自己的画面接成设备。
+ */
+export function windowList(includeOwn = false): Promise<WindowListResult> {
+  return rpc<WindowListResult>('window.list', { includeOwn });
 }
 
 /** 把一步手动操作录成脚本里的一条边（画面栏开着「录操作」时调） */
@@ -662,6 +716,294 @@ export function recordOcr(params: {
   return rpc<RecordResult>('record.ocr', { ...params });
 }
 
+/** 读取 AI 识别器的参数与示例（素材区编辑用）。 */
+export interface YoloExamplePayload {
+  readonly rect: readonly [number, number, number, number];
+  readonly label: string;
+  readonly image: string;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface YoloRecognizerDetail {
+  readonly label: string;
+  readonly threshold: number;
+  readonly search: 'region' | 'full';
+  readonly roi?: readonly [number, number, number, number] | null;
+  readonly imgsz: number;
+  readonly tile: boolean;
+  readonly tileSize: number;
+  readonly tileOverlap: number;
+  readonly examples: YoloExamplePayload[];
+}
+
+export function recognizerDetail(deviceId: string, label: string): Promise<YoloRecognizerDetail> {
+  return rpc<YoloRecognizerDetail>('recognizer.detail', { deviceId, label });
+}
+
+/** 更新已有 AI 识别器，可同时原子改名。 */
+export function updateYoloRecognizer(
+  deviceId: string,
+  label: string,
+  spec: Readonly<Record<string, unknown>>,
+  newLabel?: string,
+): Promise<{ label: string; graph: GraphPayload }> {
+  return rpc<{ label: string; graph: GraphPayload }>('recognizer.update', {
+    deviceId,
+    label,
+    spec,
+    ...(newLabel !== undefined ? { newLabel } : {}),
+  });
+}
+
+/** 给已有 AI 识别器追加一个示例框（参考帧 = 当前画面）。 */
+export function addYoloExample(
+  deviceId: string,
+  label: string,
+  rect: readonly [number, number, number, number],
+): Promise<{ label: string; examples: number; graph: GraphPayload }> {
+  return rpc<{ label: string; examples: number; graph: GraphPayload }>('recognizer.example', {
+    deviceId,
+    label,
+    rect,
+  });
+}
+
+/** 最近的帧（AI 标注弹窗前后翻帧挑参考）。 */
+/** 帧缓冲元信息（引擎最多保留 1000 帧，前端按帧号懒加载）。 */
+export interface FrameMetaPayload {
+  readonly count: number;
+  readonly firstIndex: number;
+  readonly lastIndex: number;
+  readonly width: number;
+  readonly height: number;
+  /** 真实帧号列表（可能跳号），进度条位置按它映射 */
+  readonly indices: number[];
+}
+
+export function frameMeta(deviceId: string): Promise<FrameMetaPayload> {
+  return rpc<FrameMetaPayload>('recognizer.frames.meta', { deviceId });
+}
+
+/** 按帧序号取单帧（回放/拖进度条用）。 */
+export interface FrameAtPayload {
+  readonly index: number;
+  /** 调用方请求的帧号（nearest=true 且请求帧已被滚出缓冲时，index 会和它不同） */
+  readonly requestedIndex?: number;
+  readonly jpeg: string;
+  readonly width: number;
+  readonly height: number;
+  readonly ts: number;
+}
+
+/**
+ * 按帧序号取单帧。
+ *
+ * `nearest`：请求的帧已经被环形缓冲挤掉时，返回**帧号最接近**的一帧而不是报错。
+ * 回放/预取都该传 true —— 画面帧一直在滚，严格匹配必然会随机失败。
+ */
+export function frameAt(
+  deviceId: string,
+  index: number,
+  options: { nearest?: boolean } = {},
+): Promise<FrameAtPayload> {
+  return rpc<FrameAtPayload>('recognizer.frame', {
+    deviceId,
+    index,
+    ...(options.nearest ? { nearest: true } : {}),
+  });
+}
+
+export interface RecordingMetaPayload {
+  readonly recordingId: string;
+  readonly active: boolean;
+  readonly count: number;
+  readonly firstIndex: number;
+  readonly lastIndex: number;
+  readonly indices?: number[];
+  readonly nextAfterIndex?: number | null;
+  readonly hasMore?: boolean;
+}
+
+export function recordingStart(deviceId: string): Promise<RecordingMetaPayload> {
+  return rpc<RecordingMetaPayload>('recording.start', { deviceId });
+}
+
+export function recordingStop(deviceId: string, recordingId: string): Promise<RecordingMetaPayload> {
+  return rpc<RecordingMetaPayload>('recording.stop', { deviceId, recordingId });
+}
+
+export function recordingMeta(
+  deviceId: string,
+  recordingId: string,
+  afterIndex?: number,
+): Promise<RecordingMetaPayload> {
+  return rpc<RecordingMetaPayload>('recording.meta', {
+    deviceId,
+    recordingId,
+    limit: 500,
+    ...(afterIndex === undefined ? {} : { afterIndex }),
+  });
+}
+
+export function recordingFrameAt(
+  deviceId: string,
+  recordingId: string,
+  index: number,
+): Promise<FrameAtPayload> {
+  return rpc<FrameAtPayload>('recording.frameAt', { deviceId, recordingId, index });
+}
+
+export function recordingDelete(deviceId: string, recordingId: string): Promise<{ ok: boolean }> {
+  return rpc<{ ok: boolean }>('recording.delete', { deviceId, recordingId });
+}
+
+export interface FrameHistoryItem {
+  readonly index: number;
+  readonly jpeg: string;
+  readonly width: number;
+  readonly height: number;
+  readonly ts: number;
+}
+
+export function frameHistory(deviceId: string, count = 20): Promise<{ frames: FrameHistoryItem[] }> {
+  return rpc<{ frames: FrameHistoryItem[] }>('recognizer.frames', { deviceId, count });
+}
+
+/** 组件/开发态模型目录里的 .pt 列表。 */
+export interface YoloModelsPayload {
+  readonly models: readonly string[];
+  readonly model: string;
+  readonly dir: string;
+  /** worker 上报的推理设备：cuda / cpu / 空（未启动） */
+  readonly device?: string;
+}
+
+export function yoloModels(): Promise<YoloModelsPayload> {
+  return rpc<YoloModelsPayload>('yolo.models');
+}
+
+/** 切换默认权重（会重启 worker，下次推理时加载）。 */
+export function yoloSetModel(
+  model: string,
+): Promise<YoloModelsPayload & { reloading: boolean; workerReady: boolean }> {
+  return rpc('yolo.model.set', { model });
+}
+
+/** 把本机 .pt 复制进模型目录（不传大文件，只传路径）。 */
+export function yoloAddModel(path: string): Promise<{ added: string[]; models: string[] }> {
+  return rpc<{ added: string[]; models: string[] }>('yolo.model.add', { path });
+}
+
+/** 弹窗「实时检测」预览：用示例框 + 调参在当前画面上跑一次。 */
+export interface YoloPreviewDet {
+  readonly class: string;
+  readonly conf: number;
+  readonly bbox: readonly [number, number, number, number];
+}
+
+export interface YoloPreviewPayload {
+  readonly previewId: string;
+  readonly examples: ReadonlyArray<{
+    readonly rect: readonly [number, number, number, number];
+    readonly label: string;
+    /** 示例自己的冻结帧（data URL）；只在参数/示例变化时带一次 */
+    readonly image?: string;
+  }>;
+  readonly conf: number;
+  readonly iou: number;
+  readonly imgsz: number;
+  readonly tile: boolean;
+  readonly tileSize: number;
+  readonly tileOverlap?: number;
+  readonly roi?: readonly [number, number, number, number] | null;
+  /** true（默认）= 同一 previewId 只取一次帧，标注/检测期间画面不动 */
+  readonly freeze?: boolean;
+}
+
+export function previewYolo(
+  deviceId: string,
+  payload: YoloPreviewPayload,
+): Promise<{
+  dets: YoloPreviewDet[];
+  ms: number;
+  inferMs: number;
+  queueMs: number;
+  /** worker 的推理设备：cuda / cpu（界面用来提示快慢） */
+  device: string;
+  width: number;
+  height: number;
+}> {
+  return rpc('recognizer.preview', { deviceId, ...payload });
+}
+
+/** 不录模板，直接注册一个识别器（AI 识别器用）。 */
+export function createRecognizer(
+  deviceId: string,
+  label: string,
+  spec: Readonly<Record<string, unknown>>,
+): Promise<{ label: string; graph: GraphPayload }> {
+  return rpc<{ label: string; graph: GraphPayload }>('recognizer.create', { deviceId, label, spec });
+}
+
+// --------------------------------------------------------------------------
+// AI（YOLO）识别组件：可选下载的独立 worker（torch + 模型），装到用户目录
+// --------------------------------------------------------------------------
+
+export interface YoloComponentStatus {
+  readonly installed: boolean;
+  readonly version: string | null;
+  readonly path: string;
+  readonly sizeMb: number;
+  readonly manifest: Readonly<Record<string, unknown>>;
+}
+
+export interface YoloStatusPayload {
+  readonly component: YoloComponentStatus;
+  readonly runtime: Readonly<Record<string, unknown>>;
+}
+
+export interface YoloProgressPayload {
+  readonly state: 'downloading' | 'extracting' | 'verifying' | 'done' | 'error';
+  readonly progress?: number;
+  readonly stage?: string;
+  readonly error?: string;
+  readonly status?: YoloComponentStatus;
+}
+
+/** 组件与 worker 状态（未安装时 component.installed=false）。 */
+/** 后台预热 worker（加载模型，不跑推理）；返回同 status。 */
+export function yoloWarmup(): Promise<YoloStatusPayload> {
+  return rpc<YoloStatusPayload>('yolo.warmup', {});
+}
+
+export function yoloStatus(): Promise<YoloStatusPayload> {
+  return rpc<YoloStatusPayload>('yolo.status');
+}
+
+/** 安装组件：source 省略时由引擎读 GAMEPILOT_YOLO_COMPONENT_URL；进度走 `yolo.progress`。 */
+export function yoloInstall(source?: string): Promise<{ accepted: boolean }> {
+  return rpc<{ accepted: boolean }>('yolo.install', source ? { source } : {});
+}
+
+export function yoloRemove(): Promise<YoloComponentStatus> {
+  return rpc<YoloComponentStatus>('yolo.remove');
+}
+
+export function setRecognizerEnabled(
+  deviceId: string | undefined,
+  label: string,
+  enabled: boolean,
+  workflowRoot?: string,
+): Promise<{ label: string; enabled: boolean; graph?: GraphPayload }> {
+  return rpc('recognizer.enabled', {
+    ...(deviceId ? { deviceId } : {}),
+    label,
+    enabled,
+    ...(workflowRoot ? { workflowRoot } : {}),
+  });
+}
+
 export function setRecognizerThreshold(deviceId: string, label: string, threshold: number): Promise<void> {
   return rpc<void>('recognizer.threshold', { deviceId, label, threshold });
 }
@@ -688,6 +1030,21 @@ export function runStart(
     ...(stepId ? { stepId } : {}),
     ...(workflowRoot ? { workflowRoot } : {}),
   });
+}
+
+export interface RunStatusPayload {
+  readonly deviceId: string;
+  readonly running: boolean;
+  readonly runningWorkflowRoots: readonly string[];
+  readonly runRevision?: number;
+}
+
+export function subscribeEngineEvents(): Promise<{ ok: boolean }> {
+  return rpc<{ ok: boolean }>('engine.events.subscribe', {});
+}
+
+export function runStatus(deviceId: string): Promise<RunStatusPayload> {
+  return rpc<RunStatusPayload>('run.status', { deviceId });
 }
 
 export function runStop(deviceId: string, workflowRoot?: string): Promise<{ running: boolean }> {

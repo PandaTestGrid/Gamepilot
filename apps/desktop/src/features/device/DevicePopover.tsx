@@ -4,7 +4,7 @@
  * 与 AirtestIDE 的差别都体现在这里：
  *   - 四个折叠区 → **按来源分类的 Tab（只显示有内容的分类，带数量）**；
  *   - 「先选下拉再点连接」 → 点行任意位置即连；**已连接的行点一下 = 切换当前设备**；
- *   - 本机窗口（macOS）不再塞在底部折叠区里 → 独立 Tab，整个列表区都是窗口选择器；
+ *   - 本机窗口（Windows / macOS 通用）不再塞在底部折叠区里 → 独立 Tab，整个列表区都是窗口选择器；
  *   - 裸的「刷新/重启 ADB」 → 收进 ⋯ 高级；
  *   - 键盘可用：↑↓ 换行、Enter 连接/切换、Esc 关闭、打开即聚焦搜索框。
  */
@@ -15,14 +15,13 @@ import {
   buildDeviceTabs,
   connectableDevices,
   filterByTab,
-  isMacDevice,
-  isMacPicker,
+  isWindowDevice,
   matchDeviceQuery,
   resolveTab,
   sortForDisplay,
 } from '@/features/device/device-kinds';
 import { DeviceRow } from '@/features/device/DeviceRow';
-import { MacWindowList } from '@/features/device/MacWindowList';
+import { WindowList } from '@/features/device/WindowList';
 import { StatusDot } from '@/layout/PanelShell';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
@@ -63,30 +62,59 @@ export function DevicePopover(): ReactNode {
 
   const tabs = useMemo(() => buildDeviceTabs(devices), [devices]);
   const connectedCount = devices.filter((device) => device.status === 'connected').length;
-  const macConnected = useMemo(
+  // 已连接的窗口按 deviceId 记（windows:6698742 / macos:89），不再用句柄数字
+  const connectedWindows = useMemo(
     () =>
       new Set(
         devices
-          .filter((device) => isMacDevice(device) && device.status === 'connected')
-          .map((device) => Number(device.id.split(':')[1]))
-          .filter((handle) => Number.isFinite(handle)),
+          .filter((device) => isWindowDevice(device) && device.status === 'connected')
+          .map((device) => device.id),
       ),
     [devices],
   );
+  // 页脚按平台给权限说明：从已发现窗口的 id 前缀推断（Windows 无授权概念 / macOS 需屏幕录制）
+  const windowPlatform = useMemo<'win32' | 'darwin' | null>(() => {
+    if (devices.some((device) => device.id.startsWith('windows:'))) {
+      return 'win32';
+    }
+    if (devices.some((device) => device.id.startsWith('macos:'))) {
+      return 'darwin';
+    }
+    return null;
+  }, [devices]);
+  const windowPermissionHint =
+    windowPlatform === 'win32'
+      ? '本机窗口（Windows）无需额外授权'
+      : windowPlatform === 'darwin'
+        ? '本机窗口需屏幕录制权限（macOS）'
+        : '本机窗口：Windows 无需授权 · macOS 需屏幕录制权限';
 
+  /** 窗口行点击：直接用窗口自带的 deviceId + 绑定 URI（前台/后台输入方式已拼在 URI 里）。 */
   const connectWindow = useCallback(
-    (handle: number | string): void => {
-      const value = String(handle).trim();
-      if (!value) {
-        return;
-      }
-      void connectSession(`macos:${value}`, `Mac:///?window=${value}`).then((ok) => {
+    (deviceId: string, uri: string): void => {
+      void connectSession(deviceId, uri).then((ok) => {
         if (ok) {
           toggle(false);
         }
       });
     },
     [connectSession, toggle],
+  );
+
+  /** 已绑定的窗口换输入方式：先断开再连，让 post= 参数立刻生效（不关弹层）。 */
+  const reconnectWindow = useCallback(
+    (deviceId: string, uri: string): void => {
+      void disconnectSession(deviceId).then(() => connectSession(deviceId, uri));
+    },
+    [connectSession, disconnectSession],
+  );
+
+  const activateWindow = useCallback(
+    (deviceId: string): void => {
+      setActive(deviceId);
+      toggle(false);
+    },
+    [setActive, toggle],
   );
 
   // 打开就扫一次：低频操作，不该让用户再点一次"刷新"（DESIGN.md §4.3.4）
@@ -160,8 +188,8 @@ export function DevicePopover(): ReactNode {
           </button>
         </div>
 
-        {/* 搜索：本机窗口那一类里搜的是 App/标题/句柄 */}
-        {tab !== 'mac' && (
+        {/* 搜索：本机窗口那一类里搜的是进程/标题/句柄（WindowList 自带搜索） */}
+        {tab !== 'window' && (
           <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-2">
             <Search className="size-3.5 text-faint" />
             <input
@@ -194,14 +222,13 @@ export function DevicePopover(): ReactNode {
         </div>
 
         <div ref={listRef} className="min-h-0 flex-1 overflow-auto">
-          {tab === 'mac' ? (
-            <MacWindowList
-              connected={macConnected}
+          {tab === 'window' ? (
+            <WindowList
+              connected={connectedWindows}
+              activeDeviceId={activeId}
               onConnect={connectWindow}
-              onActivate={(handle) => {
-                setActive(`macos:${handle}`);
-                toggle(false);
-              }}
+              onReconnect={reconnectWindow}
+              onActivate={activateWindow}
             />
           ) : (
             <>
@@ -237,17 +264,6 @@ export function DevicePopover(): ReactNode {
                 </div>
               )}
 
-              {/* macOS 入口：伪设备不算可连设备，这里给一条"去看窗口"的路 */}
-              {devices.some(isMacPicker) && (
-                <button
-                  type="button"
-                  onClick={() => setTab('mac')}
-                  className="flex h-7 w-full items-center gap-2 border-t border-line px-2 text-left text-badge text-brand hover:bg-raised"
-                >
-                  🪟 本机窗口（macOS）：在「本机窗口」Tab 里挑一个窗口连（抓的是那个窗口的画面）
-                </button>
-              )}
-
               {(scanError || scanErrors.length > 0) && (
                 <div className="flex items-start gap-2 border-t border-line bg-raised/40 px-2 py-1.5">
                   <StatusDot tone="failed" className="mt-0.5" />
@@ -280,7 +296,7 @@ export function DevicePopover(): ReactNode {
             <MoreHorizontal className="size-3" /> 高级
           </button>
           <div className="flex-1" />
-          <span className="truncate text-faint">iOS 17.4+ · 本机窗口需屏幕录制权限</span>
+          <span className="truncate text-faint">iOS 17.4+ · {windowPermissionHint}</span>
 
           {advanced && (
             <div className="absolute bottom-8 left-12 w-52 rounded-sm border border-line bg-raised py-1">

@@ -21,6 +21,7 @@ import contextlib
 import logging
 import os
 import random
+import re
 import socket
 import struct
 import subprocess
@@ -31,12 +32,54 @@ from typing import Any
 import numpy as np
 
 from ..core.bezier_trajectory import play_swipe_path, play_tap, resolve_swipe_points
+from .base import normalize_touch_point, validate_touch_identity, validate_touch_owner
+
+
+def _env_int(name: str, default: int) -> int:
+    """读整型环境变量（采集参数允许用户按机器/模拟器调）。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("环境变量 %s=%r 不是整数，忽略", name, raw)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """读正浮点环境变量（首帧超时这类时间参数允许按机器/模拟器调）。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("环境变量 %s=%r 不是数字，忽略", name, raw)
+        return default
+    if value <= 0:
+        logger.warning("环境变量 %s=%r 必须大于 0，忽略", name, raw)
+        return default
+    return value
+
 
 logger = logging.getLogger("gamepilot.devices.scrcpy")
 
 # 与 vendor/scrcpy-server 的版本严格对应（协议随版本变化）
 SCRCPY_VERSION = "3.3.4"
 SOCKET_NAME = "scrcpy"
+
+# 设备上 scrcpy server 的 Java 主类：用来从 `ps` 输出里认出残留进程
+SERVER_CLASS = "com.genymobile.scrcpy.Server"
+
+# 引擎进程内「某台设备已经清过残留 server」的登记表。清理只能在本进程第一次连这台
+# 设备时做：之后本进程自己的多屏 server 正在跑，再清就会误杀自己（见 ensure_device_clean）。
+_CONTROL_INIT_GUARD = threading.Lock()
+_CLEAN_GUARD = threading.Lock()
+_CLEANED_SERIALS: set[str] = set()
+
+# `adb forward --list` 的一行：<serial> tcp:<port> localabstract:scrcpy_<scid>
+_FORWARD_RE = re.compile(r"^(?P<serial>\S+)\s+tcp:(?P<port>\d+)\s+localabstract:scrcpy_(?P<scid>[0-9a-fA-F]+)\s*$")
 
 # 控制报文
 MSG_INJECT_KEYCODE = 0
@@ -79,6 +122,95 @@ def find_server_jar() -> str | None:
     return None
 
 
+def _adb_quiet(adb_path: str, serial: str, *args: str, timeout: float = 8.0) -> subprocess.CompletedProcess[str] | None:
+    """跑一条清理用的 adb 命令：失败只记 debug，绝不把清理异常抛给连接流程。"""
+    command = [adb_path]
+    if serial:
+        command += ["-s", str(serial)]
+    command += [str(arg) for arg in args]
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        logger.debug("adb %s 执行失败（清理残留进程时忽略）", " ".join(args[:2]), exc_info=True)
+        return None
+
+
+def _server_pids_from_ps(output: str, marker: str = "") -> list[int]:
+    """从 `ps -A -o PID,ARGS` 输出里挑出真正的 scrcpy server 进程。
+
+    `adb shell "<命令>"` 在设备上会多出一层 `sh -c <命令>` 包装进程，它的命令行
+    同样带着 `com.genymobile.scrcpy.Server` / `scid=…`；只杀包装壳会把 server
+    变成孤儿继续占着，所以这里把 `sh -c` 那行排除掉。
+    """
+    pids: list[int] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if SERVER_CLASS not in line:
+            continue
+        if marker and marker not in line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        args = parts[1].strip()
+        if args.startswith("sh "):
+            continue
+        pids.append(int(parts[0]))
+    return pids
+
+
+def clean_stale_servers(serial: str, adb_path: str) -> int:
+    """清掉设备上残留的 scrcpy server 和它们留下的 adb forward，返回杀掉的进程数。
+
+    为什么要清：引擎被强杀 / 崩溃时，远端 `app_process` 的 scrcpy server 不一定
+    跟着退出（编码器卡在 dequeue 时会一直挂着）。这些残留 server 占着编码器，
+    新 server 的首帧就会从 ~0.2s 退化到数秒，最后表现成「视频首帧未到」反复失败，
+    而每次失败如果没清干净又会再加一个 —— 只能主动清理来打破这个循环。
+    """
+    killed = 0
+    listing = _adb_quiet(adb_path, serial, "shell", "ps", "-A", "-o", "PID,ARGS")
+    if listing is not None and listing.returncode == 0:
+        for pid in _server_pids_from_ps(listing.stdout):
+            result = _adb_quiet(adb_path, serial, "shell", "kill", "-9", str(pid))
+            if result is not None and result.returncode == 0:
+                killed += 1
+    # server 杀掉后 forward 也要收：否则这些端口会一直留在 adb server 里越积越多
+    forwards = _adb_quiet(adb_path, serial, "forward", "--list")
+    if forwards is not None and forwards.returncode == 0:
+        for line in forwards.stdout.splitlines():
+            match = _FORWARD_RE.match(line.strip())
+            if match is not None and match.group("serial") == serial:
+                _adb_quiet(adb_path, serial, "forward", "--remove", f"tcp:{match.group('port')}")
+    return killed
+
+
+def ensure_device_clean(serial: str, adb_path: str) -> None:
+    """本进程第一次连某台设备时清一次残留 server（多屏幕会话之间不能互相误杀）。
+
+    清理只能发生在本进程还没为这台设备起过 server 的时候；一旦登记过，后面的
+    每块屏都直接跳过 —— 否则第二个屏连进来会把第一个屏正在用的 server 杀掉。
+    """
+    with _CLEAN_GUARD:
+        if serial in _CLEANED_SERIALS:
+            return
+        _CLEANED_SERIALS.add(serial)
+        try:
+            killed = clean_stale_servers(serial, adb_path)
+        except Exception:  # 清理是尽力而为：清不掉也不能挡住连接
+            logger.debug("清理 %s 上的残留 scrcpy 进程失败", serial, exc_info=True)
+            return
+    if killed:
+        logger.info("清理 %s 上残留的 scrcpy server %d 个", serial, killed)
+
+
 class ScrcpyChannel:
     """一个设备的 scrcpy 视频 + 控制通道。"""
 
@@ -88,19 +220,24 @@ class ScrcpyChannel:
         adb_path: str,
         server_jar: str,
         *,
-        max_size: int = 1280,
+        max_size: int = 1920,
         max_fps: int = 30,
-        bit_rate: int = 8_000_000,
+        bit_rate: int = 20_000_000,
         connect_timeout: float = 8.0,
         display_id: int | None = None,
     ) -> None:
         self.serial = serial
         self.adb_path = adb_path
         self.server_jar = server_jar
-        self.max_size = max_size
-        self.max_fps = max_fps
-        self.bit_rate = bit_rate
+        # 默认按 1080p / 16Mbps 采：1280×8Mbps 下游戏小图标和文字会糊，
+        # AI 识别/模板匹配都会跟着掉准；环境变量可覆盖（0 = 不限制，原生分辨率）
+        self.max_size = _env_int("GAMEPILOT_SCRCPY_MAX_SIZE", max_size)
+        self.max_fps = _env_int("GAMEPILOT_SCRCPY_MAX_FPS", max_fps)
+        self.bit_rate = _env_int("GAMEPILOT_SCRCPY_BITRATE", bit_rate)
         self.connect_timeout = connect_timeout
+        # 首帧等待上限（握手完成后等第一张解码帧）：MuMu 在编码器忙/刚被残留 server
+        # 占过时，首个关键帧要 1~6s，原来固定 2s 会误判失败。环境变量可调。
+        self.first_frame_timeout = _env_float("GAMEPILOT_SCRCPY_FIRST_FRAME_TIMEOUT", 5.0)
         # 多屏设备的模拟器（MuMu 这类）会把每个标签页放到一块独立的虚拟屏上：
         # `display_id` = 只镜像那一块屏（视频与输入事件都跟着走）。None = 默认屏。
         self.display_id = display_id
@@ -113,6 +250,11 @@ class ScrcpyChannel:
         self._frame_lock = threading.Lock()
         self._frame_event = threading.Event()
         self._control: socket.socket | None = None
+        self._control_lock = threading.RLock()
+        self._control_error: str | None = None
+        self._control_closed = False
+        self._active_touches: dict[int, tuple[str, float, float]] = {}
+        self._legacy_touch: tuple[int, int] | None = None
         self._video: socket.socket | None = None
         self._server: subprocess.Popen[str] | None = None
         self._decoder_thread: threading.Thread | None = None
@@ -129,6 +271,9 @@ class ScrcpyChannel:
     def start(self) -> None:
         import av  # 延迟导入：没有 PyAV 时由调用方回退到 adb 截图
 
+        # 上一轮引擎异常退出会在设备上留下 server；它们占着编码器，首帧会越来越慢
+        # （见 clean_stale_servers 的说明）。本进程第一次连这台设备时才清，多屏互不误杀。
+        ensure_device_clean(self.serial, self.adb_path)
         self._port = _free_port()
         self._push_server()
         self._adb("forward", f"tcp:{self._port}", f"localabstract:{self.socket_name}")
@@ -160,6 +305,7 @@ class ScrcpyChannel:
         # control 的 accept 上，连不上它就一直不发设备名（这就是第一次握手卡住的原因）
         control = _connect(self._port)
         control.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        control.settimeout(1.0)  # 关闭/故障清理不能永久卡在 sendall。
         self._control = control
 
         # 64 字节设备名
@@ -178,6 +324,15 @@ class ScrcpyChannel:
         self._decoder_thread.start()
 
     def close(self) -> None:
+        with self._control_guard():
+            try:
+                self.release_touches()
+            except (OSError, RuntimeError):
+                logger.debug("关闭时释放触点失败", exc_info=True)
+            finally:
+                self._active_touches.clear()
+                self._legacy_touch = None
+                self._control_closed = True
         self._stop.set()
         for sock in (self._video, self._control):
             if sock is not None:
@@ -190,6 +345,7 @@ class ScrcpyChannel:
         if self._server is not None:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self._server.wait(timeout=2)
+        self._kill_remote_server()
         if self._port:
             try:
                 self._adb("forward", "--remove", f"tcp:{self._port}")
@@ -198,6 +354,27 @@ class ScrcpyChannel:
         if getattr(self, "_remote_jar", None):
             with contextlib.suppress(Exception):
                 self._adb("shell", "rm", "-f", self._remote_jar)
+
+    def _kill_remote_server(self) -> None:
+        """按 scid 杀掉设备端的 server 进程（不能只依赖杀本地 adb 客户端）。
+
+        编码器卡在 dequeue 时，server 收不到 socket 关闭事件，会一直挂在设备上；
+        每失败一次留一个，后面新 server 的编码器初始化越来越慢，最后全是首帧超时。
+        按 scid 精确匹配，只杀自己的那个，不会碰到同进程其它屏的 server。
+        匹配到的是包装它的 `sh -c` 也要一起处理：包装壳是 server 的父进程，
+        单杀壳会留下孤儿。
+        """
+        marker = f"scid={self.scid:08x}"
+        listing = _adb_quiet(self.adb_path, self.serial, "shell", "ps", "-A", "-o", "PID,ARGS", timeout=5.0)
+        if listing is None or listing.returncode != 0:
+            return
+        # 同时杀 `sh -c` 包装壳和 app_process：只杀壳会留下孤儿 server
+        for line in listing.stdout.splitlines():
+            if SERVER_CLASS not in line or marker not in line:
+                continue
+            pid = line.split(None, 1)[0]
+            if pid.isdigit():
+                _adb_quiet(self.adb_path, self.serial, "shell", "kill", "-9", pid, timeout=5.0)
 
     def latest_frame(self, timeout: float = 1.0) -> np.ndarray | None:
         """取最新解码帧；timeout 内没有新帧则返回 None。"""
@@ -218,6 +395,102 @@ class ScrcpyChannel:
     @property
     def canvas_size(self) -> tuple[int, int]:
         return self.video_size
+
+    def _control_guard(self) -> Any:
+        # 兼容历史单测用 __new__ 构造的最小控制通道；真正连接在 __init__ 初始化。
+        with _CONTROL_INIT_GUARD:
+            if not hasattr(self, "_control_lock"):
+                self._control_lock = threading.RLock()
+                self._control_error = None
+                self._control_closed = False
+                self._active_touches = {}
+                self._legacy_touch = None
+        return self._control_lock
+
+    @property
+    def max_touch_points(self) -> int:
+        with self._control_guard():
+            return 10 if self._control is not None and not self._control_closed and self._control_error is None else 0
+
+    def _send_control(self, payload: bytes) -> None:
+        with self._control_guard():
+            if self._control_error is not None:
+                raise ConnectionError(self._control_error)
+            if self._control_closed or self._control is None:
+                raise RuntimeError("控制通道未就绪")
+            try:
+                self._control.sendall(payload)
+            except OSError as exc:
+                # sendall 可能已写了半个报文；此连接不能再发清理包或后续输入。
+                self._control_error = f"scrcpy 控制通道断开：{exc}"
+                self._active_touches.clear()
+                self._legacy_touch = None
+                raise
+
+    def _finger_packet(self, action: int, pointer_id: int, x: float, y: float) -> bytes:
+        width, height = self.video_size
+        if width <= 0 or height <= 0:
+            raise RuntimeError("视频尺寸未就绪")
+        return struct.pack(
+            ">BBQIIHHHII",
+            MSG_INJECT_TOUCH,
+            action,
+            16 + pointer_id,
+            round(x * (width - 1)),
+            round(y * (height - 1)),
+            width,
+            height,
+            0 if action == ACTION_UP else 65535,
+            0,
+            0,
+        )
+
+    def touch_down(self, x: float, y: float, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        x, y = normalize_touch_point(x, y)
+        with self._control_guard():
+            previous = self._active_touches.get(pointer_id)
+            if previous is not None:
+                if previous[0] != owner:
+                    raise ValueError(f"触点 {pointer_id} 已被其它 owner 占用")
+                raise ValueError(f"触点 {pointer_id} 已按下")
+            if len(self._active_touches) + int(self._legacy_touch is not None) >= 10:
+                raise ValueError("设备最多同时支持 10 个触点")
+            self._send_control(self._finger_packet(ACTION_DOWN, pointer_id, x, y))
+            self._active_touches[pointer_id] = (owner, x, y)
+
+    def touch_move(self, x: float, y: float, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        x, y = normalize_touch_point(x, y)
+        with self._control_guard():
+            previous = self._active_touches.get(pointer_id)
+            if previous is None:
+                raise ValueError(f"触点 {pointer_id} 尚未按下")
+            if previous[0] != owner:
+                raise ValueError(f"触点 {pointer_id} 已被其它 owner 占用")
+            self._send_control(self._finger_packet(ACTION_MOVE, pointer_id, x, y))
+            self._active_touches[pointer_id] = (owner, x, y)
+
+    def touch_up(self, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        with self._control_guard():
+            previous = self._active_touches.get(pointer_id)
+            if previous is None:
+                return  # finally / 重复 stop 的迟到抬手幂等。
+            if previous[0] != owner:
+                raise ValueError(f"触点 {pointer_id} 已被其它 owner 占用")
+            self._send_control(self._finger_packet(ACTION_UP, pointer_id, previous[1], previous[2]))
+            del self._active_touches[pointer_id]
+
+    def release_touches(self, *, owner: str | None = None) -> None:
+        if owner is not None:
+            validate_touch_owner(owner)
+        with self._control_guard():
+            for pointer_id, (held_by, _x, _y) in reversed(list(self._active_touches.items())):
+                if owner is None or held_by == owner:
+                    self.touch_up(pointer_id=pointer_id, owner=held_by)
+            if owner is None and self._legacy_touch is not None:
+                self._send_touch(ACTION_UP, *self._legacy_touch)
 
     def touch(self, phase: str, x_norm: float, y_norm: float) -> None:
         """实时触控：一次只发一个事件（down / move / up）。
@@ -252,14 +525,14 @@ class ScrcpyChannel:
         for action in (ACTION_DOWN, ACTION_UP):
             payload = struct.pack(">BBIII", MSG_INJECT_KEYCODE, action, keycode, 0, 0)
             assert len(payload) == 14, len(payload)
-            self._control.sendall(payload)
+            self._send_control(payload)
 
     def text(self, value: str) -> None:
         """注入一段文本（INJECT_TEXT：u32 长度 + UTF-8 字节）。"""
         if self._control is None:
             raise RuntimeError("控制通道未就绪")
         raw = value.encode("utf-8")
-        self._control.sendall(struct.pack(">BI", MSG_INJECT_TEXT, len(raw)) + raw)
+        self._send_control(struct.pack(">BI", MSG_INJECT_TEXT, len(raw)) + raw)
 
     def swipe(
         self,
@@ -310,8 +583,11 @@ class ScrcpyChannel:
             BUTTON_PRIMARY,  # buttons: 按住主键 = 拖动
         )
         assert len(payload) == 32, len(payload)
-        assert self._control is not None
-        self._control.sendall(payload)
+        with self._control_guard():
+            if action == ACTION_DOWN and self._legacy_touch is None and len(self._active_touches) >= 10:
+                raise ValueError("设备最多同时支持 10 个触点")
+            self._send_control(payload)
+            self._legacy_touch = None if action == ACTION_UP else (x, y)
 
     def _decode_loop(self) -> None:
         assert self._video is not None
@@ -388,9 +664,10 @@ class ScrcpyChannel:
             "control=true",
             "video=true",
             "video_codec=h264",
-            f"max_size={self.max_size}",
-            f"max_fps={self.max_fps}",
-            f"video_bit_rate={self.bit_rate}",
+            # 0/负数表示不限制：直接不传，避免某些模拟器编码器不接受 0 或过高码率
+            *([f"max_size={self.max_size}"] if self.max_size > 0 else []),
+            *([f"max_fps={self.max_fps}"] if self.max_fps > 0 else []),
+            *([f"video_bit_rate={self.bit_rate}"] if self.bit_rate > 0 else []),
             "send_device_meta=true",
             "send_frame_meta=true",
             "send_dummy_byte=true",

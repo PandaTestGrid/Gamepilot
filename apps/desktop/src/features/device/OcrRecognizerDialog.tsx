@@ -220,28 +220,6 @@ export function OcrRecognizerDialog({
         </p>
       </Field>
 
-      <Field
-        label={
-          <div className="flex items-center justify-between gap-2">
-            <span className="shrink-0">搜索范围</span>
-            <span className="shrink-0 text-[10px] text-faint">
-              {draft.search === 'full' ? '整帧搜索' : '只在框选区'}
-            </span>
-          </div>
-        }
-      >
-        <div className="space-y-1" data-testid="draft-search-control">
-          <Check
-            checked={draft.search === 'full'}
-            onChange={(checked) => updateDraft({ search: checked ? 'full' : 'region' })}
-            label="全屏"
-          />
-          <p className="text-[10px] leading-snug text-faint">
-            框得越小越准；整帧搜索更慢，也容易撞到别处的同一句话。
-          </p>
-        </div>
-      </Field>
-
       {!flowMode && (
         <>
           <Field label="注册为">

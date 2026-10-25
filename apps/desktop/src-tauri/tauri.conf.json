@@ -10,19 +10,7 @@
     "beforeBuildCommand": "pnpm build:sidecar && pnpm build"
   },
   "app": {
-    "windows": [
-      {
-        "title": "GamePilot",
-        "width": 1440,
-        "height": 900,
-        "minWidth": 1100,
-        "minHeight": 700,
-        "resizable": true,
-        "fullscreen": false,
-        "center": true,
-        "theme": "Dark"
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
@@ -40,6 +28,21 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/installer/header.bmp",
+        "uninstallerIcon": "icons/icon.ico",
+        "uninstallerHeaderImage": "icons/installer/header.bmp",
+        "sidebarImage": "icons/installer/sidebar.bmp",
+        "languages": ["SimpChinese", "English"],
+        "installMode": "currentUser"
+      },
+      "wix": {
+        "bannerPath": "icons/installer/wix-banner.bmp",
+        "dialogImagePath": "icons/installer/wix-dialog.bmp"
+      }
     }
   }
 }

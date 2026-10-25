@@ -14,7 +14,7 @@ import { useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
 import { SCRIPT_SCOPE, useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
-import type { DeviceTabId } from '@/features/device/device-kinds';
+import { normalizeDeviceTab, type DeviceTabId } from '@/features/device/device-kinds';
 import type { DockTab, RecordDraft, RecordMode, RightTab } from '@/types';
 
 const DEFAULT_THRESHOLD = 0.82;
@@ -67,8 +67,112 @@ function loadNodeScale(): NodeScale {
   }
 }
 
+/**
+ * 多开网格的列数偏好。
+ *
+ * `auto`（默认）= 按可用宽度自动分列；数字 = 用户手动钉死几列。
+ * 为什么需要手动：两台竖屏手机并排放在宽窗口里，自动算出的列数会偏保守；
+ * 反过来，横屏电脑窗口（16:9）在窄栏里并排反而每格都被压扁。
+ */
+export type GridColumns = 'auto' | 1 | 2 | 3;
+export const GRID_COLUMN_CHOICES: readonly GridColumns[] = ['auto', 1, 2, 3];
+
+const GRID_COLUMNS_KEY = 'gamepilot.grid-columns';
+
+function loadGridColumns(): GridColumns {
+  try {
+    const raw = window.localStorage.getItem(GRID_COLUMNS_KEY);
+    if (raw === 'auto') {
+      return 'auto';
+    }
+    const value = Number(raw);
+    return value === 1 || value === 2 || value === 3 ? value : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+const DEVICE_TAB_KEY = 'gamepilot.device-tab';
+
+/**
+ * 设备弹层的分类 Tab（关掉弹层再打开还在上次那一类）。
+ *
+ * 旧版本在 macOS 专用时期存过 `'mac'`：读到就迁移成通用的 `'window'`；
+ * 未知值退化成 `'all'` —— 绝不能让界面落在一个不存在的分类上。
+ */
+export function loadDeviceTab(): DeviceTabId {
+  try {
+    return normalizeDeviceTab(window.localStorage.getItem(DEVICE_TAB_KEY));
+  } catch {
+    return 'all';
+  }
+}
+
 const OPEN_WORKFLOW_TABS_KEY = 'gamepilot.open-workflow-tabs';
 const LEGACY_OPEN_GRAPHS_KEY = 'gamepilot.open-graphs';
+const WORKFLOW_HISTORY_KEY = 'gamepilot.workflow-history.v1';
+const WORKFLOW_HISTORY_LIMIT = 40;
+
+/** 打开过的工作流（中间开始页的「历史」）。和「当前开着的标签」分开：
+ *  标签会被工作区清理掉，历史不会 —— 重启后仍然能看到最近去过哪几张图。 */
+export interface WorkflowHistoryEntry {
+  readonly root: string;
+  /** epoch 毫秒 */
+  readonly at: number;
+}
+
+function loadWorkflowHistory(): WorkflowHistoryEntry[] {
+  try {
+    const raw = window.localStorage.getItem(WORKFLOW_HISTORY_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (item): item is WorkflowHistoryEntry =>
+        typeof item === 'object' &&
+        item !== null &&
+        typeof (item as Record<string, unknown>).root === 'string' &&
+        typeof (item as Record<string, unknown>).at === 'number',
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** 首次升级到这个版本时历史还是空的：用「上次开着的标签」播种，
+ *  用户至少能立刻在开始页看到上次那几张图（时间未知 → 不显示相对时间）。 */
+function seedWorkflowHistory(): WorkflowHistoryEntry[] {
+  const saved = loadWorkflowHistory();
+  if (saved.length > 0) {
+    return saved;
+  }
+  return loadOpenWorkflowTabs().map((root) => ({ root, at: 0 }));
+}
+
+function saveWorkflowHistory(entries: readonly WorkflowHistoryEntry[]): void {
+  try {
+    window.localStorage.setItem(WORKFLOW_HISTORY_KEY, JSON.stringify(entries));
+  } catch {
+    // 记不住就算了，本次会话内照常生效
+  }
+}
+
+/** 把一次访问提到最前（同一个目录只留一条）。 */
+function withVisit(
+  entries: readonly WorkflowHistoryEntry[],
+  root: string,
+  at: number,
+): WorkflowHistoryEntry[] {
+  const key = workflowRootKey(root);
+  if (!key) {
+    return [...entries];
+  }
+  return [{ root, at }, ...entries.filter((item) => workflowRootKey(item.root) !== key)].slice(
+    0,
+    WORKFLOW_HISTORY_LIMIT,
+  );
+}
 
 function loadOpenWorkflowTabs(): string[] {
   try {
@@ -163,6 +267,9 @@ interface UiState {
   /** 画布节点卡片尺寸（小/中/大） */
   readonly nodeScale: NodeScale;
   readonly setNodeScale: (scale: NodeScale) => void;
+  /** 多开网格列数：auto = 按可用宽度算，1/2/3 = 手动钉死 */
+  readonly gridColumns: GridColumns;
+  readonly setGridColumns: (columns: GridColumns) => void;
   /** 画面栏下半格（素材区）是否展开：收起时只留一行标题，画面拿走全部高度 */
   readonly materialOpen: boolean;
   /**
@@ -173,6 +280,17 @@ interface UiState {
   readonly pruneOpenWorkflowTabs: (keepRoots: readonly string[]) => void;
   /** 工作区/工作流都没了时清空标签（含 localStorage），避免只剩历史 Tab。 */
   readonly clearOpenWorkflowTabs: () => void;
+  /**
+   * 中间栏显示开始页（最近 / 历史）。
+   *
+   * 冷启动先给开始页，用户点「最近 / 历史」里的一条再进图；
+   * 不往面板头加额外按钮 —— 打开任何工作流就收起，标签全关时再出现。
+   */
+  readonly startPageOpen: boolean;
+  readonly hideStartPage: () => void;
+  /** 打开过的工作流（跨标签/重启保留；中间开始页的「历史」用它）。 */
+  readonly workflowHistory: readonly WorkflowHistoryEntry[];
+  readonly clearWorkflowHistory: () => void;
   readonly renameOpenWorkflowTab: (fromRoot: string, toRoot: string) => void;
   readonly openWorkflowTab: (root: string) => void;
   readonly closeWorkflowTab: (root: string) => void;
@@ -272,6 +390,7 @@ export const useUiStore = create<UiState>()((set, get) => ({
   recordActionMode: false,
   materialFilter: 'all',
   nodeScale: loadNodeScale(),
+  gridColumns: loadGridColumns(),
   materialOpen: true,
   leftPaneOpen: true,
   flowDockOpen: false,
@@ -279,6 +398,8 @@ export const useUiStore = create<UiState>()((set, get) => ({
   rightPaneOpen: true,
   flowGlobalSettingsOpen: false,
   openWorkflowTabs: loadOpenWorkflowTabs(),
+  startPageOpen: true,
+  workflowHistory: seedWorkflowHistory(),
   workflowSplitOpen: false,
   flowRelayoutGeneration: 0,
   pendingFlowRecStepId: null,
@@ -515,11 +636,12 @@ export const useUiStore = create<UiState>()((set, get) => ({
   clearOpenWorkflowTabs: () =>
     set((state) => {
       if (state.openWorkflowTabs.length === 0) {
-        return state;
+        return { startPageOpen: true };
       }
       saveOpenWorkflowTabs([]);
-      return { openWorkflowTabs: [], workflowSplitOpen: false };
+      return { openWorkflowTabs: [], workflowSplitOpen: false, startPageOpen: true };
     }),
+  hideStartPage: () => set({ startPageOpen: false }),
   renameOpenWorkflowTab: (fromRoot, toRoot) =>
     set((state) => {
       if (!fromRoot || !toRoot) {
@@ -545,7 +667,7 @@ export const useUiStore = create<UiState>()((set, get) => ({
     }),
   draft: null,
   devicePopoverOpen: false,
-  deviceTab: 'all',
+  deviceTab: loadDeviceTab(),
   rightTab: 'library',
   dockTab: 'events',
   dockOpen: false,
@@ -659,6 +781,14 @@ export const useUiStore = create<UiState>()((set, get) => ({
       pendingFlowSwipeStepId: null,
     });
   },
+  setGridColumns: (gridColumns) => {
+    try {
+      window.localStorage.setItem(GRID_COLUMNS_KEY, String(gridColumns));
+    } catch {
+      // 记不住就算了，本次会话内照常生效
+    }
+    set({ gridColumns });
+  },
   setMaterialFilter: (materialFilter) => set({ materialFilter }),
   setNodeScale: (nodeScale) => {
     try {
@@ -681,13 +811,23 @@ export const useUiStore = create<UiState>()((set, get) => ({
   toggleRightPane: () => set((state) => ({ rightPaneOpen: !state.rightPaneOpen })),
   openWorkflowTab: (root) =>
     set((state) => {
-      if (!root || state.openWorkflowTabs.includes(root)) {
+      if (!root) {
         return state;
+      }
+      const workflowHistory = withVisit(state.workflowHistory, root, Date.now());
+      saveWorkflowHistory(workflowHistory);
+      if (state.openWorkflowTabs.includes(root)) {
+        // 标签已经开着：仍然要更新「历史」的最近访问时间，并收起开始页
+        return { workflowHistory, startPageOpen: false };
       }
       const openWorkflowTabs = [...state.openWorkflowTabs, root];
       saveOpenWorkflowTabs(openWorkflowTabs);
-      return { openWorkflowTabs };
+      return { openWorkflowTabs, workflowHistory, startPageOpen: false };
     }),
+  clearWorkflowHistory: () => {
+    saveWorkflowHistory([]);
+    set({ workflowHistory: [] });
+  },
   closeWorkflowTab: (root) =>
     set((state) => {
       const key = workflowRootKey(root);
@@ -703,7 +843,15 @@ export const useUiStore = create<UiState>()((set, get) => ({
       return { openWorkflowTabs, workflowSplitOpen };
     }),
   toggleDevicePopover: (open) => set((state) => ({ devicePopoverOpen: open ?? !state.devicePopoverOpen })),
-  setDeviceTab: (deviceTab) => set({ deviceTab }),
+  setDeviceTab: (deviceTab) => {
+    const next = normalizeDeviceTab(deviceTab);
+    try {
+      window.localStorage.setItem(DEVICE_TAB_KEY, next);
+    } catch {
+      // 记不住就算了，本次会话内照常生效
+    }
+    set({ deviceTab: next });
+  },
   setRightTab: (rightTab) => set({ rightTab }),
   toggleDock: (tab) =>
     set((state) =>

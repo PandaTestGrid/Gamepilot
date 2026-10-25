@@ -35,7 +35,7 @@ function graphWithStep(id: string, title: string): void {
     graphs: {
       'dev-1': {
         flow: {
-          steps: [{ id, type: 'click', title, params: { by: '坐标', x: 0.5, y: 0.5 } }],
+          steps: [{ id, type: 'click', title, params: { by: 'coord', x: 0.5, y: 0.5 } }],
         },
       },
     } as never,

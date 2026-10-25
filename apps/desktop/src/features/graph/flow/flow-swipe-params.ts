@@ -58,17 +58,6 @@ export function parseOptionalBool(value: unknown): boolean | undefined {
   return undefined;
 }
 
-export function swipeBezierMode(params: Record<string, unknown> | undefined): 'global' | 'on' | 'off' {
-  const flag = parseOptionalBool(params?.bezier);
-  if (flag === true) {
-    return 'on';
-  }
-  if (flag === false) {
-    return 'off';
-  }
-  return 'global';
-}
-
 export const SWIPE_PRESETS: ReadonlyArray<{
   readonly id: SwipePresetId;
   readonly label: string;

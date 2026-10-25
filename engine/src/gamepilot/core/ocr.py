@@ -48,6 +48,11 @@ MAX_OCR_FULL_SIDE = 1280
 OCR_INTRA_THREADS = 1
 OCR_INTER_THREADS = 1
 WORKER_READY_TIMEOUT_S = 120.0
+#: 打包态（PyInstaller）启动 OCR 子进程用的开关，由 `packaging/engine_sidecar_entry.py` 分派。
+#: **不能**在冻结态用 `sys.executable -m gamepilot.core.ocr_worker`：`sys.executable` 那时是 sidecar
+#: 本体，PyInstaller 把 `-m` 之后的东西当普通参数丢掉 → 又拉起一个**完整引擎**，
+#: 那孩子一上来就把 `engine.ready` 写进 stdout，父进程照着 pickle 帧头去读 → "OCR 消息过大"。
+OCR_WORKER_FLAG = "--ocr-worker"
 
 
 @dataclass(frozen=True)
@@ -108,7 +113,10 @@ def _ipc_read_blocking(stream: IO[bytes]) -> Any:
         raise EOFError("OCR 子进程已关闭")
     (size,) = struct.unpack(">I", header)
     if size > 64 * 1024 * 1024:
-        raise RuntimeError("OCR 消息过大")
+        # 帧头不可能这么大：几乎只有一种成因 —— 对面往 stdout 写了非 IPC 的东西（协议不同步）。
+        # 把前几个字节当文本带出来，比只报"消息过大"好查得多（打包版 OCR 加载失败就是这么查出来的）。
+        head = header.decode("utf-8", "replace")
+        raise RuntimeError(f"OCR 消息过大（帧头 {size} 字节，stdout 上先出现了 {head!r}：协议不同步？）")
     buf = stream.read(size)
     if len(buf) < size:
         raise EOFError("OCR 消息不完整")
@@ -134,6 +142,13 @@ def _ipc_read(stream: IO[bytes], timeout: float) -> Any:
     if errors:
         raise errors[0]
     return holder[0]
+
+
+def _worker_command() -> list[str]:
+    """OCR 子进程的命令行。冻结态和开发态**不一样**，见 `OCR_WORKER_FLAG` 的注释。"""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, OCR_WORKER_FLAG]
+    return [sys.executable, "-m", "gamepilot.core.ocr_worker"]
 
 
 def _models_complete(model_dir: Path) -> bool:
@@ -355,7 +370,7 @@ class OcrManager:
             self._stop_worker()
             creationflags = 0x08000000 if os.name == "nt" else 0
             proc = subprocess.Popen(
-                [sys.executable, "-m", "gamepilot.core.ocr_worker"],
+                _worker_command(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=None,

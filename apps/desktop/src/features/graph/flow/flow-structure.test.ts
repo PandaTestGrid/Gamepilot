@@ -390,7 +390,7 @@ describe('connectSteps', () => {
       s('lp', 'loop', { count: 2 }),
       s('d', 'delay', { ms: 1 }),
       s('le', 'loopend', { back: 'lp' }),
-      s('x', 'click', { by: '坐标', x: 0.1, y: 0.1, _pendingLink: true }),
+      s('x', 'click', { by: 'coord', x: 0.1, y: 0.1, _pendingLink: true }),
     ];
     const back = okSteps(connectSteps(steps, 'd', 'lp', 'out', 'back'));
     expect(ids(back)).toEqual(['t', 'lp', 'd', 'le', 'x']);

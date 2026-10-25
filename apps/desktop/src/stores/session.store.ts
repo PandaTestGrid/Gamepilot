@@ -9,6 +9,9 @@
  * 约定：**引擎是唯一真源**。本地 store 只做展示态缓存，不反向假设引擎状态。
  */
 import { create } from 'zustand';
+
+import { invalidateYoloExamples } from '@/features/recognizers/yolo-example-revision';
+import { CLICK_BY_RECOGNIZER } from '@/features/graph/flow/flow-click-params';
 import { condGroupsFromParams, condParamsFromGroups } from '@/features/graph/flow/flow-cond-params';
 import { loopProgressMapFromExtra, type LoopProgress } from '@/features/graph/flow/flow-loop-progress';
 import { unconnectedFlowRunError } from '@/features/graph/flow/flow-layout';
@@ -38,7 +41,11 @@ import {
   type EngineEventPayload,
   type FramePayload,
   type GraphPayload,
+  type YoloProgressPayload,
   onEngineMessage,
+  addYoloExample as addYoloExampleRpc,
+  createRecognizer as createRecognizerRpc,
+  updateYoloRecognizer as updateYoloRecognizerRpc,
   recordOcr as recordOcrRpc,
   recordTemplate as recordTemplateRpc,
   removeRecognizer as removeRecognizerRpc,
@@ -46,10 +53,13 @@ import {
   runStart,
   runStep,
   runStop,
+  runStatus,
+  subscribeEngineEvents,
   runResume,
   setBreakpoint,
   setRecognizerSearch as setRecognizerSearchRpc,
   setRecognizerThreshold,
+  setRecognizerEnabled as setRecognizerEnabledRpc,
   type DeviceNotificationPayload,
   type OcrRecognizeResult,
   type OcrStatusPayload,
@@ -58,6 +68,7 @@ import { useOcrStore } from '@/stores/ocr.store';
 import { toGraphData } from '@/lib/graph-adapter';
 import { connectedDevices, useDeviceStore } from '@/stores/device.store';
 import { useEventStore } from '@/stores/event.store';
+import { useYoloStore } from '@/stores/yolo.store';
 import { WORKFLOW_SCOPE, useGraphStore } from '@/stores/graph.store';
 import { useLogStore } from '@/stores/log.store';
 import { setPositionScope } from '@/lib/node-positions';
@@ -71,6 +82,7 @@ export interface FrameState {
   readonly resolution: readonly [number, number];
   readonly node: string | null;
   readonly pending: string | null;
+  readonly activeStepIds?: readonly string[];
   readonly tick: number;
   readonly fps: number;
   readonly captureMs: number;
@@ -119,7 +131,27 @@ interface SessionState {
   /** 给某个步骤设/清断点（`run.breakpoint`，参数名仍叫 edgeId，语义是步骤 id） */
   readonly setStepBreakpoint: (deviceId: string, stepId: string, enabled: boolean) => Promise<void>;
   readonly record: (deviceId: string, draft: RecordDraft) => Promise<void>;
+  /** 不录模板直接建识别器（AI 识别器）；返回是否成功 */
+  readonly createYoloRecognizer: (
+    deviceId: string,
+    label: string,
+    spec: Readonly<Record<string, unknown>>,
+  ) => Promise<boolean>;
+  /** 更新已有 AI 识别器，可原子改名并级联引用。 */
+  readonly updateYoloRecognizer: (
+    deviceId: string,
+    label: string,
+    spec: Readonly<Record<string, unknown>>,
+    newLabel?: string,
+  ) => Promise<boolean>;
+  /** 给 AI 识别器追加一个示例框；返回累计示例数（失败返回 null） */
+  readonly addYoloExample: (
+    deviceId: string,
+    label: string,
+    rect: readonly [number, number, number, number],
+  ) => Promise<number | null>;
   readonly setThreshold: (deviceId: string, label: string, threshold: number) => Promise<void>;
+  readonly setRecognizerEnabled: (deviceId: string, label: string, enabled: boolean) => Promise<boolean>;
   /** 切换模板搜索范围：region（只在录制区域找）/ full（整帧找，目标位置不固定时用） */
   readonly setRecognizerSearch: (deviceId: string, label: string, search: 'region' | 'full') => Promise<void>;
   /** 识别器改名：引擎级联改掉所有引用，返回改了几处（界面拿它做提示） */
@@ -131,15 +163,25 @@ interface SessionState {
   /** 删除识别器/模板；被节点或边引用时引擎拒绝，原因进错误条 + 事件栏 */
   readonly removeRecognizer: (deviceId: string, label: string) => Promise<boolean>;
   readonly isReady: (deviceId: string) => boolean;
-  /** 扫描结果里引擎还在带的设备 → 对齐成"已连接"（界面重载/重启后不再显示"未连接"） */
-  readonly adoptLiveDevices: () => void;
+  /**
+   * 扫描结果里引擎还在带的设备 → 对齐成"已连接"（界面重载/重启后不再显示"未连接"）。
+   *
+   * `onlyDeviceId`：独立窗口只认自己那一台 —— 否则每开一个画面窗口，
+   * 都会把所有设备的推流帧率一起抬到 PREVIEW_FPS（主窗口那边刚按可见性压下去的 0fps 会被顶掉）。
+   */
+  readonly adoptLiveDevices: (onlyDeviceId?: string | null) => void;
   readonly clearError: () => void;
   /** 引擎重启时同时清掉拉帧定时器和推流策略缓存。 */
   readonly resetForEngineRestart: () => void;
   /** blob 渲染失败时改用 data URL（保证画面一定显示得出来） */
   readonly recoverImage: (deviceId: string) => Promise<void>;
-  /** 界面告诉引擎：这台设备我需要多少帧（0 = 停推） */
-  readonly setStreamPolicy: (deviceId: string, fps: number) => void;
+  /**
+   * 界面告诉引擎：这台设备我需要多少帧（0 = 停推）。
+   *
+   * pollFps 只影响**本窗口**拉帧的节奏：画面弹到独立窗口后，主窗口仍要让引擎
+   * 继续推（独立窗口在看），但自己不必再 30fps 拉字节解码 —— 传 0 即可。
+   */
+  readonly setStreamPolicy: (deviceId: string, fps: number, pollFps?: number) => void;
   /** 手动控制：轻触 / 滑动 / 功能键 */
   readonly tap: (deviceId: string, x: number, y: number) => Promise<void>;
   readonly swipe: (
@@ -167,12 +209,123 @@ interface SessionState {
 
 /** 嵌套的切目录（Tab + 工作区）共用一个计数，谁先结束都不能提前摘掉转圈。 */
 let workflowSwitchDepth = 0;
+let discardPendingEngineEvents: (() => void) | undefined;
+let flushPendingEngineEvents: (() => void) | undefined;
+const recognizerEnabledCommands = new Map<string, object>();
+
+/** 命令只允许回写自己这一代；通知可以先于 RPC 回包到达。按设备/工作流隔离。 */
+interface RunCommand {
+  kind: 'start' | 'stop' | 'stopped';
+  stepId?: string;
+}
+const runCommands = new Map<string, Map<string, RunCommand>>();
+const runRevisions = new Map<string, object>();
+const engineRunRevisions = new Map<string, number>();
+function acceptRunRevision(deviceId: string, value: unknown): boolean {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return true;
+  if (value < (engineRunRevisions.get(deviceId) ?? -1)) return false;
+  engineRunRevisions.set(deviceId, value);
+  return true;
+}
+function reviseRunState(deviceId: string): object {
+  const revision = {};
+  runRevisions.set(deviceId, revision);
+  return revision;
+}
+
+/** Drop all local run state when the device session is gone. The revision fence
+ * prevents delayed frames from the old transport from resurrecting "running". */
+function clearRunStateForDevice(deviceId: string): void {
+  reviseRunState(deviceId);
+  engineRunRevisions.set(deviceId, Number.POSITIVE_INFINITY);
+  const commands = runCommands.get(deviceId);
+  if (commands) {
+    for (const root of commands.keys()) commands.set(root, { kind: 'stopped' });
+  }
+  useSessionStore.setState((current) => ({
+    running: { ...current.running, [deviceId]: false },
+    runningStartStep: { ...current.runningStartStep, [deviceId]: null },
+    runningWorkflowRoots: { ...current.runningWorkflowRoots, [deviceId]: [] },
+    loopProgress: { ...current.loopProgress, [deviceId]: {} },
+    paused: { ...current.paused, [deviceId]: null },
+  }));
+}
+
+function applyRunRoots(deviceId: string, roots: readonly string[], engineRevision?: number): void {
+  if (!acceptRunRevision(deviceId, engineRevision)) return;
+  const normalized = roots.filter((root) => typeof root === 'string' && workflowRootKey(root));
+  const unique = normalized.filter((root, index) => !workflowRootInList(normalized.slice(0, index), root));
+  reviseRunState(deviceId);
+  useSessionStore.setState((current) => {
+    const previous = current.runningWorkflowRoots[deviceId] ?? [];
+    for (const root of previous) {
+      if (!workflowRootInList(unique, root) && runCommand(deviceId, root)?.kind === 'start') {
+        setRunCommand(deviceId, root, { kind: 'stopped' });
+      }
+    }
+    const sameRoots =
+      previous.length === unique.length && previous.every((root) => workflowRootInList(unique, root));
+    const running = unique.length > 0;
+    if (sameRoots && current.running[deviceId] === running) return current;
+    return {
+      running: { ...current.running, [deviceId]: running },
+      runningWorkflowRoots: sameRoots
+        ? current.runningWorkflowRoots
+        : { ...current.runningWorkflowRoots, [deviceId]: unique },
+      runningStartStep: running
+        ? current.runningStartStep
+        : { ...current.runningStartStep, [deviceId]: null },
+      paused: running ? current.paused : { ...current.paused, [deviceId]: null },
+      loopProgress: running ? current.loopProgress : { ...current.loopProgress, [deviceId]: {} },
+    };
+  });
+}
+
+async function refreshRunStatus(deviceId: string): Promise<void> {
+  const revision = reviseRunState(deviceId);
+  try {
+    const status = await runStatus(deviceId);
+    if (runRevisions.get(deviceId) !== revision || !Array.isArray(status.runningWorkflowRoots)) return;
+    applyRunRoots(deviceId, status.runningWorkflowRoots, status.runRevision);
+  } catch (error) {
+    // 旧引擎可能尚未提供 run.status；不把查询失败误当成停止。
+    devLog(`运行状态查询失败: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+function runCommand(deviceId: string, root: string): RunCommand | undefined {
+  return runCommands.get(deviceId)?.get(workflowRootKey(root));
+}
+function setRunCommand(deviceId: string, root: string, command: RunCommand): void {
+  reviseRunState(deviceId);
+  let commands = runCommands.get(deviceId);
+  if (!commands) {
+    commands = new Map();
+    runCommands.set(deviceId, commands);
+  }
+  commands.set(workflowRootKey(root), command);
+}
+
+function renamedFrameDetections(
+  frames: Readonly<Record<string, FrameState>>,
+  from: string,
+  to: string,
+): Record<string, FrameState> {
+  return Object.fromEntries(
+    Object.entries(frames).map(([id, frame]) => [
+      id,
+      {
+        ...frame,
+        detections: frame.detections.map((item) => (item.label === from ? { ...item, label: to } : item)),
+      },
+    ]),
+  );
+}
 
 function applyWorkflowGraph(
   deviceId: string,
   payload: GraphPayload,
   live?: FrameState,
-  options?: { applyStructure?: boolean },
+  options?: { applyStructure?: boolean; renamedRecognizer?: { from: string; to: string } },
 ): void {
   useGraphStore.getState().setGraph(deviceId, toGraphData(deviceId, payload, live), payload, options);
 }
@@ -180,6 +333,15 @@ function applyWorkflowGraph(
 /** 每台设备一个拉帧定时器；framePollTick 是"当前已拉到的帧号"，避免重复拉取 */
 const framePollers = new Map<string, ReturnType<typeof setInterval>>();
 const framePollTick = new Map<string, number>();
+/**
+ * 本窗口要不要为这台设备拉帧（0 = 不拉）。
+ *
+ * 只关定时器是不够的：主路是 `engine.frame` 事件到达时立刻 `pullFrame`。
+ * 画面弹到独立窗口后，主窗口必须连**事件主路**也停掉，否则同一路投屏
+ * 仍会被两个 WebView 各解一遍（主窗口那块区域还留着旧画面）。
+ * 没有条目 = 默认要（首次连接时不要误判成 0）。
+ */
+const framePollFps = new Map<string, number>();
 /** 正在拉取的设备：事件驱动与定时兜底会撞在同一帧上，别叠成两次 IPC */
 const framePullInFlight = new Set<string>();
 
@@ -199,6 +361,9 @@ function stopFramePolling(deviceId: string): void {
  * 以及定时器兜底（丢了事件也能自己追上）。
  */
 async function pullFrame(deviceId: string): Promise<void> {
+  if (framePollFps.get(deviceId) === 0) {
+    return; // 这台设备的画面不在本窗口显示（已弹到独立窗口 / 不可见）
+  }
   if (framePullInFlight.has(deviceId)) {
     // 上一帧还没回来。等它回来时 finally 里会看最新帧号再补一次，不用排队。
     return;
@@ -347,6 +512,7 @@ function startFramePolling(deviceId: string, fps = PREVIEW_FPS): void {
   }
   framePollTick.delete(deviceId);
   const effective = Math.max(0, fps);
+  framePollFps.set(deviceId, effective);
   if (effective <= 0) {
     return;
   }
@@ -357,8 +523,8 @@ function startFramePolling(deviceId: string, fps = PREVIEW_FPS): void {
 }
 
 /** 应用推流策略：通知引擎 + 调整拉帧节奏 */
-function applyStreamPolicy(deviceId: string, fps: number): void {
-  startFramePolling(deviceId, fps);
+function applyStreamPolicy(deviceId: string, fps: number, pollFps = fps): void {
+  startFramePolling(deviceId, pollFps);
   if (!useSessionStore.getState().ready[deviceId] || streamPolicy.get(deviceId) === fps) {
     return;
   }
@@ -416,6 +582,118 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   init: async () => {
+    discardPendingEngineEvents?.();
+    let pendingEvents: EngineEventPayload[] = [];
+    let eventTimer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+    const discardEvents = (): void => {
+      if (eventTimer !== undefined) clearTimeout(eventTimer);
+      eventTimer = undefined;
+      pendingEvents = [];
+    };
+    const applyEvents = (events: readonly EngineEventPayload[]): void => {
+      if (disposed || events.length === 0) return;
+      useEventStore.getState().appendEngineEvents(events);
+      const currentRoot = get().currentWorkflow?.root ?? '';
+      const latestLoops = new Map<string, Record<string, LoopProgress>>();
+      const latestNodes = new Map<string, string>();
+      for (const event of events) {
+        if (event.workflowRoot && workflowRootKey(event.workflowRoot) !== workflowRootKey(currentRoot))
+          continue;
+        const loops = loopProgressMapFromExtra(event.extra);
+        if (event.type === 'flow_finished') latestLoops.set(event.deviceId, {});
+        else if (loops !== null) latestLoops.set(event.deviceId, loops);
+        if (event.type === 'breakpoint_hit') {
+          set((current) => ({ paused: { ...current.paused, [event.deviceId]: event.node ?? null } }));
+        } else if (
+          event.type === 'step_started' ||
+          event.type === 'flow_started' ||
+          event.type === 'flow_finished'
+        ) {
+          set((current) =>
+            current.paused[event.deviceId]
+              ? { paused: { ...current.paused, [event.deviceId]: null } }
+              : current,
+          );
+        }
+        if (
+          event.node &&
+          ['flow_started', 'step_started', 'step_skipped', 'breakpoint_hit'].includes(event.type)
+        ) {
+          latestNodes.set(event.deviceId, event.node);
+        }
+      }
+      if (latestLoops.size > 0)
+        set((current) => {
+          let next = current.loopProgress;
+          for (const [deviceId, loops] of latestLoops) {
+            const previous = current.loopProgress[deviceId] ?? {};
+            const keys = Object.keys(loops);
+            if (
+              keys.length === Object.keys(previous).length &&
+              keys.every(
+                (key) =>
+                  previous[key]?.current === loops[key]?.current &&
+                  previous[key]?.total === loops[key]?.total,
+              )
+            )
+              continue;
+            const reused = Object.fromEntries(
+              Object.entries(loops).map(([key, progress]) => [
+                key,
+                previous[key]?.current === progress.current && previous[key]?.total === progress.total
+                  ? previous[key]
+                  : progress,
+              ]),
+            );
+            next = { ...next, [deviceId]: reused };
+          }
+          return next === current.loopProgress ? current : { loopProgress: next };
+        });
+      for (const [deviceId, node] of latestNodes) {
+        const previous = get().frames[deviceId];
+        useGraphStore.getState().updateLive(deviceId, {
+          node,
+          pending: previous?.pending ?? null,
+          activeStepIds: previous?.activeStepIds,
+          detections: previous?.detections ?? [],
+        });
+      }
+    };
+    const flushEvents = (): void => {
+      const batch = pendingEvents;
+      discardEvents();
+      applyEvents(batch);
+    };
+    discardPendingEngineEvents = discardEvents;
+    flushPendingEngineEvents = flushEvents;
+    const receiveEvents = (events: readonly EngineEventPayload[], transportBatch: boolean): void => {
+      if (disposed) return;
+      for (const event of events) {
+        const critical =
+          event.type === 'breakpoint_hit' ||
+          event.type === 'flow_finished' ||
+          event.type === 'flow_started' ||
+          event.type === 'error' ||
+          event.type.includes('failed');
+        if (critical) {
+          flushEvents();
+          applyEvents([event]);
+        } else {
+          pendingEvents.push(event);
+          if (
+            event.type === 'step_started' &&
+            get().paused[event.deviceId] &&
+            (!event.workflowRoot ||
+              workflowRootKey(event.workflowRoot) === workflowRootKey(get().currentWorkflow?.root ?? ''))
+          ) {
+            set((current) => ({ paused: { ...current.paused, [event.deviceId]: null } }));
+          }
+          if (eventTimer === undefined) eventTimer = setTimeout(flushEvents, 50);
+        }
+      }
+      if (transportBatch) flushEvents();
+    };
     devLog('session: 开始订阅 engine://event');
     let seen = 0;
     const unlisten = await onEngineMessage((method, params) => {
@@ -425,6 +703,9 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       }
       if (method === 'engine.frame') {
         const frame = params as unknown as FramePayload;
+        // 运行快照不依赖图像字节，重载错过 run.started 后也能恢复停止入口。
+        if (Array.isArray(frame.runningWorkflowRoots))
+          applyRunRoots(frame.deviceId, frame.runningWorkflowRoots, frame.runRevision);
         // 有两处订阅（引擎状态 + 会话），同一条通知会进来两次：索引没变就直接跳过
         if (get().frames[frame.deviceId]?.index === frame.index) {
           return;
@@ -444,6 +725,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
           resolution: frame.resolution,
           node: frame.node,
           pending: frame.pending,
+          activeStepIds: frame.activeStepIds,
           tick: frame.tick,
           fps: frame.fps,
           captureMs: frame.captureMs,
@@ -458,67 +740,42 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         useGraphStore.getState().updateLive(frame.deviceId, {
           node: frame.node,
           pending: frame.pending,
+          activeStepIds: frame.activeStepIds,
           detections: frame.detections,
         });
         return;
       }
 
-      if (method === 'engine.event') {
-        const event = params as unknown as EngineEventPayload;
-        useEventStore.getState().appendEngineEvent(event);
-        const deviceId = event.deviceId;
-        const eventRoot = event.workflowRoot ?? '';
-        const currentRoot = get().currentWorkflow?.root ?? '';
-        const forCurrent = !eventRoot || workflowRootKey(eventRoot) === workflowRootKey(currentRoot);
-        if (!forCurrent) {
-          return;
-        }
-        const loops = loopProgressMapFromExtra(event.extra);
-        if (event.type === 'flow_finished') {
-          set((current) => ({
-            loopProgress: { ...current.loopProgress, [deviceId]: {} },
-          }));
-        } else if (loops !== null) {
-          set((current) => ({
-            loopProgress: { ...current.loopProgress, [deviceId]: loops },
-          }));
-        }
-        // 断点暂停 / 继续：引擎的 breakpoint_hit 是唯一入口（事件里带暂停所在的步骤）
-        if (event.type === 'breakpoint_hit') {
-          set((current) => ({
-            paused: { ...current.paused, [deviceId]: event.node ?? null },
-          }));
-        } else if (
-          event.type === 'step_started' ||
-          event.type === 'flow_started' ||
-          event.type === 'flow_finished'
-        ) {
-          // 跑过任何一步 / 重新开始 / 结束都不再处于暂停态（否则横幅会一直挂着）
-          set((current) =>
-            current.paused[deviceId] ? { paused: { ...current.paused, [deviceId]: null } } : current,
-          );
-        }
-        // 未开画面推流时不会收到 engine.frame，但仍要靠事件更新「当前跑到哪一步」
-        if (
-          event.node &&
-          (event.type === 'flow_started' ||
-            event.type === 'step_started' ||
-            event.type === 'step_skipped' ||
-            event.type === 'breakpoint_hit')
-        ) {
-          const previous = get().frames[deviceId];
-          useGraphStore.getState().updateLive(deviceId, {
-            node: event.node,
-            pending: previous?.pending ?? null,
-            detections: previous?.detections ?? [],
-          });
-        }
+      if (method === 'engine.events') {
+        if (Array.isArray(params.events)) receiveEvents(params.events as EngineEventPayload[], true);
         return;
       }
+      if (method === 'engine.event') {
+        receiveEvents([params as unknown as EngineEventPayload], false);
+        return;
+      }
+      if (
+        method === 'run.started' ||
+        method === 'run.stopped' ||
+        method === 'device.disconnected' ||
+        method === 'device.failed'
+      )
+        flushEvents();
       if (method === 'run.started' || method === 'run.stopped') {
         const id = String(params.deviceId);
+        if (!acceptRunRevision(id, params.runRevision)) return;
+        reviseRunState(id);
         const isRunning = method === 'run.started';
         const fromEngine = typeof params.workflowRoot === 'string' ? params.workflowRoot : '';
+        const eventRoot = fromEngine || get().currentWorkflow?.root || '';
+        const command = runCommand(id, eventRoot);
+        if (!isRunning) {
+          // 自然结束也会抢在 start 回包之前。无 root 的通知表示整台设备停止。
+          const roots = fromEngine ? [eventRoot] : [...(runCommands.get(id)?.keys() ?? []), eventRoot];
+          for (const root of roots) {
+            if (runCommand(id, root)?.kind !== 'stop') setRunCommand(id, root, { kind: 'stopped' });
+          }
+        }
         set((current) => {
           const root = fromEngine || current.currentWorkflow?.root || '';
           const nextRoots =
@@ -529,9 +786,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
           return {
             running: { ...current.running, [id]: stillRunning },
             runningStartStep:
-              isRunning || stillRunning
-                ? current.runningStartStep
-                : { ...current.runningStartStep, [id]: null },
+              isRunning && command?.kind === 'start'
+                ? { ...current.runningStartStep, [id]: command.stepId ?? null }
+                : stillRunning
+                  ? current.runningStartStep
+                  : { ...current.runningStartStep, [id]: null },
             runningWorkflowRoots: { ...current.runningWorkflowRoots, [id]: nextRoots },
             // 开跑/停跑都不是暂停态
             paused: current.paused[id] ? { ...current.paused, [id]: null } : current.paused,
@@ -546,6 +805,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         // 引擎已经继续了：本地暂停态要立刻清，别等下一步的 step_started
         const id = String(params.deviceId);
         set((current) => (current.paused[id] ? { paused: { ...current.paused, [id]: null } } : current));
+        return;
+      }
+
+      if (method === 'device.list.changed') {
+        void useDeviceStore.getState().scan(true);
         return;
       }
 
@@ -565,6 +829,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
       if (method === 'ocr.progress') {
         useOcrStore.getState().applyProgress(params as unknown as OcrStatusPayload);
+        return;
+      }
+
+      if (method === 'yolo.progress') {
+        useYoloStore.getState().applyProgress(params as unknown as YoloProgressPayload);
         return;
       }
 
@@ -588,6 +857,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
       if (method === 'device.connected') {
         const payload = params as unknown as DeviceNotificationPayload;
+        engineRunRevisions.delete(payload.deviceId);
+        reviseRunState(payload.deviceId);
         useEventStore.getState().clearDevice(payload.deviceId);
         set((current) => ({
           ready: { ...current.ready, [payload.deviceId]: true },
@@ -602,7 +873,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         if (payload.resolution) {
           useDeviceStore
             .getState()
-            .markConnectedWith(payload.deviceId, payload.resolution, payload.uri, payload.name, payload.kind);
+            .markConnectedWith(
+              payload.deviceId,
+              payload.resolution,
+              payload.uri,
+              payload.name,
+              payload.kind,
+              payload.capabilities,
+            );
         }
         if (payload.graph) {
           applyWorkflowGraph(payload.deviceId, payload.graph, get().frames[payload.deviceId], {
@@ -619,6 +897,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
       if (method === 'device.disconnected') {
         const payload = params as unknown as DeviceNotificationPayload;
+        clearRunStateForDevice(payload.deviceId);
         stopFramePolling(payload.deviceId);
         streamPolicy.delete(payload.deviceId);
         useDeviceStore.getState().disconnect(payload.deviceId);
@@ -629,6 +908,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
       if (method === 'device.failed') {
         const payload = params as unknown as DeviceNotificationPayload;
+        engineRunRevisions.delete(payload.deviceId);
+        reviseRunState(payload.deviceId);
         const message = payload.error ?? '连接失败';
         const previous = useDeviceStore.getState().devices.find((device) => device.id === payload.deviceId);
         if (payload.channel) {
@@ -664,7 +945,24 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         useEventStore.getState().append(payload.deviceId, 'device_reconnected', { message: '画面已恢复' });
       }
     });
-    return unlisten;
+    void subscribeEngineEvents().catch((error: unknown) => {
+      devLog(`批量事件订阅不可用，继续兼容单事件: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    // HMR/新窗口重新订阅时，旧 runner 不会重发 run.started。
+    const known = new Set([
+      ...Object.keys(get().ready).filter((id) => get().ready[id]),
+      ...connectedDevices(useDeviceStore.getState().devices).map((device) => device.id),
+    ]);
+    for (const id of known) void refreshRunStatus(id);
+    return () => {
+      disposed = true;
+      discardEvents();
+      if (discardPendingEngineEvents === discardEvents) {
+        discardPendingEngineEvents = undefined;
+        flushPendingEngineEvents = undefined;
+      }
+      unlisten();
+    };
   },
 
   connect: async (deviceId, uri) => {
@@ -679,7 +977,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       // 引擎回传人类可读的名字与类型（iOS 型号 / macOS 窗口标题），界面直接用它显示
       useDeviceStore
         .getState()
-        .markConnectedWith(result.deviceId, result.resolution, uri, result.name, result.kind);
+        .markConnectedWith(
+          result.deviceId,
+          result.resolution,
+          uri,
+          result.name,
+          result.kind,
+          result.capabilities,
+        );
       // 用户在连接等待期间可能已切到别的窗口：迟到的结果不能把画面又抢回去。
       if (useDeviceStore.getState().activeId === deviceId) {
         useDeviceStore.getState().setActive(result.deviceId);
@@ -715,9 +1020,12 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     try {
       await disconnectDevice(deviceId);
     } catch (error) {
-      // 引擎侧已经断开时不算错误
-      set({ error: error instanceof Error ? error.message : String(error) });
+      // 引擎侧已经断开时不算错误；同时终止本地运行态，避免残留“运行中”。
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('设备未连接')) clearRunStateForDevice(deviceId);
+      else set({ error: message });
     }
+    clearRunStateForDevice(deviceId);
     stopFramePolling(deviceId);
     streamPolicy.delete(deviceId);
     useDeviceStore.getState().disconnect(deviceId);
@@ -725,8 +1033,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   startRun: async (deviceId, stepId) => {
+    const workflowRoot = get().currentWorkflow?.root ?? '';
+    const command: RunCommand = { kind: 'start', stepId };
+    setRunCommand(deviceId, workflowRoot, command);
+    set({ error: null });
     try {
-      const workflowRoot = get().currentWorkflow?.root ?? '';
       // 画布只画用户连过的线：没接进来的模块不跑，先把"哪个没连"说清楚
       const flowSteps = useGraphStore.getState().graphs[WORKFLOW_SCOPE]?.flow?.steps ?? [];
       const orphanError = unconnectedFlowRunError(flowSteps, stepId, flowStepTitle);
@@ -739,6 +1050,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       if (!isWorkflowLive(workflowRoot, get().runningWorkflowRoots)) {
         await useGraphStore.getState().flushWorkflowToEngine({ force: true });
       }
+      if (runCommand(deviceId, workflowRoot) !== command) return;
       if (stepId) {
         const steps = useGraphStore.getState().graphs[WORKFLOW_SCOPE]?.flow?.steps ?? [];
         if (!steps.some((step) => step.id === stepId)) {
@@ -746,7 +1058,20 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
           return;
         }
       }
-      await withDeviceSession(deviceId, () => runStart(deviceId, stepId, workflowRoot));
+      let sent = false;
+      const result = await withDeviceSession(deviceId, () => {
+        // withDeviceSession 自动重连后会重试：停止后不得再真正发起旧 start。
+        if (runCommand(deviceId, workflowRoot) !== command) return Promise.resolve({ running: false });
+        sent = true;
+        return runStart(deviceId, stepId, workflowRoot);
+      });
+      const latest = runCommand(deviceId, workflowRoot);
+      if (latest !== command) {
+        // stop 可能先于已派发的 start 执行；只有用户仍要停止时才补偿，绝不停止新一代 start。
+        if (sent && result.running && latest?.kind === 'stop') await get().stopRun(deviceId, workflowRoot);
+        return;
+      }
+      if (!result.running) return;
       set((current) => ({
         running: { ...current.running, [deviceId]: true },
         runningStartStep: { ...current.runningStartStep, [deviceId]: stepId ?? null },
@@ -756,15 +1081,27 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         },
       }));
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      if (runCommand(deviceId, workflowRoot) === command) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+      }
     }
   },
 
   stopRun: async (deviceId, workflowRoot) => {
+    flushPendingEngineEvents?.();
     const root = workflowRoot ?? get().currentWorkflow?.root ?? '';
+    const command: RunCommand = { kind: 'stop' };
+    setRunCommand(deviceId, root, command);
+    set({ error: null });
     try {
-      await runStop(deviceId, root);
-    } finally {
+      const result = await runStop(deviceId, root);
+      if (runCommand(deviceId, root) !== command || (result as { superseded?: boolean }).superseded) return;
+      if (result.running) {
+        // 仍有执行器活着时，单个 boolean 不能证明目标 root 已停止；用权威 roots 确认。
+        await refreshRunStatus(deviceId);
+        return;
+      }
+      reviseRunState(deviceId);
       set((current) => {
         const roots = withWorkflowRoot(current.runningWorkflowRoots[deviceId], root, false);
         const still = roots.length > 0;
@@ -775,8 +1112,15 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
             : { ...current.runningStartStep, [deviceId]: null },
           runningWorkflowRoots: { ...current.runningWorkflowRoots, [deviceId]: roots },
           loopProgress: still ? current.loopProgress : { ...current.loopProgress, [deviceId]: {} },
+          paused: still ? current.paused : { ...current.paused, [deviceId]: null },
         };
       });
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const message = `停止运行失败: ${rawMessage}`;
+      if (rawMessage.includes('设备未连接')) clearRunStateForDevice(deviceId);
+      set({ error: message });
+      useEventStore.getState().append(deviceId, 'error', { message });
     }
   },
 
@@ -865,7 +1209,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
             });
           } else {
             await useGraphStore.getState().updateFlowStep(pendingFlowStep, {
-              params: { ...(targetStep.params ?? {}), by: '识别器', rec: result.label },
+              params: { ...(targetStep.params ?? {}), by: CLICK_BY_RECOGNIZER, rec: result.label },
             });
           }
           useGraphStore.getState().selectNode(pendingFlowStep);
@@ -884,6 +1228,101 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       const message = error instanceof Error ? error.message : String(error);
       set({ error: message });
       useEventStore.getState().append(deviceId, 'error', { message: `录制失败: ${message}` });
+    }
+  },
+
+  updateYoloRecognizer: async (deviceId, label, spec, newLabel) => {
+    const root = get().currentWorkflow?.root ?? '';
+    try {
+      const result = await withDeviceSession(deviceId, () =>
+        updateYoloRecognizerRpc(deviceId, label, spec, newLabel),
+      );
+      if (workflowRootKey(get().currentWorkflow?.root ?? '') !== workflowRootKey(root)) return true;
+      const finalLabel = result.label ?? newLabel ?? label;
+      invalidateYoloExamples(label);
+      if (finalLabel !== label) invalidateYoloExamples(finalLabel);
+      clearTemplateCache([label, finalLabel]);
+      if (finalLabel !== label)
+        set((current) => ({ frames: renamedFrameDetections(current.frames, label, finalLabel) }));
+      applyWorkflowGraph(deviceId, result.graph, get().frames[deviceId], {
+        applyStructure: true,
+        ...(finalLabel !== label ? { renamedRecognizer: { from: label, to: finalLabel } } : {}),
+      });
+      useEventStore.getState().append(deviceId, 'recognizer_added', {
+        message: `~${finalLabel}（已更新示例/参数）`,
+      });
+      return true;
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
+  },
+
+  addYoloExample: async (deviceId, label, rect) => {
+    try {
+      const result = await withDeviceSession(deviceId, () => addYoloExampleRpc(deviceId, label, rect));
+      invalidateYoloExamples(label);
+      applyWorkflowGraph(deviceId, result.graph, get().frames[deviceId], { applyStructure: true });
+      useEventStore.getState().append(deviceId, 'recognizer_added', {
+        message: `+${label} 示例（共 ${result.examples} 个）`,
+      });
+      return result.examples;
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  },
+
+  createYoloRecognizer: async (deviceId, label, spec) => {
+    try {
+      const result = await withDeviceSession(deviceId, () => createRecognizerRpc(deviceId, label, spec));
+      applyWorkflowGraph(deviceId, result.graph, get().frames[deviceId], { applyStructure: true });
+      useEventStore.getState().append(deviceId, 'recognizer_added', {
+        message: `+${result.label} (AI 识别)`,
+      });
+      devLog(`新建 AI 识别器 ${result.label}`);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ error: message });
+      useEventStore.getState().append(deviceId, 'error', { message: `新建 AI 识别器失败: ${message}` });
+      return false;
+    }
+  },
+
+  setRecognizerEnabled: async (deviceId, label, enabled) => {
+    const root = get().currentWorkflow?.root ?? '';
+    const key = JSON.stringify([workflowRootKey(root), label]);
+    const command = {};
+    recognizerEnabledCommands.set(key, command);
+    const isCurrent = (): boolean =>
+      recognizerEnabledCommands.get(key) === command &&
+      workflowRootKey(get().currentWorkflow?.root ?? '') === workflowRootKey(root);
+    try {
+      const result = await setRecognizerEnabledRpc(deviceId || undefined, label, enabled, root);
+      if (!isCurrent()) return true;
+      useGraphStore.getState().updateRecognizerEnabled(deviceId, label, result.enabled ?? enabled);
+      // 高亮事件会复用frame detections；重新启用必须等新帧，不能复活旧分数。
+      set((current) => ({
+        frames: Object.fromEntries(
+          Object.entries(current.frames).map(([id, frame]) => [
+            id,
+            {
+              ...frame,
+              detections: frame.detections.filter((item) => item.label !== label),
+            },
+          ]),
+        ),
+      }));
+      return true;
+    } catch (error) {
+      if (isCurrent()) {
+        const message = error instanceof Error ? error.message : String(error);
+        set({ error: isUnknownMethodError(message) ? staleEngineHint(['recognizer.enabled']) : message });
+      }
+      return false;
+    } finally {
+      if (recognizerEnabledCommands.get(key) === command) recognizerEnabledCommands.delete(key);
     }
   },
 
@@ -910,10 +1349,19 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   renameRecognizer: async (deviceId, label, to) => {
+    const root = get().currentWorkflow?.root ?? '';
     try {
       const result = await renameRecognizerRpc(deviceId, label, to);
-      // 引擎把改完的整张图返回来了（引用都改好了）：直接换掉本地图，别自己拼
-      applyWorkflowGraph(deviceId, result.graph, get().frames[deviceId], { applyStructure: true });
+      if (workflowRootKey(get().currentWorkflow?.root ?? '') !== workflowRootKey(root))
+        return { refs: result.refs };
+      clearTemplateCache([label, result.to]);
+      invalidateYoloExamples(label);
+      invalidateYoloExamples(result.to);
+      set((current) => ({ frames: renamedFrameDetections(current.frames, label, result.to) }));
+      applyWorkflowGraph(deviceId, result.graph, get().frames[deviceId], {
+        applyStructure: true,
+        renamedRecognizer: { from: label, to: result.to },
+      });
       const flowSteps = 'flowSteps' in result.refs ? Number(result.refs.flowSteps) : 0;
       const changed = result.refs.nodes + result.refs.edges + result.refs.scores + flowSteps;
       useEventStore.getState().append(deviceId, 'recognizer_renamed', {
@@ -954,9 +1402,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
   isReady: (deviceId) => Boolean(get().ready[deviceId]),
 
-  adoptLiveDevices: () => {
+  adoptLiveDevices: (onlyDeviceId) => {
     // 引擎的会话还活着就是连着（界面重载/重启后前端状态是空的，但帧照推）
-    const live = connectedDevices(useDeviceStore.getState().devices);
+    const live = connectedDevices(useDeviceStore.getState().devices).filter(
+      (device) => !onlyDeviceId || device.id === onlyDeviceId,
+    );
     if (live.length === 0) {
       return;
     }
@@ -968,6 +1418,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       return { ready };
     });
     for (const device of live) {
+      void refreshRunStatus(device.id);
       applyStreamPolicy(device.id, PREVIEW_FPS); // 连接即要画面（同 connect）
     }
   },
@@ -975,8 +1426,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   clearError: () => set({ error: null }),
 
   resetForEngineRestart: () => {
+    discardPendingEngineEvents?.();
+    recognizerEnabledCommands.clear();
+    runCommands.clear();
+    runRevisions.clear();
+    engineRunRevisions.clear();
     for (const deviceId of [...framePollers.keys()]) stopFramePolling(deviceId);
     streamPolicy.clear();
+    framePollFps.clear();
     workflowSwitchDepth = 0;
     set({
       ready: {},
@@ -993,7 +1450,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     });
   },
 
-  setStreamPolicy: (deviceId, fps) => applyStreamPolicy(deviceId, fps),
+  setStreamPolicy: (deviceId, fps, pollFps) => applyStreamPolicy(deviceId, fps, pollFps),
 
   recordStep: async (deviceId, action) => {
     if (!get().ready[deviceId]) {
@@ -1085,6 +1542,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
           useGraphStore.getState().updateLive(deviceId, {
             node: frame.node,
             pending: frame.pending,
+            activeStepIds: frame.activeStepIds,
             detections: frame.detections,
           });
         }

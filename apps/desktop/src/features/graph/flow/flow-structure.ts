@@ -176,6 +176,18 @@ function withoutInLinks(step: FlowStep): FlowStep {
  * 并把连线冻结进 `_out`（老文件按老的推导冻结一次，之后画布只认 `_out`）。
  */
 export function migrateFlowSteps(steps: readonly FlowStep[]): FlowStep[] {
+  // 旧版本/并行批量插入可能留下重复 id；先修复，否则连线按 id 建 Map 会指向错误模块。
+  const seenIds = new Set<string>();
+  const uniqueSteps = steps.map((step, index) => {
+    let id = coerceStr(step.id).trim();
+    if (!id || seenIds.has(id)) {
+      const suffix = globalThis.crypto?.randomUUID?.().replaceAll('-', '').slice(0, 12) ?? `${Date.now().toString(36)}_${index}`;
+      id = `s_${suffix}`;
+    }
+    seenIds.add(id);
+    return id === step.id ? step : { ...step, id };
+  });
+  steps = uniqueSteps;
   const condRepeat = new Map<string, 'then' | 'else'>();
   for (const block of parseBlocks(steps)) {
     if (block.kind !== 'cond') {
@@ -298,6 +310,7 @@ export function removeStepsFromChain(
     if (block) {
       removed.add(block.headId);
       removed.add(block.endId);
+      for (const branch of block.branches ?? []) removed.add(branch.markerId);
       if (block.elseId) {
         removed.add(block.elseId);
       }

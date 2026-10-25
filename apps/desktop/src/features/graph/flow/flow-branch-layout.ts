@@ -9,7 +9,7 @@ import { MarkerType, type Edge } from '@xyflow/react';
 import { flowEdges } from '@/features/graph/flow/flow-edge-model';
 import { isHiddenFlowStep } from '@/features/graph/flow/flow-hidden';
 import { parseBlocks } from '@/features/graph/flow/flow-structure-core';
-import { sourcePortsForStepType, type FlowSourceHandleId } from '@/features/graph/flow/flow-step-ports';
+import { sourcePortsForStep, type FlowSourceHandleId } from '@/features/graph/flow/flow-step-ports';
 import { lineStyleForStep } from '@/features/graph/flow/flow-step-settings';
 import type { FlowStep } from '@/types';
 
@@ -22,7 +22,8 @@ function branchEdge(
   targetHandle: string = 'in',
 ): Edge {
   const visual = lineStyleForStep(source, segment);
-  const orthogonal = segment === 'back' || sourceHandle === 'body' || targetHandle === 'back';
+  const orthogonal =
+    segment === 'back' || sourceHandle === 'body' || sourceHandle.startsWith('branch') || targetHandle === 'back';
   return {
     id: `flow_${source.id}_${sourceHandle}_${target.id}`,
     source: source.id,
@@ -47,6 +48,9 @@ function branchEdge(
 }
 
 function labelOf(handle: FlowSourceHandleId): string | undefined {
+  if (handle.startsWith('branch')) {
+    return `分支 ${handle.slice('branch'.length)}`;
+  }
   if (handle === 'then') {
     return '成立';
   }
@@ -77,7 +81,7 @@ export function buildBranchFlowEdges(steps: readonly FlowStep[]): Edge[] {
   for (const edge of flowEdges(steps)) {
     const source = byId.get(edge.source);
     const target = byId.get(edge.target);
-    if (!source || !target) {
+    if (!source || !target || isHiddenFlowStep(source) || isHiddenFlowStep(target)) {
       continue;
     }
     const loopBlock =
@@ -116,7 +120,7 @@ export function buildBranchFlowEdges(steps: readonly FlowStep[]): Edge[] {
       (item) => item.headId !== block.headId && item.headIndex < tailIndex && tailIndex < item.endIndex,
     );
     // 尾巴自己都接不到下一步（条件/结束/循环），或者已经画了回线：不用补
-    const hasOut = sourcePortsForStepType(tail.type).some((port) => port.id === 'out');
+    const hasOut = sourcePortsForStep(tail).some((port) => port.id === 'out');
     if (nested || !hasOut || edges.some((edge) => edge.source === tail.id)) {
       continue;
     }

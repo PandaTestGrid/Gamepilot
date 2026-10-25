@@ -2,7 +2,6 @@
  * 工作流画布：唯一真源 `graph.json` → `flow.steps`（Automa 式步骤链）。
  * 识别器仍在 graph.recognizers；不再编辑 nodes/edges 状态图。
  */
-import { MousePointerSquareDashed, ScanLine, ScanText, Video } from 'lucide-react';
 import { Component, Fragment, type ReactNode, useEffect, useRef } from 'react';
 import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
@@ -11,17 +10,15 @@ import { FlowStepConsole } from '@/features/graph/flow/FlowStepConsole';
 import { FlowStepEditor } from '@/features/graph/flow/FlowStepEditor';
 import { flowStepTitle } from '@/features/graph/flow/flow-step-meta';
 import { WorkflowWorkspace } from '@/features/graph/flow/WorkflowWorkspace';
+import { GraphStartPage } from '@/features/graph/GraphStartPage';
 import { GraphTabs } from '@/features/graph/GraphTabs';
 import { GraphToolbar } from '@/features/graph/GraphToolbar';
-import { taskName } from '@/features/graph/task-name';
 import { GRAPH_LAYOUT } from '@/layout/layout-specs';
-import { FLOW_EDIT_LOCKED_HINT } from '@/lib/flow-edit-lock';
-import { useCurrentWorkflowLive } from '@/lib/useLiveWorkflow';
 import { useLayoutGroup } from '@/layout/useLayoutGroup';
 import { PanelShell } from '@/layout/PanelShell';
 import { devLog } from '@/lib/rpc';
 import { cn } from '@/lib/utils';
-import { activeDevice, useDeviceStore } from '@/stores/device.store';
+import { useDeviceStore } from '@/stores/device.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { workflowRootKey } from '@/stores/ui.store';
 import { graphForDevice, rawFor, useGraphStore } from '@/stores/graph.store';
@@ -32,7 +29,6 @@ const EDITOR_COLLAPSED_PX = 28;
 const EDITOR_MIN_PX = 72;
 /** 点节点展开时的默认高度；大窗口按百分比会占掉太多画布 */
 const EDITOR_DEFAULT_OPEN_PX = 168;
-
 type DockTab = 'config' | 'console';
 
 const DOCK_TABS: ReadonlyArray<{ id: DockTab; label: string }> = [
@@ -88,141 +84,6 @@ class CanvasBoundary extends Component<
     return <Fragment key={this.state.generation}>{this.props.children}</Fragment>;
   }
 }
-/**
- * 详情坞左侧（配置 Tab 前面）的录制图标按钮：
- * - 框选录制（MousePointerSquareDashed）→ 图像模板
- * - 点选录制（ScanLine）→ 图像模板
- * - 文字识别（ScanText，OCR 识别器；框出一块区域后填要认的字）
- * - 录操作（Video 录像图标，把画面上的点击/滑动直接录成工作流步骤，开启后附带 +等0.5s/1s/3s）
- */
-function DockRecordTools(): ReactNode {
-  const devices = useDeviceStore((state) => state.devices);
-  const activeId = useDeviceStore((state) => state.activeId);
-  const device = activeDevice(devices, activeId);
-  const isConnected = useSessionStore((state) => Boolean(state.ready[activeId]));
-  const recordStep = useSessionStore((state) => state.recordStep);
-  const recordMode = useUiStore((state) => state.recordMode);
-  const recordKind = useUiStore((state) => state.recordKind);
-  const setRecordMode = useUiStore((state) => state.setRecordMode);
-  const beginOcr = useUiStore((state) => state.beginOcrRecognizerCapture);
-  const recordActionMode = useUiStore((state) => state.recordActionMode);
-  const toggleRecordAction = useUiStore((state) => state.toggleRecordAction);
-  const lockEdits = useCurrentWorkflowLive();
-  const canRecord = isConnected && !lockEdits;
-
-  const tools = [
-    {
-      mode: 'marquee' as const,
-      label: '框选录制',
-      hint: '框选录制：在设备画面上拖一个矩形生成识别器（点到别处或 Esc 关闭）',
-      Icon: MousePointerSquareDashed,
-    },
-    {
-      mode: 'pick' as const,
-      label: '点选录制',
-      hint: '点选录制：在设备画面上单击取 3×3% 邻域小模板（点到别处或 Esc 关闭）',
-      Icon: ScanLine,
-    },
-  ];
-  return (
-    <div className="flex items-center gap-0.5" role="group" aria-label="录制工具" data-capture-keep>
-      {tools.map(({ mode, label, hint, Icon }) => {
-        // 文字识别也走 marquee 框选，但产出的是 OCR 表单，不能和「框选录制」同时点亮
-        const active = recordMode === mode && !(mode === 'marquee' && recordKind === 'ocr');
-        return (
-          <button
-            key={mode}
-            type="button"
-            aria-label={label}
-            aria-pressed={active}
-            data-testid={`dock-record-${mode}`}
-            disabled={!canRecord}
-            title={
-              lockEdits
-                ? FLOW_EDIT_LOCKED_HINT
-                : isConnected
-                  ? hint
-                  : `设备未连接：先连上设备才能${label}（当前 ${device?.name ?? '无设备'}）`
-            }
-            onClick={() => setRecordMode(active ? 'off' : mode)}
-            className={cn(
-              'flex size-5 items-center justify-center rounded-sm',
-              active ? 'bg-brand/20 text-brand' : 'text-dim hover:bg-raised hover:text-fg',
-              !canRecord && 'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-dim',
-            )}
-          >
-            <Icon className="size-3.5" />
-          </button>
-        );
-      })}
-      <button
-        type="button"
-        aria-label="文字识别"
-        aria-pressed={recordMode === 'marquee' && recordKind === 'ocr'}
-        data-testid="dock-record-ocr"
-        disabled={!canRecord}
-        onClick={() => (recordMode === 'marquee' && recordKind === 'ocr' ? setRecordMode('off') : beginOcr())}
-        title={
-          lockEdits
-            ? FLOW_EDIT_LOCKED_HINT
-            : isConnected
-              ? recordMode === 'marquee' && recordKind === 'ocr'
-                ? '正在框选文字识别区域：再点一次或按 Esc 关闭'
-                : '文字识别：在设备画面上框出要读字的区域，填上要认的字生成 OCR 识别器'
-              : `设备未连接：先连上设备才能文字识别（当前 ${device?.name ?? '无设备'}）`
-        }
-        className={cn(
-          'flex size-5 items-center justify-center rounded-sm',
-          recordMode === 'marquee' && recordKind === 'ocr'
-            ? 'bg-brand/20 text-brand'
-            : 'text-dim hover:bg-raised hover:text-fg',
-          !canRecord && 'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-dim',
-        )}
-      >
-        <ScanText className="size-3.5" />
-      </button>
-      <button
-        type="button"
-        aria-label="录操作"
-        aria-pressed={recordActionMode}
-        data-testid="dock-record-action"
-        disabled={!canRecord}
-        onClick={toggleRecordAction}
-        title={
-          lockEdits
-            ? FLOW_EDIT_LOCKED_HINT
-            : isConnected
-              ? recordActionMode
-                ? '正在录操作：画面上的每次点击/滑动都会变成工作流里的一步（点到别处或 Esc 关闭）'
-                : '录操作：把画面上的点击/滑动录成工作流里的一步'
-              : `设备未连接：先连上设备才能录操作（当前 ${device?.name ?? '无设备'}）`
-        }
-        className={cn(
-          'flex size-5 items-center justify-center rounded-sm',
-          recordActionMode ? 'bg-brand/20 text-brand' : 'text-dim hover:bg-raised hover:text-fg',
-          !canRecord && 'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-dim',
-        )}
-      >
-        <Video className="size-3.5" />
-      </button>
-      {recordActionMode &&
-        isConnected &&
-        [0.5, 1, 3].map((seconds) => (
-          <button
-            key={seconds}
-            type="button"
-            data-testid={`record-wait-${seconds}`}
-            onClick={() => void recordStep(activeId, { type: 'wait', seconds })}
-            className="h-5 shrink-0 rounded-sm border border-line px-1 text-badge text-dim hover:bg-raised hover:text-fg"
-            title={`录一步"等待 ${seconds}s"`}
-          >
-            +等{seconds}s
-          </button>
-        ))}
-    </div>
-  );
-}
-
 export function GraphPane(): ReactNode {
   const activeId = useDeviceStore((state) => state.activeId);
   const openWorkflowTabs = useUiStore((state) => state.openWorkflowTabs);
@@ -248,9 +109,11 @@ export function GraphPane(): ReactNode {
     void refreshGraph();
   }, [workflowRoot, refreshGraph]);
 
+  const startPageOpen = useUiStore((state) => state.startPageOpen);
   const lastAutoOpenedRoot = useRef('');
   useEffect(() => {
-    if (!workflowRoot || !hasKnownWorkflow) {
+    // 开始页开着时不要替用户开图（否则恢复出来的那张会立刻把开始页顶掉）
+    if (!workflowRoot || !hasKnownWorkflow || startPageOpen) {
       lastAutoOpenedRoot.current = '';
       return;
     }
@@ -258,7 +121,16 @@ export function GraphPane(): ReactNode {
       openWorkflowTab(workflowRoot);
       lastAutoOpenedRoot.current = workflowRoot;
     }
-  }, [workflowRoot, hasKnownWorkflow, openWorkflowTab]);
+  }, [workflowRoot, hasKnownWorkflow, openWorkflowTab, startPageOpen]);
+
+  /** 开始页点一条 → 开始页收起（真实入口在 `GraphStartPage` 的 `onOpen`）。 */
+  const openFromStartPage = (root: string): void => {
+    if (!root) {
+      return;
+    }
+    useUiStore.getState().hideStartPage();
+    void useSessionStore.getState().switchWorkflow(root);
+  };
 
   const selectedFlowStep = (graph?.flow?.steps ?? []).find((step) => step.id === selectedNodeId) ?? null;
 
@@ -350,11 +222,10 @@ export function GraphPane(): ReactNode {
   }, [flowDockOpen, hasEditor, dockTab, editorRef, setDockTab]);
 
   const tabsOpen = openWorkflowTabs.length > 0;
-
   return (
     <PanelShell
       title="工作流"
-      tabs={tabsOpen ? <GraphTabs /> : undefined}
+      tabs={startPageOpen || !tabsOpen ? undefined : <GraphTabs />}
       actions={
         <div className="flex min-w-0 shrink-0 items-center gap-1">
           {workflowNote ? (
@@ -372,33 +243,23 @@ export function GraphPane(): ReactNode {
         defaultLayout={layout.defaultLayout}
         onLayoutChanged={layout.onLayoutChanged}
         groupRef={layout.groupRef}
-        className="h-full"
+        className="h-full min-h-0"
       >
         <Panel id="canvas" defaultSize="80%" minSize="30%" style={{ overflow: 'hidden' }}>
-          <CanvasBoundary resetKey={workflowRoot}>
-            <div data-testid="flow-canvas-wrap" className="h-full min-h-0">
-              <WorkflowWorkspace
-                tabsOpen={tabsOpen}
-                workflowRoot={workflowRoot}
-                emptyOverlay={
-                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-1 bg-canvas text-badge text-faint">
-                    <span>没有打开的工作流</span>
-                    <span>右栏「工作区」里点一条工作流就打开标签</span>
-                    {hasKnownWorkflow ? (
-                      <button
-                        type="button"
-                        onClick={() => openWorkflowTab(workflowRoot)}
-                        title={workflowRoot}
-                        className="mt-1 rounded-sm border border-line px-1.5 py-0.5 text-dim hover:bg-raised hover:text-fg"
-                      >
-                        重新打开「{taskName(workflowRoot)}」
-                      </button>
-                    ) : null}
-                  </div>
-                }
-              />
+          {/* 全局配置固定贴在画布右侧（控制台上方那一格），不占画布宽度以外的行 */}
+          <div className="flex h-full min-h-0 w-full">
+            <div className="min-w-0 flex-1">
+              <CanvasBoundary resetKey={workflowRoot}>
+                <div data-testid="flow-canvas-wrap" className="h-full min-h-0">
+                  <WorkflowWorkspace
+                    tabsOpen={startPageOpen ? false : tabsOpen}
+                    workflowRoot={workflowRoot}
+                    emptyOverlay={<GraphStartPage onOpen={openFromStartPage} />}
+                  />
+                </div>
+              </CanvasBoundary>
             </div>
-          </CanvasBoundary>
+          </div>
         </Panel>
         <Separator className="h-px bg-line transition-colors hover:bg-brand" title="拖动改高度" />
         <Panel
@@ -421,7 +282,6 @@ export function GraphPane(): ReactNode {
             <DockBar
               panelRef={editorRef}
               onToggle={(next) => setFlowDockOpen(next)}
-              leading={<DockRecordTools />}
               tabs={
                 <div role="tablist" className="flex h-full items-stretch">
                   {DOCK_TABS.map((tab) => (

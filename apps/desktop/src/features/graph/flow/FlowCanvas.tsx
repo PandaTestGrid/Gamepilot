@@ -127,16 +127,19 @@ function FlowCanvasView({
   const redoFlow = useGraphStore((state) => state.redoFlow);
   const wrapFlowSelectionInLoop = useGraphStore((state) => state.wrapFlowSelectionInLoop);
   const runningStepId = useGraphStore((state) => state.liveByDevice[activeId]?.node ?? null);
+  const activeStepIds = useGraphStore((state) => state.liveByDevice[activeId]?.activeStepIds);
+  const runningStepIds = useMemo(
+    () => new Set(activeStepIds ?? (runningStepId ? [runningStepId] : [])),
+    [activeStepIds, runningStepId],
+  );
   const sessionRunning = useCurrentWorkflowRunning();
   const live = useCurrentWorkflowLive();
   const lockEdits = readOnly || live;
-  const engineEvents = useEventStore((state) => state.events[activeId]);
-  const failedStepId = useMemo(() => {
-    if (sessionRunning) {
-      return null;
-    }
-    return lastFailedStepId(engineEvents ?? []);
-  }, [engineEvents, sessionRunning]);
+  // 画布只需要最后失败节点，不订阅整份高频事件列表。
+  // 运行中失败高亮被隐藏，普通步骤日志不能唤起 ReactFlow 重渲染。
+  const failedStepId = useEventStore((state) =>
+    sessionRunning || !state.events[activeId] ? null : lastFailedStepId(state.events[activeId]),
+  );
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [moduleDragOver, setModuleDragOver] = useState(false);
   const [menu, setMenu] = useState<MenuAnchor | null>(null);
@@ -250,7 +253,7 @@ function FlowCanvasView({
       const next = current.map((node) => {
         const selected = syncSelection ? selectedIdSet.has(node.id) : Boolean(node.selected);
         const expanded = selectedNodeId === node.id;
-        const running = runningStepId === node.id;
+        const running = runningStepIds.has(node.id);
         const failed = failedStepId === node.id;
         const title = flowStepTitle(node.data.step);
         if (
@@ -267,7 +270,7 @@ function FlowCanvasView({
       });
       return changed ? next : current;
     });
-  }, [selectedNodeId, selectedNodeIds, runningStepId, failedStepId, selectedIdSet, steps, setRfNodes]);
+  }, [selectedNodeId, selectedNodeIds, runningStepIds, failedStepId, selectedIdSet, steps, setRfNodes]);
 
   useEffect(() => {
     if (flowRelayoutGeneration === 0) {

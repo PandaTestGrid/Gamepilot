@@ -9,7 +9,7 @@ import {
   formatClickCoordSummary,
 } from '@/features/graph/flow/flow-click-params';
 import { condSummaryFromParams } from '@/features/graph/flow/flow-cond-params';
-import { delayMsOf } from '@/features/graph/flow/flow-delay-params';
+import { delayIsRandom, delayMsOf, randomDelayRangeOf } from '@/features/graph/flow/flow-delay-params';
 import {
   defaultKeyForPlatform,
   keyValueLabel,
@@ -17,6 +17,7 @@ import {
   supportsKeyModule,
 } from '@/features/graph/flow/flow-key-params';
 import { formatSwipeSummary } from '@/features/graph/flow/flow-swipe-params';
+import { selectionSummary } from '@/features/graph/flow/flow-selection';
 import { formatTriggerSummary } from '@/features/graph/flow/flow-trigger-params';
 import type { DeviceKind, FlowStep } from '@/types';
 
@@ -44,6 +45,10 @@ export const FLOW_STEP_TYPES = [
   'end',
   'call',
   'setvar',
+  'parallel',
+  'parallelbranch',
+  'parallelend',
+  'touch',
 ] as const;
 
 export function loopCountOf(params: Record<string, unknown> | undefined): number {
@@ -102,7 +107,12 @@ export const FLOW_MODULE_GROUPS: ReadonlyArray<{
         hint: '系统键（返回 / 主页 / 最近任务）',
         defaultParams: { value: 'back' },
       },
-      { type: 'text', label: '输入文字', hint: 'ADB 文本', defaultParams: { value: '' } },
+      {
+        type: 'touch',
+        label: '触点',
+        hint: '按下 / 移动 / 松开；Android 多指',
+        defaultParams: { phase: 'down', finger: 1, x: 0.5, y: 0.5 },
+      },      { type: 'text', label: '输入文字', hint: 'ADB 文本', defaultParams: { value: '' } },
     ],
   },
   {
@@ -114,7 +124,7 @@ export const FLOW_MODULE_GROUPS: ReadonlyArray<{
         hint: '识别器命中',
         defaultParams: { rec: '', timeout_ms: 10000, stable_frames: 2 },
       },
-      { type: 'delay', label: '延时', hint: '毫秒（可选预设或自定义输入）', defaultParams: { ms: 500 } },
+      { type: 'delay', label: '延时', hint: '毫秒；可打开「随机」按范围等待', defaultParams: { ms: 500 } },
       {
         type: 'loop',
         label: '循环',
@@ -139,6 +149,12 @@ export const FLOW_MODULE_GROUPS: ReadonlyArray<{
         hint: '左端连入 · 右上「成立」· 右下「不成立」· 匹配时间默认 100ms',
         defaultParams: { rec: '', timeout_ms: 100 },
       },
+      {
+        type: 'parallel',
+        label: '并行',
+        hint: '2–4 个分支同时运行，汇合后继续',
+        defaultParams: { mode: 'all', branches: 2 },
+      },
       { type: 'call', label: '调用工作流', hint: '同工作区', defaultParams: { name: '' } },
       {
         type: 'setvar',
@@ -152,8 +168,8 @@ export const FLOW_MODULE_GROUPS: ReadonlyArray<{
 
 /**
  * 按当前设备类型过滤与定制模块目录：
- * - 不支持系统按键的平台（如 `windows` 本机窗口）不显示「按键」模块；
- * - iOS 默认按键为「主页」(home)，Android / 模拟器默认按键为「返回」(back)。
+ * - 所有设备都显示「按键」模块；Windows 本机窗口展示游戏键盘键；
+ * - iOS 默认按键为「主页」(home)，Android / 模拟器默认「返回」(back)，Windows 默认「空格」(space)。
  */
 export function flowModuleGroupsForDevice(deviceKind?: DeviceKind | null): ReadonlyArray<{
   readonly label: string;
@@ -167,7 +183,9 @@ export function flowModuleGroupsForDevice(deviceKind?: DeviceKind | null): Reado
       ? 'iOS 系统键（主页 / 锁屏 / 音量）'
       : keyPlatform === 'emulator'
         ? '模拟器按键（返回 / 主页 / 最近任务）'
-        : 'Android 系统键（返回 / 主页 / 最近任务等）';
+        : keyPlatform === 'windows'
+          ? 'Windows 键盘（WASD / 空格 / F1-F12 等）'
+          : 'Android 系统键（返回 / 主页 / 最近任务等）';
 
   return FLOW_MODULE_GROUPS.map((group) => ({
     ...group,
@@ -182,9 +200,7 @@ export function flowModuleGroupsForDevice(deviceKind?: DeviceKind | null): Reado
           hint: keyHint,
           defaultParams: {
             value: defaultKey,
-            ...(deviceKind === 'ios' || deviceKind === 'emulator' || deviceKind === 'android'
-              ? { platform: keyPlatform }
-              : {}),
+            platform: keyPlatform,
           },
         };
       }),
@@ -198,6 +214,9 @@ const TYPE_LABEL: Record<string, string> = {
   click: '点击',
   hold: '长按',
   swipe: '滑动',
+  touch: '触点',  parallel: '并行',
+  parallelbranch: '并行分支',
+  parallelend: '并行结束',
   key: '按键',
   text: '输入文字',
   wait: '等待界面',
@@ -222,17 +241,31 @@ export function flowStepTitle(step: FlowStep | null | undefined): string {
   if (step.type === 'manual' || step.type === 'schedule' || step.type === 'interval') {
     return formatTriggerSummary(step.type, params);
   }
+  if (step.type === 'parallel')
+    return `${base} · ${Number(params.branches ?? 2)} 支 · ${params.mode === 'any' ? '首个成功' : '全部完成'}`;  if (step.type === 'touch')
+    return `${base} · ${params.phase === 'move' ? '移动' : params.phase === 'up' ? '松开' : '按下'} · 手指 ${Number(params.finger ?? 1)}`;
   if (step.type === 'delay') {
+    if (delayIsRandom(params)) {
+      const range = randomDelayRangeOf(params);
+      return `${base} · ${range.min}~${range.max}ms（随机）`;
+    }
     return `${base} · ${delayMsOf(params)}ms`;
   }
   if (step.type === 'click' || step.type === 'hold') {
     const eventKind = clickEventKind(params, step.type);
     const actionLabel = clickEventLabel(eventKind);
     const mode = clickTargetMode(params);
-    const target =
+    if (mode === null) {
+      return `${actionLabel} · 无效点击方式`;
+    }
+    let target =
       mode === 'recognizer' && typeof params.rec === 'string' && params.rec
         ? params.rec
         : formatClickCoordSummary(params);
+    const pick = mode === 'recognizer' ? selectionSummary(params.strategy, params.index) : '';
+    if (pick) {
+      target = `${target} · ${pick}`;
+    }
     if (eventKind === 'long_press') {
       const durationMs = Number(params.duration_ms ?? 600) || 600;
       return `${actionLabel} · ${target} · ${durationMs}ms`;
@@ -277,8 +310,16 @@ export function flowStepTitle(step: FlowStep | null | undefined): string {
   return base;
 }
 
+let stepIdSequence = 0;
+
+/** 生成不会因并行模块批量插入而重复的步骤 id。 */
 export function newStepId(): string {
-  return `s_${Math.random().toString(36).slice(2, 10)}`;
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) {
+    return `s_${uuid.replaceAll('-', '').slice(0, 16)}`;
+  }
+  stepIdSequence = (stepIdSequence + 1) % 1_000_000;
+  return `s_${Date.now().toString(36)}_${stepIdSequence.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function defaultModuleStep(module: PaletteModule): FlowStep {

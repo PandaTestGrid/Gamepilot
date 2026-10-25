@@ -84,11 +84,12 @@ export function BottomDock({
         </div>
       </div>
 
-      {/* 收起时这块被 Panel 裁掉（collapsedSize=28px），内容不必卸载：
-          事件/日志要保持订阅，卸载再挂会丢最近的状态 */}
-      <div className="min-h-0 flex-1 border-t border-line">
-        <DebugDrawer />
-      </div>
+      {/* 事件/日志由全局 store 收集；收起时卸载内容，避免隐藏列表继续处理高频更新。 */}
+      {open && (
+        <div className="min-h-0 flex-1 border-t border-line">
+          <DebugDrawer />
+        </div>
+      )}
     </section>
   );
 }

@@ -29,6 +29,7 @@ import {
   workspaceRemove,
 } from '@/lib/rpc';
 import { useDeviceStore } from '@/stores/device.store';
+import { useEngineStore } from '@/stores/engine.store';
 import { useLibraryStore } from '@/stores/library.store';
 import { useSessionStore } from '@/stores/session.store';
 
@@ -152,6 +153,7 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     replies.list = { active: WS_A, recommended: RECOMMENDED, items: WORKSPACES };
+    useEngineStore.setState({ status: 'ready', missingMethods: [] });
     useLibraryStore.setState({
       workspaceRoot: WS_A,
       workflows: WORKFLOWS,
@@ -461,6 +463,29 @@ describe('工作区区域（右栏 Tab 的本体内容）', () => {
     expect(screen.getByTestId('workspace-add')).toBeInTheDocument();
     // 「用默认工作区」那条次入口也取消了（推荐目录不再是界面上的一个动作）
     expect(screen.queryByText('默认工作区')).not.toBeInTheDocument();
+  });
+
+  it('手输兜底表单开着时：不再叠一个「添加工作区…」，取消是按钮且关得掉', async () => {
+    replies.list = { active: null, recommended: RECOMMENDED, items: [] };
+    useLibraryStore.setState({ workspaceRoot: '', workspaces: [], workflows: [] });
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    expect(await screen.findByRole('button', { name: '添加工作区…' })).toBeInTheDocument();
+    await user.click(screen.getByTestId('workspace-add'));
+
+    // 手输框（原生对话框在 vitest 里必然拿不到 → 走兜底）
+    expect(await screen.findByPlaceholderText('/Users/me/Documents/game-a')).toBeInTheDocument();
+    // 表单里的两个动作都在这：主按钮 + 取消（取消以前是行末一个裸文字，会被挤成竖排）
+    expect(screen.getByRole('button', { name: '添加这个工作区' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument();
+    // 表单开着的时候，空态那个蓝色「添加工作区…」不再重复出现
+    expect(screen.queryByRole('button', { name: '添加工作区…' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '取消' }));
+    expect(screen.queryByPlaceholderText('/Users/me/Documents/game-a')).not.toBeInTheDocument();
+    // 关掉之后空态按钮回来（重新查一次：React 会换掉那个节点）
+    expect(screen.getByRole('button', { name: '添加工作区…' })).toBeInTheDocument();
   });
 
   it('还在跑的工作流行：运行点 + 设备名，切走之后也看得见', async () => {

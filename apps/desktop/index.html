@@ -3,10 +3,137 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
     <title>GamePilot</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        background: #0f1115;
+        color: #e6e8ee;
+        font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body,
+      #root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        overflow: hidden;
+        background: #0f1115;
+      }
+      .boot-cold {
+        position: fixed;
+        inset: 0;
+        z-index: 10000;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        background: #0f1115;
+      }
+      .boot-cold__inner {
+        position: relative;
+        display: flex;
+        width: min(380px, calc(100vw - 48px));
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+      }
+      .boot-cold__mark {
+        width: 80px;
+        height: 80px;
+        border: 1px solid #262b36;
+        border-radius: 16px;
+        background: #161920;
+        display: grid;
+        place-items: center;
+      }
+      .boot-cold__mark svg {
+        width: 54px;
+        height: 54px;
+      }
+      .boot-cold__wordmark {
+        margin-top: 20px;
+        color: #4da3ff;
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: 28px;
+        line-height: 1;
+        letter-spacing: -0.025em;
+      }
+      .boot-cold__subtitle {
+        margin-top: 8px;
+        color: #9aa3b2;
+        font-family: Consolas, 'Courier New', monospace;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+      }
+      .boot-cold__progress {
+        position: relative;
+        width: 56px;
+        height: 3px;
+        margin-top: 28px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #1c2029;
+      }
+      .boot-cold__progress::after {
+        content: '';
+        display: block;
+        width: 20px;
+        height: 100%;
+        background: #4da3ff;
+        animation: cold-loading 1.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+      }
+      @keyframes cold-loading {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(290%);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-cold__progress::after {
+          animation: none;
+          width: 100%;
+          opacity: 0.6;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="cold-start-splash" class="boot-cold" role="status" aria-label="GamePilot 正在启动">
+        <div class="boot-cold__inner">
+          <div class="boot-cold__mark" aria-hidden="true">
+            <svg viewBox="0 0 1024 1024">
+              <rect x="170" y="120" width="684" height="784" fill="none" stroke="#c0cbaa" stroke-width="38" />
+              <path
+                d="M694 344 A250 250 0 1 0 710 620 H548"
+                fill="none"
+                stroke="#c0cbaa"
+                stroke-width="68"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M335 562 C422 466 520 382 631 302 M631 302 H713 V384"
+                fill="none"
+                stroke="#c0cbaa"
+                stroke-width="52"
+              />
+            </svg>
+          </div>
+          <div class="boot-cold__wordmark">GamePilot</div>
+          <div class="boot-cold__subtitle">FIELDNOTES / AUTOMATION</div>
+          <div class="boot-cold__progress" aria-hidden="true"></div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

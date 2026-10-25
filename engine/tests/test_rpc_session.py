@@ -32,6 +32,7 @@ class EngineProcess:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
             bufsize=1,
             env={
                 **os.environ,
@@ -106,6 +107,51 @@ def engine(tmp_path: Path) -> Any:
     assert ready["method"] == "engine.ready"
     yield instance
     instance.close()
+
+
+def test_disk_recording_rpc_exact_frames_and_disconnect_cleanup(engine: EngineProcess) -> None:
+    engine.call("device.connect", {"uri": DEVICE_URI})
+    params = {"deviceId": DEVICE_ID}
+    started = engine.call("recording.start", params)
+    recording_id = started["recordingId"]
+    request = {**params, "recordingId": recording_id}
+    assert started["active"] is True
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        meta = engine.call("recording.meta", {**request, "limit": 2})
+        if meta["count"] >= 3:
+            break
+        time.sleep(0.1)
+    assert meta["count"] >= 3
+    assert len(meta["indices"]) == 2 and meta["hasMore"]
+    next_page = engine.call("recording.meta", {**request, "afterIndex": meta["nextAfterIndex"], "limit": 2})
+    assert next_page["indices"][0] > meta["indices"][-1]
+    frame = engine.call("recording.frameAt", {**request, "index": meta["indices"][0]})
+    assert frame["requestedIndex"] == frame["index"] == meta["indices"][0]
+    assert frame["jpeg"]
+    bad_id = engine.send("recording.frameAt", {**request, "index": -999})
+    assert "error" in engine.wait_for(lambda message: message.get("id") == bad_id)
+    stopped = engine.call("recording.stop", request)
+    assert stopped["active"] is False and stopped["count"] >= meta["count"]
+    assert engine.call("recording.frameAt", {**request, "index": meta["indices"][0]})["index"] == frame["index"]
+    directory = engine.call("recording.meta", request)  # stopped recordings remain readable
+    assert directory["count"] == stopped["count"]
+    assert engine.call("recording.delete", request) == {"ok": True}
+    missing = engine.send("recording.meta", request)
+    assert "error" in engine.wait_for(lambda message: message.get("id") == missing)
+    engine.call("device.disconnect", params)
+
+
+def test_reconnect_with_different_uri_rebuilds_session(engine: EngineProcess) -> None:
+    """同一个 deviceId 换 URI 再连（切前台/后台输入方式）必须重建会话，不能复用旧对象。"""
+    first = engine.call("device.connect", {"uri": DEVICE_URI})
+    device_id = first["deviceId"]
+    before = sum(1 for message in engine.seen if message.get("method") == "device.connected")
+    second = engine.call("device.connect", {"uri": f"{DEVICE_URI}&note=mode-switch"})
+    after = sum(1 for message in engine.seen if message.get("method") == "device.connected")
+    assert second["deviceId"] == device_id
+    assert after == before + 1, "换了 URI 却没有重建会话（用户会看到切了模式却没生效）"
+    engine.call("device.disconnect", {"deviceId": device_id})
 
 
 def test_record_ocr_over_stdio(engine: EngineProcess, tmp_path: Path) -> None:
@@ -204,6 +250,8 @@ def test_full_loop_over_stdio(engine: EngineProcess, tmp_path: Path) -> None:
     status = engine.call("device.status", {"deviceId": DEVICE_ID})
     assert status["running"] is True
     assert status["stats"]["actions"] >= 1
+    # 默认设备（synthetic）没有 preferred_fps：循环上限仍是历史值 8fps
+    assert status["fpsLimit"] == 8.0
 
     timeline = engine.call("timeline.get", {"deviceId": DEVICE_ID, "limit": 5})
     assert timeline["frames"] and timeline["events"]
@@ -214,7 +262,8 @@ def test_full_loop_over_stdio(engine: EngineProcess, tmp_path: Path) -> None:
 
 
 def test_connect_reports_unknown_scheme(engine: EngineProcess) -> None:
-    request_id = engine.send("device.connect", {"uri": "Windows:///?title_re=Game.*"})
+    # 用真正不存在的 scheme；`Windows://` 已经是合法设备类型（PC 窗口），不能再拿来当反例
+    request_id = engine.send("device.connect", {"uri": "Lunar:///?foo=bar"})
     response = engine.wait_for(lambda message: message.get("id") == request_id)
 
     assert response["error"]["code"] == -32603

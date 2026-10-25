@@ -156,6 +156,26 @@ describe('scan()', () => {
     });
   });
 
+  it('扫描期间的多次设备变化合并成一次后续刷新', async () => {
+    let finishFirst: ((result: { devices: never[]; errors: never[] }) => void) | undefined;
+    listDevicesMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirst = resolve;
+          }),
+      )
+      .mockResolvedValue({ devices: [info(MAIN)], errors: [] });
+    const first = useDeviceStore.getState().scan();
+    await useDeviceStore.getState().scan(true);
+    await useDeviceStore.getState().scan(true);
+    expect(listDevicesMock).toHaveBeenCalledTimes(1);
+    finishFirst?.({ devices: [], errors: [] });
+    await first;
+    await vi.waitFor(() => expect(useDeviceStore.getState().devices[0]?.id).toBe(MAIN.id));
+    expect(listDevicesMock).toHaveBeenCalledTimes(2);
+  });
+
   it('写入设备列表、来源错误与刷新时间', async () => {
     listDevicesMock.mockResolvedValue({
       devices: [
@@ -213,6 +233,33 @@ describe('scan()', () => {
       expect(disconnect).toHaveBeenCalledWith(SECONDARY.id);
       expect(useDeviceStore.getState().activeId).toBe(MAIN.id);
       expect(useDeviceStore.getState().devices.some((item) => item.id === SECONDARY.id)).toBe(false);
+    } finally {
+      useSessionStore.setState({ disconnect: originalDisconnect, ready: {} });
+    }
+  });
+
+  it('监听刚重连且多屏详情未就绪时，连续刷新也不误断活附屏', async () => {
+    const originalDisconnect = useSessionStore.getState().disconnect;
+    const disconnect = vi.fn(() => Promise.resolve());
+    useSessionStore.setState({ disconnect, ready: { [MAIN.id]: true, [SECONDARY.id]: true } });
+    useDeviceStore.setState({ devices: [MAIN, SECONDARY], activeId: SECONDARY.id });
+    listDevicesMock.mockResolvedValue({
+      devices: [info(MAIN)],
+      errors: [],
+      pendingAndroidSerials: ['emulator-5554'],
+    });
+
+    try {
+      await useDeviceStore.getState().scan();
+      await useDeviceStore.getState().scan();
+      expect(listDevicesMock).toHaveBeenCalledTimes(2);
+      expect(disconnect).not.toHaveBeenCalled();
+      expect(useDeviceStore.getState().missingDisplays[SECONDARY.id]).toBeUndefined();
+      expect(useDeviceStore.getState().activeId).toBe(SECONDARY.id);
+      listDevicesMock.mockResolvedValue({ devices: [info(MAIN), info(SECONDARY)], errors: [] });
+      await useDeviceStore.getState().scan();
+      expect(disconnect).not.toHaveBeenCalled();
+      expect(useDeviceStore.getState().devices.some((item) => item.id === SECONDARY.id)).toBe(true);
     } finally {
       useSessionStore.setState({ disconnect: originalDisconnect, ready: {} });
     }

@@ -9,7 +9,10 @@
 
 from __future__ import annotations
 
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,7 @@ import cv2
 import numpy as np
 import pytest
 
+from gamepilot.core.bezier_trajectory import ActionDeferredError
 from gamepilot.core.evidence import RunEvidence
 from gamepilot.core.flow_engine import FlowEngine
 from gamepilot.core.frame import Detection, Frame
@@ -52,6 +56,10 @@ class FakeController:
 
     def text(self, value: str) -> None:
         self.calls.append(("text", value))
+
+
+class TouchController(FakeController):
+    """具有实时触控通道；默认 fake 仅模拟不可抢占的合成输入。"""
 
     def touch(self, phase: str, x: float, y: float) -> None:
         self.calls.append(("touch", phase, round(x, 3), round(y, 3)))
@@ -153,11 +161,25 @@ def hits(*labels: str) -> dict[str, Detection]:
     return merged
 
 
+def test_stop_before_tick_does_not_enter_inference(tmp_path: Path) -> None:
+    h = Harness([step("start", "manual"), step("click", "click", by="coord", x=0.2, y=0.3)], tmp_path)
+
+    def must_not_perceive(*_args: Any, **_kwargs: Any) -> dict[str, Detection]:
+        pytest.fail("cancelled frame entered inference")
+
+    h.engine.perceive = must_not_perceive  # type: ignore[method-assign]
+    h.engine.request_stop()
+    h.tick()
+    assert h.engine.result == "cancelled"
+    assert not h.controller.calls
+    assert h.engine.stats["ticks"] == 0
+
+
 def test_start_from_step_id_skips_earlier_steps(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="坐标", x=0.1, y=0.1),
+            step("s2", "click", by="coord", x=0.1, y=0.1),
             step("s3", "key", value="back"),
         ],
         tmp_path,
@@ -172,14 +194,16 @@ def test_runs_steps_in_order(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="坐标", x=0.2, y=0.3),
+            step("s2", "click", by="coord", x=0.2, y=0.3),
             step("s3", "key", value="back"),
             step("s4", "delay", ms=500),
             step("s5", "text", value="你好"),
         ],
         tmp_path,
     )
-    h.tick()  # manual + 点击 + 按键
+    h.tick()  # manual + 点击；下一条设备动作须让出到下一帧
+    assert h.controller.calls == [("click", 0.2, 0.3)]
+    h.tick()  # 按键 + 进入延时
     assert h.controller.calls == [("click", 0.2, 0.3), ("press", "back")]
     clock.advance(0.6)  # 延时到点
     h.run()
@@ -187,13 +211,271 @@ def test_runs_steps_in_order(tmp_path: Path, clock: Clock) -> None:
     assert h.engine.result == "success"
 
 
-def test_swipe_step_can_disable_bezier_or_follow_global(tmp_path: Path, clock: Clock) -> None:
+def test_fast_click_loop_yields_to_capture_and_refreshes_detections(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [
+            step("trigger", "manual"),
+            step("loop", "loop", count=1000),
+            step("click", "click", by="recognizer", rec="开始", match_timeout_ms=100),
+            step("end", "loopend", back="loop"),
+        ],
+        tmp_path,
+        hit("开始"),
+    )
+    original_click = h.controller.click
+
+    def slow_click(x: float, y: float) -> None:
+        original_click(x, y)
+        clock.advance(0.05)
+
+    h.controller.click = slow_click  # type: ignore[method-assign]
+    before = clock.now()
+    h.tick()
+    assert len(h.controller.calls) == 1
+    assert clock.now() - before == pytest.approx(0.05)
+    assert h.engine.result == "running"
+    h.hits.clear()
+    h.tick()
+    assert len(h.controller.calls) == 1  # 不能用上一帧的识别坐标继续打空洞
+    assert h.engine.blocking is not None
+    assert h.engine.blocking.step_id == "click:match"
+
+
+def test_stop_requested_during_click_prevents_all_following_actions(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [step("trigger", "manual"), step("click", "click", x=0.2, y=0.3), step("after", "key", value="home")],
+        tmp_path,
+    )
+    original_click = h.controller.click
+
+    def click_and_stop(x: float, y: float) -> None:
+        original_click(x, y)
+        h.engine.request_stop()
+
+    h.controller.click = click_and_stop  # type: ignore[method-assign]
+    h.tick()
+    assert h.engine.result == "cancelled"
+    assert h.controller.calls == [("click", 0.2, 0.3)]
+    h.tick()
+    assert len(h.controller.calls) == 1
+    h.engine.start()
+    h.controller.click = original_click  # type: ignore[method-assign]
+    h.run()
+    assert h.engine.result == "success"
+    assert h.controller.calls[-1] == ("press", "home")
+
+
+@pytest.mark.parametrize("kind", ["click", "hold", "swipe"])
+def test_stop_interrupts_realtime_action_and_releases_touch(tmp_path: Path, kind: str) -> None:
+    params: dict[str, Any] = {"x": 0.2, "y": 0.3, "duration_ms": 10000}
+    if kind == "swipe":
+        params.update(to_x=0.8, to_y=0.7)
+    h = Harness(
+        [step("trigger", "manual"), step("action", kind, **params), step("after", "key", value="home")],
+        tmp_path,
+        defaults={"on_step_error": "retry", "tap_duration_ms": 10000},
+    )
+    pressed = threading.Event()
+
+    class LiveTouch(TouchController):
+        def touch(self, phase: str, x: float, y: float) -> None:
+            super().touch(phase, x, y)
+            if phase == "down":
+                pressed.set()
+
+    controller = LiveTouch()
+    h.engine.controller = controller  # type: ignore[assignment]
+    worker = threading.Thread(target=h.tick)
+    worker.start()
+    try:
+        assert pressed.wait(1), "动作没有进入实时 touch"
+        h.engine.request_stop()
+        worker.join(1)
+        assert not worker.is_alive(), "停止必须唤醒长等待"
+    finally:
+        h.engine.request_stop()
+        worker.join(1)
+    assert h.engine.result == "cancelled"
+    assert controller.calls[0][1] == "down"
+    assert controller.calls[-1][1] == "up"
+    assert all(call[0] == "touch" for call in controller.calls)
+    assert h.engine.stats["failed"] == 0
+    events = h.engine.trace.recent_events(30)
+    assert not any(e["type"] in ("step_failed", "step_retry", "action_executed") for e in events)
+    before = list(controller.calls)
+    h.tick()
+    assert controller.calls == before
+
+
+@pytest.mark.parametrize("phase", ["pre", "post", "delay"])
+def test_stop_during_phase_wait_never_sends_following_input(tmp_path: Path, clock: Clock, phase: str) -> None:
+    steps = [step("trigger", "manual")]
+    if phase == "delay":
+        steps.append(step("wait", "delay", ms=10000))
+        defaults: dict[str, Any] = {}
+    else:
+        steps.append(step("action", "click", x=0.2, y=0.3))
+        defaults = {f"{phase}_action_delay_ms": 10000}
+    steps.append(step("after", "key", value="home"))
+    h = Harness(steps, tmp_path, defaults=defaults)
+    h.tick()
+    before = list(h.controller.calls)
+    h.engine.request_stop()
+    clock.advance(20)
+    h.tick()
+    assert h.engine.result == "cancelled"
+    assert h.controller.calls == before
+
+
+def test_input_guard_defers_without_failure_then_uses_fresh_target(tmp_path: Path) -> None:
+    h = Harness(
+        [step("trigger", "manual"), step("click", "click", by="recognizer", rec="开始")],
+        tmp_path,
+        hit("开始"),
+        defaults={"on_step_error": "retry"},
+    )
+    manual_active = True
+
+    @contextmanager
+    def guard() -> Iterator[None]:
+        if manual_active:
+            raise ActionDeferredError("手动手势进行中")
+        yield
+
+    h.engine.input_guard = guard
+    h.tick()
+    assert h.engine.result == "running"
+    assert h.engine.current == "click"
+    assert h.engine.stats["failed"] == 0
+    assert h.engine.stats["actions"] == 0
+    assert h.engine._error_retries == {}
+    assert h.controller.calls == []
+    assert not any(
+        e["type"] in ("step_failed", "step_retry", "action_executed") for e in h.engine.trace.recent_events(20)
+    )
+    manual_active = False
+    h.hits["开始"].rect = Rect(0.6, 0.6, 0.1, 0.1)
+    h.run()
+    assert h.engine.result == "success"
+    assert h.controller.calls == [("click", 0.65, 0.65)]
+
+
+@pytest.mark.parametrize(
+    "kind,params", [("click", {"x": 0.2, "y": 0.3}), ("key", {"value": "home"}), ("text", {"value": "hi"})]
+)
+def test_guard_stop_before_entry_prevents_input(tmp_path: Path, kind: str, params: dict[str, Any]) -> None:
+    h = Harness([step("trigger", "manual"), step("action", kind, **params)], tmp_path)
+
+    @contextmanager
+    def guard() -> Iterator[None]:
+        h.engine.request_stop()
+        yield
+
+    h.engine.input_guard = guard
+    h.tick()
+    assert h.engine.result == "cancelled"
+    assert h.controller.calls == []
+    assert h.engine.stats["failed"] == 0
+
+
+def test_input_guard_does_not_wrap_perception(tmp_path: Path) -> None:
+    h = Harness([step("trigger", "manual"), step("action", "click", x=0.2, y=0.3)], tmp_path)
+    input_lock = threading.Lock()
+    original = h.engine.perceive
+
+    def perceive(frame: Frame, search_overrides: dict[str, str] | None = None) -> dict[str, Detection]:
+        acquired = input_lock.acquire(blocking=False)
+        assert acquired, "识别期间不能持有输入锁"
+        input_lock.release()
+        return original(frame, search_overrides)
+
+    @contextmanager
+    def guard() -> Iterator[None]:
+        with input_lock:
+            yield
+
+    h.engine.input_guard = guard
+    h.engine.perceive = perceive  # type: ignore[method-assign]
+    h.run()
+    assert h.engine.result == "success"
+
+
+def test_manual_run_action_propagates_defer_without_event(tmp_path: Path) -> None:
+    h = Harness([], tmp_path)
+
+    @contextmanager
+    def guard() -> Iterator[None]:
+        raise ActionDeferredError("手动手势进行中")
+        yield
+
+    h.engine.input_guard = guard
+    with pytest.raises(ActionDeferredError):
+        h.engine.run_action({"type": "click", "x": 0.2, "y": 0.3})
+    assert h.controller.calls == []
+    assert not any(e["type"] == "action_manual" for e in h.engine.trace.recent_events(10))
+
+
+def test_input_guard_keeps_final_touch_up_inside_transaction(tmp_path: Path) -> None:
+    h = Harness([step("trigger", "manual"), step("action", "hold", x=0.2, y=0.3)], tmp_path)
+    active = False
+    guard_exited = False
+
+    @contextmanager
+    def guard() -> Iterator[None]:
+        nonlocal active, guard_exited
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+            guard_exited = True
+
+    class CheckedTouch(TouchController):
+        def touch(self, phase: str, x: float, y: float) -> None:
+            assert active, "包括取消后的up，整段touch都必须在事务内"
+            super().touch(phase, x, y)
+            if phase == "down":
+                h.engine.request_stop()
+
+    controller = CheckedTouch()
+    h.engine.controller = controller  # type: ignore[assignment]
+    h.engine.input_guard = guard
+    h.tick()
+    assert h.engine.result == "cancelled"
+    assert [call[1] for call in controller.calls] == ["down", "up"]
+    assert guard_exited
+
+
+def test_failed_action_retry_also_yields_before_resending_input(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [step("trigger", "manual"), step("click", "click", x=0.2, y=0.3)],
+        tmp_path,
+        defaults={"on_step_error": "retry", "step_retries": 1000},
+    )
+    calls = 0
+
+    def fail_click(x: float, y: float) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("input unavailable")
+
+    h.controller.click = fail_click  # type: ignore[method-assign]
+    h.tick()
+    assert calls == 1
+    assert h.engine.result == "running"
+    h.tick()
+    assert calls == 2
+
+
+def test_swipe_bezier_is_global_only(tmp_path: Path, clock: Clock) -> None:
+    """节点上写 bezier 不生效：开不开只看「全局设置 → 拟人」。"""
     linear = Harness(
         [
             step("s1", "manual"),
-            step("s2", "swipe", x=0.5, y=0.8, to_x=0.5, to_y=0.2, duration_ms=300, bezier=False),
+            step("s2", "swipe", x=0.5, y=0.8, to_x=0.5, to_y=0.2, duration_ms=300, bezier=True),
         ],
         tmp_path,
+        defaults={"swipe_bezier": False},
     )
     linear.run()
     assert linear.controller.calls == [("swipe", 0.5, 0.8, 0.5, 0.2, None)]
@@ -202,9 +484,10 @@ def test_swipe_step_can_disable_bezier_or_follow_global(tmp_path: Path, clock: C
     curved = Harness(
         [
             step("s1", "manual"),
-            step("s2", "swipe", x=0.2, y=0.5, to_x=0.8, to_y=0.5, duration_ms=200, bezier=True),
+            step("s2", "swipe", x=0.2, y=0.5, to_x=0.8, to_y=0.5, duration_ms=200, bezier=False),
         ],
         tmp_path,
+        defaults={"swipe_bezier": True},
     )
     curved.run()
     assert len(curved.controller.calls) == 1
@@ -232,6 +515,8 @@ def test_swipe_step_with_path_and_hold_uses_realtime_touch(tmp_path: Path, clock
         ],
         tmp_path,
     )
+    h.controller = TouchController()
+    h.engine.controller = h.controller  # type: ignore[assignment]
     h.run()
     phases = [call[1] for call in h.controller.calls]
     assert phases == ["down", "move", "move", "up"]
@@ -240,28 +525,42 @@ def test_swipe_step_with_path_and_hold_uses_realtime_touch(tmp_path: Path, clock
     assert h.engine.result == "success"
 
 
-def test_click_with_rect_and_stale_by_coord_uses_random_region(tmp_path: Path, clock: Clock) -> None:
-    """by 仍是「坐标」但已框选 rect、且 x/y 被清掉时，应走随机范围而不是 Action 校验失败。"""
+@pytest.mark.parametrize("kind", ["click", "hold"])
+@pytest.mark.parametrize("by", ["识别器", "坐标", "随机范围", "unknown", "", None])
+def test_action_spec_rejects_invalid_mode_without_field_inference(
+    tmp_path: Path, clock: Clock, kind: str, by: Any
+) -> None:
+    h = Harness([step("trigger", "manual")], tmp_path)
+    with pytest.raises(ValueError, match="点击定位方式 by 必须是"):
+        h.engine._spec_for(kind, {"by": by, "rec": "开始", "x": 0.5, "y": 0.5, "rect": [0, 0, 0.2, 0.2]})
+
+
+def test_missing_click_mode_infers_recognizer_before_region(tmp_path: Path, clock: Clock) -> None:
+    h = Harness([step("trigger", "manual")], tmp_path)
+    assert h.engine._spec_for("click", {"rec": "开始", "rect": [0, 0, 0.2, 0.2]})["target"] == "开始"
+    assert h.engine._spec_for("click", {"rect": [0, 0, 0.2, 0.2]})["random_in_rect"] is True
+
+
+def test_explicit_coord_is_not_reinterpreted_as_region(tmp_path: Path, clock: Clock) -> None:
+    """显式枚举是唯一依据：coord 缺少 x/y 时失败，不按残留 rect 猜测。"""
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="坐标", rect=[0.0, 0.0, 0.5, 0.5]),
+            step("s2", "click", by="coord", rect=[0.0, 0.0, 0.5, 0.5]),
         ],
         tmp_path,
     )
     h.run()
-    assert h.engine.result == "success"
-    assert len(h.controller.calls) == 1
-    x, y = h.controller.calls[0][1], h.controller.calls[0][2]
-    assert 0.0 <= x <= 0.5
-    assert 0.0 <= y <= 0.5
+    assert h.engine.result == "failure"
+    assert h.controller.calls == []
+    assert "缺少 x/y" in h.engine.trace.recent_events(5)[-1]["message"]
 
 
 def test_click_region_mode_without_rect_fails(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="随机范围", x=0.5, y=0.5),
+            step("s2", "click", by="region", x=0.5, y=0.5),
         ],
         tmp_path,
     )
@@ -275,7 +574,7 @@ def test_click_random_region_user_rect_shape(tmp_path: Path, clock: Clock) -> No
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="随机范围", rect=[0.05, 0.31, 0.90, 0.24]),
+            step("s2", "click", by="region", rect=[0.05, 0.31, 0.90, 0.24]),
         ],
         tmp_path,
     )
@@ -288,8 +587,8 @@ def test_click_random_in_norm_rect(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="随机范围", rect=[0.1, 0.2, 0.3, 0.4]),
-            step("s3", "click", by="随机范围", rect=[0.1, 0.2, 0.3, 0.4]),
+            step("s2", "click", by="region", rect=[0.1, 0.2, 0.3, 0.4]),
+            step("s3", "click", by="region", rect=[0.1, 0.2, 0.3, 0.4]),
         ],
         tmp_path,
     )
@@ -304,7 +603,7 @@ def test_click_random_in_norm_rect(tmp_path: Path, clock: Clock) -> None:
 
 def test_click_by_recognizer_uses_the_detection_center(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
-        [step("s1", "manual"), step("s2", "click", by="识别器", rec="开始")],
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始")],
         tmp_path,
         hit("开始"),
     )
@@ -316,7 +615,7 @@ def test_click_by_recognizer_uses_the_detection_center(tmp_path: Path, clock: Cl
 def test_step_search_scope_is_read_from_current_step(tmp_path: Path, clock: Clock) -> None:
     """搜索范围属于步骤：当前步骤写了 full 才覆盖，没写就用模板默认。"""
     h = Harness(
-        [step("s1", "manual"), step("s2", "click", by="识别器", rec="开始", search="full")],
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始", search="full")],
         tmp_path,
     )
     h.tick()  # manual 走完 → 停在 click（没命中会等）
@@ -345,7 +644,7 @@ def test_click_refuses_ambiguous_target_instead_of_guessing(tmp_path: Path, cloc
     """全屏搜索到两个同分目标时，点击必须失败 —— 猜一个就是有概率点错。"""
     ambiguous = Detection("开始", Rect(0.2, 0.2, 0.1, 0.1), score=0.9, state="confirmed", ambiguous=True)
     h = Harness(
-        [step("s1", "manual"), step("s2", "click", by="识别器", rec="开始")],
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始")],
         tmp_path,
         {"开始": ambiguous},
     )
@@ -359,8 +658,8 @@ def test_click_supports_double_click_and_long_press_events(tmp_path: Path, clock
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="坐标", event="double_click", x=0.4, y=0.6),
-            step("s3", "click", by="识别器", event="long_press", rec="开始", duration_ms=100),
+            step("s2", "click", by="coord", event="double_click", x=0.4, y=0.6),
+            step("s3", "click", by="recognizer", event="long_press", rec="开始", duration_ms=100),
         ],
         tmp_path,
         hit("开始"),
@@ -376,7 +675,7 @@ def test_click_supports_double_click_and_long_press_events(tmp_path: Path, clock
 
 def test_missing_material_fails_instead_of_falling_back_to_coordinates(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
-        [step("s1", "manual"), step("s2", "click", by="识别器", rec="开始", x=0.9, y=0.9)],
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始", x=0.9, y=0.9)],
         tmp_path,
         {},  # 一个都没命中
     )
@@ -393,7 +692,7 @@ def test_missing_material_fails_instead_of_falling_back_to_coordinates(tmp_path:
 
 def test_click_by_recognizer_waits_up_to_match_timeout_then_clicks_when_hit(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
-        [step("s1", "manual"), step("s2", "click", by="识别器", rec="开始")],
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始")],
         tmp_path,
         {},
     )
@@ -410,11 +709,57 @@ def test_click_by_recognizer_waits_up_to_match_timeout_then_clicks_when_hit(tmp_
     assert h.controller.calls == [("click", 0.25, 0.25)]
 
 
+def test_match_timeout_with_pre_delay_skips_instead_of_spinning(tmp_path: Path, clock: Clock) -> None:
+    """匹配等待 + 执行前延迟必须各自计时，不能互相顶掉。
+
+    真机症状：动作前延迟 1000ms + 匹配等待 100ms，目标没出现时这一步既不点也不超时，
+    一直卡到目标出现（循环看起来像"卡在这一步"）。根因是 `_try_wait_action_target()`
+    每拍都重建 `:match` 计时槽，把正在走的 `:pre` 换掉。
+    """
+    h = Harness(
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始"), step("s3", "key", value="back")],
+        tmp_path,
+        {},
+        defaults={"pre_action_delay_ms": 1000, "match_timeout_ms": 100, "on_step_error": "continue"},
+    )
+    h.tick()  # 进入 s2：开始等命中
+    assert h.engine.result == "running"
+    clock.advance(0.15)
+    h.tick()  # 等命中超时 → 按出错策略跳过，动作前延迟不该再拦一次
+    assert h.engine.result == "running"
+    assert h.controller.calls == []
+    assert h.engine.cursor == 2  # 已经推进到 s3（s3 自己也有 1000ms 动作前延迟）
+    clock.advance(1.1)
+    h.tick()
+    assert [call[1] for call in h.controller.calls] == ["back"]
+
+
+def test_pre_delay_completes_then_action_runs_once(tmp_path: Path, clock: Clock) -> None:
+    """命中之后再走执行前延迟：走完必须真的执行，且只执行一次。"""
+    h = Harness(
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始")],
+        tmp_path,
+        hit("开始"),
+        defaults={"pre_action_delay_ms": 1000},
+    )
+    h.tick()  # 命中 → 进入动作前延迟
+    assert h.controller.calls == []
+    clock.advance(0.5)
+    h.tick()
+    assert h.controller.calls == []
+    clock.advance(0.6)
+    h.tick()  # 执行前延迟走完 → 点击
+    assert h.controller.calls == [("click", 0.25, 0.25)]
+    h.run()
+    assert h.engine.result == "success"
+    assert h.controller.calls == [("click", 0.25, 0.25)]
+
+
 def test_global_pre_and_post_action_delays_and_step_interval(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="坐标", x=0.2, y=0.3),
+            step("s2", "click", by="coord", x=0.2, y=0.3),
             step("s3", "key", value="back"),
         ],
         tmp_path,
@@ -486,6 +831,138 @@ def test_wait_times_out(tmp_path: Path, clock: Clock) -> None:
     assert "超时" in h.engine.trace.recent_events(3)[-1]["message"]
 
 
+@pytest.mark.parametrize(
+    ("defaults", "settings"),
+    [
+        ({"on_step_error": "continue"}, {}),
+        ({}, {"onError": {"enabled": True, "mode": "continue"}}),
+        ({}, {"onError": {"enabled": True, "mode": "insertData", "insertData": {"key": "error", "value": "timeout"}}}),
+        ({}, {"onError": {"enabled": True, "mode": "fallback", "fallbackStepId": "after"}}),
+    ],
+)
+def test_wait_timeout_obeys_error_policy(
+    tmp_path: Path, clock: Clock, defaults: dict[str, Any], settings: dict[str, Any]
+) -> None:
+    h = Harness(
+        [
+            step("trigger", "manual"),
+            step("wait", "wait", rec="主城", timeout_ms=100, settings=settings),
+            step("after", "key", value="home"),
+        ],
+        tmp_path,
+        defaults=defaults,
+    )
+    h.tick()
+    clock.advance(0.2)
+    h.tick()
+    assert h.engine.result == "success"
+    assert h.controller.calls == [("press", "home")]
+    assert h.engine.blocking is None
+    if settings.get("onError", {}).get("mode") == "insertData":
+        assert h.engine.variables.get("error") == "timeout"
+
+
+def test_global_continue_skips_click_and_following_wait_timeouts(tmp_path: Path, clock: Clock) -> None:
+    """实际故障：点击超时已跳过，但紧随其后的等待超时不能再绕过全局策略停链。"""
+    h = Harness(
+        [
+            step("trigger", "manual"),
+            step("click", "click", by="recognizer", rec="开始", match_timeout_ms=100),
+            step("wait", "wait", rec="主城", timeout_ms=100),
+            step("after", "key", value="home"),
+        ],
+        tmp_path,
+        defaults={"on_step_error": "continue"},
+    )
+    h.tick()
+    clock.advance(0.2)
+    h.tick()
+    assert h.engine.result == "running"
+    assert h.engine.current == "wait"
+    clock.advance(0.2)
+    h.tick()
+    assert h.engine.result == "success"
+    assert h.controller.calls == [("press", "home")]
+    events = h.engine.trace.recent_events(30)
+    assert [event["node"] for event in events if event["type"] == "step_error_continue"] == ["click", "wait"]
+    assert [event["node"] for event in events if event["type"] == "step_finished"] == [
+        "trigger",
+        "click",
+        "wait",
+        "after",
+    ]
+
+
+@pytest.mark.parametrize("local_policy", [False, True])
+def test_wait_retry_restarts_timeout_and_stops_after_exhaustion(
+    tmp_path: Path, clock: Clock, local_policy: bool
+) -> None:
+    settings = {"onError": {"enabled": True, "retry": True, "retryTimes": 1}} if local_policy else {}
+    h = Harness(
+        [step("trigger", "manual"), step("wait", "wait", rec="主城", timeout_ms=1000, settings=settings)],
+        tmp_path,
+        defaults={"on_step_error": "retry", "step_retries": 1, "retry_interval_ms": 500},
+    )
+    h.tick()
+    clock.advance(1.1)
+    h.tick()
+    assert h.engine.result == "running"
+    assert h.engine.blocking is None
+    assert len([e for e in h.engine.trace.recent_events(20) if e["type"] == "step_retry"]) == 1
+    clock.advance(0.6)
+    h.tick()  # 重试从这一拍重新计时，而不是立即再次超时
+    assert h.engine.result == "running"
+    assert h.engine.blocking is not None
+    clock.advance(0.5)
+    h.tick()
+    assert h.engine.result == "running"
+    clock.advance(0.6)
+    h.tick()
+    assert h.engine.result == "failure"
+
+
+def test_wait_success_resets_retry_budget_for_next_loop_iteration(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [
+            step("trigger", "manual"),
+            step("loop", "loop", count=2),
+            step("wait", "wait", rec="主城", stable_frames=1, timeout_ms=1000),
+            step("end", "loopend", back="loop"),
+        ],
+        tmp_path,
+        defaults={"on_step_error": "retry", "step_retries": 1},
+    )
+    h.tick()
+    clock.advance(1.1)
+    h.tick()
+    h.hits.update(hit("主城"))
+    h.tick()  # 第一次等待成功，并进入第二轮等待
+    assert h.engine._error_retries == {}
+    h.hits.clear()
+    clock.advance(1.1)
+    h.tick()
+    assert h.engine.result == "running"
+    assert len([e for e in h.engine.trace.recent_events(30) if e["type"] == "step_retry"]) == 2
+    h.hits.update(hit("主城"))
+    h.tick()
+    assert h.engine.result == "success"
+
+
+def test_wait_local_stop_overrides_global_continue(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [
+            step("trigger", "manual"),
+            step("wait", "wait", rec="主城", timeout_ms=100, settings={"onError": {"enabled": True, "mode": "throw"}}),
+        ],
+        tmp_path,
+        defaults={"on_step_error": "continue"},
+    )
+    h.tick()
+    clock.advance(0.2)
+    h.tick()
+    assert h.engine.result == "failure"
+
+
 def test_delay_blocks_until_time_passes(tmp_path: Path, clock: Clock) -> None:
     h = Harness([step("s1", "manual"), step("s2", "delay", ms=1000), step("s3", "key", value="home")], tmp_path)
     h.tick()
@@ -501,7 +978,7 @@ def test_delay_blocks_until_time_passes(tmp_path: Path, clock: Clock) -> None:
 
 def test_breakpoint_pauses_before_the_step_and_resume_continues(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
-        [step("s1", "manual"), step("s2", "click", by="坐标", x=0.3, y=0.3), step("s3", "key", value="back")],
+        [step("s1", "manual"), step("s2", "click", by="coord", x=0.3, y=0.3), step("s3", "key", value="back")],
         tmp_path,
     )
     h.engine.breakpoints.add("s2")
@@ -521,7 +998,7 @@ def test_single_step_runs_one_step_then_pauses_before_the_next(tmp_path: Path, c
     h = Harness(
         [
             step("s1", "manual"),
-            step("s2", "click", by="坐标", x=0.3, y=0.3),
+            step("s2", "click", by="coord", x=0.3, y=0.3),
             step("s3", "key", value="back"),
         ],
         tmp_path,
@@ -581,7 +1058,7 @@ def test_stop_marks_cancelled(tmp_path: Path, clock: Clock) -> None:
 
 
 def test_rerun_starts_from_the_top(tmp_path: Path, clock: Clock) -> None:
-    h = Harness([step("s1", "manual"), step("s2", "click", by="坐标", x=0.1, y=0.1)], tmp_path)
+    h = Harness([step("s1", "manual"), step("s2", "click", by="coord", x=0.1, y=0.1)], tmp_path)
     h.run()
     assert len(h.controller.calls) == 1
     h.engine.start()  # 再点一次「运行」
@@ -836,7 +1313,7 @@ def test_loop_with_delay_then_click_does_not_shadow_frame(tmp_path: Path, clock:
             step("s1", "manual"),
             step("lp", "loop", count=2),
             step("wait", "delay", ms=10),
-            step("tap", "click", by="坐标", x=0.4, y=0.5),
+            step("tap", "click", by="coord", x=0.4, y=0.5),
             step("le", "loopend", back="lp"),
         ],
         tmp_path,
@@ -1020,7 +1497,7 @@ def test_on_error_continue_skips_failed_action(tmp_path: Path, clock: Clock) -> 
         step(
             "s2",
             "click",
-            by="坐标",
+            by="coord",
             x=0.5,
             y=0.5,
             settings={"onError": {"enabled": True, "mode": "continue"}},
@@ -1077,7 +1554,7 @@ def test_disabled_step_is_skipped(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
         [
             step("s1", "manual"),
-            {"id": "sk", "type": "click", "params": {"by": "坐标", "x": 0.1, "y": 0.1}, "disabled": True},
+            {"id": "sk", "type": "click", "params": {"by": "coord", "x": 0.1, "y": 0.1}, "disabled": True},
             step("s3", "key", value="back"),
         ],
         tmp_path,
@@ -1095,7 +1572,7 @@ def test_unconnected_tail_is_never_executed(tmp_path: Path, clock: Clock) -> Non
         [
             step("s1", "manual"),
             step("a", "key", value="back"),
-            {"id": "tail", "type": "click", "params": {"by": "坐标", "x": 0.5, "y": 0.5, "_pendingLink": True}},
+            {"id": "tail", "type": "click", "params": {"by": "coord", "x": 0.5, "y": 0.5, "_pendingLink": True}},
         ],
         tmp_path,
     )
@@ -1126,7 +1603,7 @@ def test_start_from_unconnected_loop_body_does_not_repeat(tmp_path: Path, clock:
         [
             step("s1", "manual"),
             step("lp", "loop", count=120),
-            {"id": "tap", "type": "click", "params": {"by": "坐标", "x": 0.4, "y": 0.5, "_pendingLink": True}},
+            {"id": "tap", "type": "click", "params": {"by": "coord", "x": 0.4, "y": 0.5, "_pendingLink": True}},
             step("le", "loopend", back="lp"),
             step("after", "key", value="home"),
         ],
@@ -1144,7 +1621,7 @@ def test_start_from_connected_loop_body_still_repeats(tmp_path: Path, clock: Clo
         [
             step("s1", "manual"),
             step("lp", "loop", count=3),
-            step("tap", "click", by="坐标", x=0.4, y=0.5),
+            step("tap", "click", by="coord", x=0.4, y=0.5),
             step("le", "loopend", back="lp"),
         ],
         tmp_path,
@@ -1183,7 +1660,7 @@ def test_step_scope_switches_mid_tick_and_clicks_target_outside_roi(tmp_path: Pa
             "flow": {
                 "steps": [
                     {"id": "t", "type": "manual", "params": {}},
-                    {"id": "s", "type": "click", "params": {"by": "识别器", "rec": "btn", "search": "full"}},
+                    {"id": "s", "type": "click", "params": {"by": "recognizer", "rec": "btn", "search": "full"}},
                 ]
             },
         },
@@ -1281,7 +1758,7 @@ def test_evidence_records_steps_params_and_durations(tmp_path: Path, clock: Cloc
 
 def test_evidence_keeps_the_failure_step_and_reason(tmp_path: Path, clock: Clock) -> None:
     h = Harness(
-        [step("s1", "manual"), step("s2", "click", by="随机范围", x=0.5, y=0.5)],
+        [step("s1", "manual"), step("s2", "click", by="region", x=0.5, y=0.5)],
         tmp_path,
     )
     evidence = RunEvidence(tmp_path, stamp="20261018-210001")
@@ -1327,7 +1804,7 @@ def test_retry_interval_ms_waits_before_the_retry(tmp_path: Path, clock: Clock) 
 
     steps = [
         step("s1", "manual"),
-        step("s2", "click", by="坐标", x=0.5, y=0.5),
+        step("s2", "click", by="coord", x=0.5, y=0.5),
         step("s3", "key", value="back"),
     ]
     h = Harness(
@@ -1359,12 +1836,12 @@ def test_end_step_stops_the_chain_instead_of_walking_the_step_after_the_block(tm
     chain = [
         step("s1", "manual"),
         step("s2", "cond", rec="主城"),
-        step("s3", "click", by="坐标", x=0.1, y=0.1),
+        step("s3", "click", by="coord", x=0.1, y=0.1),
         step("s4", "end"),
         step("s5", "else"),
-        step("s6", "click", by="坐标", x=0.2, y=0.2),
+        step("s6", "click", by="coord", x=0.2, y=0.2),
         step("s7", "condend", back="s2"),
-        step("s8", "click", by="坐标", x=0.3, y=0.3),
+        step("s8", "click", by="coord", x=0.3, y=0.3),
     ]
 
     hit_case = Harness(chain, tmp_path, hits=hits("主城"))
@@ -1376,3 +1853,98 @@ def test_end_step_stops_the_chain_instead_of_walking_the_step_after_the_block(tm
     miss_case.run()
     assert miss_case.controller.calls == [("click", 0.2, 0.2), ("click", 0.3, 0.3)]
     assert miss_case.engine.result == "success"
+
+
+def _grid_hits() -> dict[str, Detection]:
+    """一排相同的「开始」：用候选列表表达同一识别器的多个命中。"""
+    rects = [
+        Rect(0.10, 0.30, 0.05, 0.05),
+        Rect(0.30, 0.30, 0.05, 0.05),
+        Rect(0.50, 0.30, 0.05, 0.05),
+    ]
+    return {"开始": Detection("开始", rects[0], score=0.9, state="confirmed", ambiguous=True, candidates=rects)}
+
+
+def test_click_strategy_nearest_uses_recording_roi(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始", strategy="nearest")],
+        tmp_path,
+        _grid_hits(),
+    )
+    h.run()
+    # 颜色识别器的 roi 在 (0.2,0.2)-(0.3,0.3)：中心 (0.25,0.25)，最近的是第 2 个
+    assert h.controller.calls == [("click", 0.325, 0.325)]
+    assert h.engine.result == "success"
+
+
+def test_click_strategy_nth_and_first(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [
+            step("s1", "manual"),
+            step("s2", "click", by="recognizer", rec="开始", strategy="nth", index=3),
+            step("s3", "click", by="recognizer", rec="开始", strategy="first"),
+        ],
+        tmp_path,
+        _grid_hits(),
+    )
+    h.run()
+    assert h.controller.calls == [("click", 0.525, 0.325), ("click", 0.125, 0.325)]
+    assert h.engine.result == "success"
+
+
+def test_click_strategy_all_taps_every_candidate(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始", strategy="all")],
+        tmp_path,
+        _grid_hits(),
+    )
+    h.run()
+    assert [call[1] for call in h.controller.calls] == [0.125, 0.325, 0.525]
+    assert h.engine.result == "success"
+    acted = [item for item in h.engine.trace.recent_events(20) if item["type"] == "action_executed"]
+    assert acted and "依次点击" in acted[0]["message"]
+
+
+def test_stop_between_candidates_prevents_remaining_clicks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    h = Harness(
+        [
+            step("trigger", "manual"),
+            step("click", "click", by="recognizer", rec="开始", strategy="all"),
+            step("after", "key", value="home"),
+        ],
+        tmp_path,
+        _grid_hits(),
+    )
+
+    def stop_wait(_timeout: float | None = None) -> bool:
+        h.engine.request_stop()
+        return True
+
+    monkeypatch.setattr(h.engine._stop_requested, "wait", stop_wait)
+    h.tick()
+    assert h.controller.calls == [("click", 0.125, 0.325)]
+    assert h.engine.result == "cancelled"
+    assert not any(e["type"] == "action_executed" for e in h.engine.trace.recent_events(20))
+
+
+def test_click_strategy_out_of_range_fails(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始", strategy="nth", index=9)],
+        tmp_path,
+        _grid_hits(),
+    )
+    h.run()
+    assert h.engine.result == "failure"
+    assert h.controller.calls == []
+
+
+def test_action_executed_reports_selected_candidate(tmp_path: Path, clock: Clock) -> None:
+    h = Harness(
+        [step("s1", "manual"), step("s2", "click", by="recognizer", rec="开始", strategy="leftmost")],
+        tmp_path,
+        _grid_hits(),
+    )
+    h.run()
+    event = next(item for item in h.engine.trace.recent_events(20) if item["type"] == "action_executed")
+    assert event["extra"]["candidates"] == 3
+    assert event["extra"]["picked"] == [[0.1, 0.3, 0.05, 0.05]]

@@ -10,6 +10,9 @@ import { CondStepFields } from '@/features/graph/flow/CondStepFields';
 import { DelayStepFields } from '@/features/graph/flow/DelayStepFields';
 import { FlowStepSettingsPanel } from '@/features/graph/flow/FlowStepSettingsPanel';
 import { KeyStepFields } from '@/features/graph/flow/KeyStepFields';
+import { ParallelStepFields } from '@/features/graph/flow/ParallelStepFields';
+import { TouchStepFields } from '@/features/graph/flow/TouchStepFields';
+import { parallelContainingStep } from '@/features/graph/flow/flow-structure-core';
 import { LoopStepFields } from '@/features/graph/flow/LoopStepFields';
 import { SetvarStepFields } from '@/features/graph/flow/SetvarStepFields';
 import { StepSearchScope } from '@/features/graph/flow/StepSearchScope';
@@ -43,7 +46,7 @@ export function FlowStepEditor({ step, graph: graphProp }: { step: FlowStep; gra
   const isLoopbreakStep = step.type === 'loopbreak';
   /** 「结束」跑一下就是把链结束掉，没有单跑的意义 */
   const isEndStep = step.type === 'end';
-  const cannotRunAlone = isLoopbreakStep || isEndStep;
+  const cannotRunAloneBase = isLoopbreakStep || isEndStep;
   const sessionRunning = useCurrentWorkflowRunning();
   const lockEdits = useCurrentWorkflowLive();
   const runningStartStep = useSessionStore((state) =>
@@ -56,6 +59,8 @@ export function FlowStepEditor({ step, graph: graphProp }: { step: FlowStep; gra
   const stopRun = useSessionStore((state) => state.stopRun);
   const storeGraph = useGraphStore((state) => graphForDevice(state, activeId));
   const graph = graphProp ?? storeGraph;
+  const insideParallel = Boolean(parallelContainingStep(graph?.flow?.steps ?? [], step.id));
+  const cannotRunAlone = cannotRunAloneBase || insideParallel;
   const updateFlowStep = useGraphStore((state) => state.updateFlowStep);
   const removeFlowStep = useGraphStore((state) => state.removeFlowStep);
   const workflows = useLibraryStore((state) => state.workflows);
@@ -68,7 +73,12 @@ export function FlowStepEditor({ step, graph: graphProp }: { step: FlowStep; gra
   const steps = graph?.flow?.steps ?? [];
   const index = steps.findIndex((item) => item.id === step.id);
   const isHeadTrigger = index >= 0 && isFlowHeadTriggerStep(step, index);
-  const running = sessionRunning && (isHeadTrigger || liveStepId === step.id || runningStartStep === step.id);
+  const activeStepIds = useGraphStore((state) => state.liveByDevice[activeId]?.activeStepIds);
+  const running =
+    sessionRunning &&
+    (isHeadTrigger ||
+      (activeStepIds ? activeStepIds.includes(step.id) : liveStepId === step.id) ||
+      runningStartStep === step.id);
   const recognizerLabels = useMemo(
     () => (graph?.recognizers ?? []).map((item) => item.label),
     [graph?.recognizers],
@@ -172,6 +182,10 @@ export function FlowStepEditor({ step, graph: graphProp }: { step: FlowStep; gra
           />
         ) : null}
 
+        {step.type === 'parallel' ? <ParallelStepFields params={params} onPatch={patchParams} /> : null}        {step.type === 'touch' ? <TouchStepFields params={params} onPatch={patchParams} /> : null}
+        {insideParallel ? (
+          <p className="text-badge text-faint">并行分支内不能从中间运行，请从并行模块开始。</p>
+        ) : null}
         {step.type === 'loop' ? <LoopStepFields params={params} onPatch={patchParams} /> : null}
 
         {step.type === 'setvar' ? <SetvarStepFields params={params} onPatch={patchParams} /> : null}
@@ -188,7 +202,7 @@ export function FlowStepEditor({ step, graph: graphProp }: { step: FlowStep; gra
           <button
             type="button"
             data-testid="flow-step-editor-run"
-            disabled={!canRun || cannotRunAlone}
+            disabled={!canRun || (cannotRunAlone && !running)}
             title={
               isLoopbreakStep
                 ? '「跳出循环」没有出口，只能从循环体内跑到这里，单跑没有意义'
@@ -198,7 +212,9 @@ export function FlowStepEditor({ step, graph: graphProp }: { step: FlowStep; gra
                     ? '请先连接设备'
                     : running
                       ? '停止运行'
-                      : '从本模块开始运行'
+                      : insideParallel
+                        ? '并行分支内不能从中间运行，请从并行模块开始'
+                        : '从本模块开始运行'
             }
             onClick={() => {
               if (!activeId || !canRun) {
@@ -243,7 +259,11 @@ export function FlowStepEditor({ step, graph: graphProp }: { step: FlowStep; gra
       </div>
 
       <div className="min-w-0 space-y-1.5 border-t border-line pt-2 @[480px]:border-t-0 @[480px]:border-l @[480px]:pt-0 @[480px]:pl-3">
-        <div className="text-faint">图像配置</div>
+        <div className="text-dim">
+          {graph?.recognizers.find((item) => item.label === params.rec)?.type === 'yolo'
+            ? 'AI 识别配置'
+            : '图像配置'}
+        </div>
 
         {step.type === 'click' || step.type === 'hold' ? (
           <ClickStepFields
@@ -266,10 +286,7 @@ export function FlowStepEditor({ step, graph: graphProp }: { step: FlowStep; gra
               labels={recognizerLabels}
               onChange={(rec) => patchParams({ rec })}
             />
-            <StepSearchScope
-              value={params.search}
-              onChange={(search) => patchParams({ search: search === 'auto' ? undefined : search })}
-            />
+            <StepSearchScope value={params.search} onChange={(search) => patchParams({ search })} />
           </div>
         ) : null}
 

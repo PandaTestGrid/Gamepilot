@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -44,18 +46,38 @@ class RunEvidence:
         self.dir = self.root / RUNS_DIR / (stamp or time.strftime("%Y%m%d-%H%M%S"))
         self.dir.mkdir(parents=True, exist_ok=True)
         self._events = (self.dir / "trace.jsonl").open("a", encoding="utf-8")
-        self._steps: list[dict[str, Any]] = []
+        self._steps: deque[dict[str, Any]] = deque(maxlen=5000)
+        self._dropped_step_records = 0
+        self._condition = threading.Condition()
+        self._event_queue: deque[str] = deque()
+        self._event_bytes = 0
+        self._max_event_bytes = 1024 * 1024
+        self._screenshots: dict[str, tuple[np.ndarray, dict[str, Any]]] = {}
+        self._max_screenshots = 8
+        self._dropped_screenshots = 0
+        self._closing = False
+        self._close_timeout = 1.0
         self._prune()
+        self._writer = threading.Thread(target=self._write_loop, name="evidence-writer", daemon=True)
+        self._writer.start()
 
     # ---- 写 ----
 
     def event(self, payload: dict[str, Any]) -> None:
         """追加一条事件（和 `TraceEvent.to_dict()` 同构）。"""
-        try:
-            self._events.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-            self._events.flush()
-        except (OSError, ValueError) as error:  # pragma: no cover - 磁盘满/路径被删
-            logger.warning("证据事件写不进去: %s", error)
+        line = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+        size = len(line.encode("utf-8"))
+        with self._condition:
+            # Bounded, lossless event backpressure. A single oversized event may
+            # exceed the cap only while it is the sole pending event.
+            self._condition.wait_for(
+                lambda: self._closing or not self._event_queue or self._event_bytes + size <= self._max_event_bytes
+            )
+            if self._closing:
+                return
+            self._event_queue.append(line)
+            self._event_bytes += size
+            self._condition.notify_all()
 
     def step(
         self,
@@ -69,23 +91,12 @@ class RunEvidence:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """记一步：写一张截图（可选）+ 一条步记录，返回到写进 `to_dict()["steps"]` 的那条。"""
-        shot = ""
-        if image is not None and image.size:
-            name = f"{index:03d}_{tag}_{_safe_name(step_id)}.jpg"
-            path = self.dir / name
-            try:
-                ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-                if ok:
-                    path.write_bytes(buf.tobytes())
-                    shot = name
-            except (OSError, cv2.error) as error:  # pragma: no cover - 编码失败不致命
-                logger.warning("证据截图写不进去: %s", error)
         record: dict[str, Any] = {
             "index": index,
             "stepId": step_id,
             "kind": kind,
             "ts": round(time.time(), 3),
-            "screenshot": shot,
+            "screenshot": "",
             "message": message,
             "params": params or None,
             # 这几个由 `merge()` 在动作真正执行 / 完成 / 失败时补上
@@ -94,28 +105,90 @@ class RunEvidence:
             "matchedRect": None,
             "durationMs": None,
         }
-        self._steps.append(record)
+        with self._condition:
+            if self._closing:
+                return record
+            if len(self._steps) == self._steps.maxlen:
+                self._dropped_step_records += 1
+            self._steps.append(record)
+            if image is not None and image.size:
+                name = f"{index:03d}_{tag}_{_safe_name(step_id)}.jpg"
+                if name in self._screenshots:
+                    self._screenshots.pop(name)
+                    self._dropped_screenshots += 1
+                elif len(self._screenshots) >= self._max_screenshots:
+                    self._screenshots.pop(next(iter(self._screenshots)))
+                    self._dropped_screenshots += 1
+                # Capture frames are immutable snapshots; retain their ndarray,
+                # never a bare id or a full image copy on the execution thread.
+                self._screenshots[name] = (image, record)
+            self._condition.notify_all()
         return record
 
     def merge(self, index: int, fields: dict[str, Any]) -> None:
         """给最近一条同一步号的记录补字段（参数在开始拍、分数与耗时之后才有）。"""
-        for record in reversed(self._steps):
-            if record["index"] != index:
-                continue
-            record.update({key: value for key, value in fields.items() if value is not None})
-            return
+        with self._condition:
+            for record in reversed(self._steps):
+                if record["index"] != index:
+                    continue
+                record.update({key: value for key, value in fields.items() if value is not None})
+                return
 
     def close(self) -> None:
-        if not self._events.closed:
+        with self._condition:
+            self._closing = True
+            self._condition.notify_all()
+        if threading.current_thread() is not self._writer:
+            self._writer.join(timeout=self._close_timeout)
+
+    def _write_loop(self) -> None:
+        try:
+            while True:
+                with self._condition:
+                    self._condition.wait_for(lambda: self._closing or self._event_queue or self._screenshots)
+                    if self._closing and not self._event_queue and not self._screenshots:
+                        return
+                    # One bounded batch, then one image: neither stream starves.
+                    lines = list(self._event_queue)
+                    self._event_queue.clear()
+                    self._event_bytes = 0
+                    shot = None
+                    if self._screenshots:
+                        name = next(iter(self._screenshots))
+                        image, record = self._screenshots.pop(name)
+                        shot = (name, image, record)
+                    self._condition.notify_all()
+                if lines:
+                    try:
+                        self._events.write("".join(lines))
+                        self._events.flush()
+                    except (OSError, ValueError) as error:
+                        logger.warning("证据事件写不进去: %s", error)
+                if shot is not None:
+                    name, image, record = shot
+                    try:
+                        ok, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                        if ok:
+                            (self.dir / name).write_bytes(buffer.tobytes())
+                            with self._condition:
+                                record["screenshot"] = name
+                    except (OSError, cv2.error) as error:
+                        logger.warning("证据截图写不进去: %s", error)
+        finally:
             self._events.close()
 
     # ---- 读 ----
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "dir": self.rel_dir,
-            "steps": list(self._steps),
-        }
+        with self._condition:
+            return {
+                "dir": self.rel_dir,
+                "steps": [dict(record) for record in self._steps],
+                "droppedScreenshots": self._dropped_screenshots,
+                "droppedStepRecords": self._dropped_step_records,
+                "pendingScreenshots": len(self._screenshots),
+                "writerPending": self._writer.is_alive() if self._closing else False,
+            }
 
     @property
     def rel_dir(self) -> str:

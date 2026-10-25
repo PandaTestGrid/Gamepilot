@@ -9,6 +9,9 @@ import { FlowStepIcon } from './flow-step-icons';
 import { CallStepFields } from '@/features/graph/flow/CallStepFields';
 import { ClickStepFields } from '@/features/graph/flow/ClickStepFields';
 import { CondStepFields } from '@/features/graph/flow/CondStepFields';
+import { ParallelStepFields } from '@/features/graph/flow/ParallelStepFields';
+import { TouchStepFields } from '@/features/graph/flow/TouchStepFields';
+import { parallelContainingStep } from '@/features/graph/flow/flow-structure-core';
 import { LoopStepFields } from '@/features/graph/flow/LoopStepFields';
 import { DelayStepFields } from '@/features/graph/flow/DelayStepFields';
 import { KeyStepFields } from '@/features/graph/flow/KeyStepFields';
@@ -18,7 +21,7 @@ import { TextStepFields } from '@/features/graph/flow/TextStepFields';
 import { TriggerStepFields } from '@/features/graph/flow/TriggerStepFields';
 import type { FlowStepNodeType } from '@/features/graph/flow/flow-layout';
 import { flowLoopRunningTitle } from '@/features/graph/flow/flow-loop-progress';
-import { sourcePortsForStepType } from '@/features/graph/flow/flow-step-ports';
+import { sourcePortsForStep } from '@/features/graph/flow/flow-step-ports';
 import { acceptModuleDrag, isModuleDragEvent, readModuleDragData } from '@/features/graph/flow/module-drag';
 import { useFlowDropTarget } from '@/features/graph/flow/useFlowDropTarget';
 import { FLOW_EDIT_LOCKED_HINT } from '@/lib/flow-edit-lock';
@@ -100,7 +103,8 @@ export function FlowStepNode({ data, selected }: NodeProps<FlowStepNodeType>): R
     void updateFlowStep(step.id, { params: mergeStepParams(params, patch) });
   };
 
-  const ports = sourcePortsForStepType(step.type);
+  const ports = sourcePortsForStep(step);
+  const insideParallel = Boolean(parallelContainingStep(graph?.flow?.steps ?? [], step.id));
   const isClickStep = (step.type === 'click' || step.type === 'hold') && !data.isTrigger;
   const isSwipeStep = step.type === 'swipe' && !data.isTrigger;
   const isWaitStep = step.type === 'wait' && !data.isTrigger;
@@ -108,6 +112,8 @@ export function FlowStepNode({ data, selected }: NodeProps<FlowStepNodeType>): R
   const isKeyStep = step.type === 'key' && !data.isTrigger;
   const isCondStep = step.type === 'cond' && !data.isTrigger;
   const isLoopStep = step.type === 'loop' && !data.isTrigger;
+  const isParallelStep = step.type === 'parallel';
+  const isTouchStep = step.type === 'touch';
   const isTextStep = step.type === 'text' && !data.isTrigger;
   const isCallStep = step.type === 'call' && !data.isTrigger;
   const isSetvarStep = step.type === 'setvar' && !data.isTrigger;
@@ -120,6 +126,8 @@ export function FlowStepNode({ data, selected }: NodeProps<FlowStepNodeType>): R
     isKeyStep ||
     isCondStep ||
     isLoopStep ||
+    isParallelStep ||
+    isTouchStep ||
     isTextStep ||
     isCallStep ||
     isSetvarStep;
@@ -262,10 +270,12 @@ export function FlowStepNode({ data, selected }: NodeProps<FlowStepNodeType>): R
                     ? data.isTrigger
                       ? '停止整条工作流'
                       : '停止运行'
-                    : '从本模块开始运行'
+                    : insideParallel
+                      ? '并行分支内不能从中间运行，请从并行模块开始'
+                      : '从本模块开始运行'
               }
               aria-label={isStepRunning ? `停止运行模块 ${data.title}` : `运行模块 ${data.title}`}
-              disabled={!canRun}
+              disabled={!canRun || (insideParallel && !isStepRunning)}
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => {
                 event.stopPropagation();
@@ -422,6 +432,15 @@ export function FlowStepNode({ data, selected }: NodeProps<FlowStepNodeType>): R
         </div>
       ) : null}
 
+      {isParallelStep ? (
+        <div className={fieldWrapClass}>
+          <ParallelStepFields params={params} onPatch={patchParams} compact />
+        </div>
+      ) : null}      {isTouchStep ? (
+        <div className={fieldWrapClass}>
+          <TouchStepFields params={params} onPatch={patchParams} compact />
+        </div>
+      ) : null}
       {isLoopStep ? (
         <div
           className={fieldWrapClass}

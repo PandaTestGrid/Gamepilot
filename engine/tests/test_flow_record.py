@@ -24,8 +24,13 @@ def engine(tmp_path: Path) -> Any:
 def test_click_coordinate_becomes_flow_step() -> None:
     step = action_to_flow_step(Action.parse({"type": "click", "x": 0.2, "y": 0.8}), step_id="s1")
     assert step["type"] == "click"
-    assert step["params"]["by"] == "坐标"
+    assert step["params"]["by"] == "coord"
     assert step["params"]["x"] == pytest.approx(0.2)
+
+
+def test_recognizer_click_records_english_mode_and_preserves_user_label() -> None:
+    recorded = action_to_flow_step(Action.parse({"type": "click", "target": "挑战按钮"}), step_id="s1")
+    assert recorded["params"] == {"by": "recognizer", "rec": "挑战按钮"}
 
 
 def test_wait_becomes_delay_ms() -> None:

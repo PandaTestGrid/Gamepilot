@@ -65,6 +65,7 @@ def test_frames_use_unix_socket_not_stdout(tmp_path: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        encoding="utf-8",
         bufsize=1,
         env=env,
     )
@@ -156,6 +157,7 @@ def test_frames_use_tcp_socket_not_stdout(tmp_path: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        encoding="utf-8",
         bufsize=1,
         env=env,
     )

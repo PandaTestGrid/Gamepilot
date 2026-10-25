@@ -7,7 +7,6 @@ import {
   parseSwipeHoldMs,
   resolveSwipeMode,
   SWIPE_PRESETS,
-  swipeBezierMode,
   swipeTrackPointCount,
 } from '@/features/graph/flow/flow-swipe-params';
 import { flowStepTitle } from '@/features/graph/flow/flow-step-meta';
@@ -70,12 +69,6 @@ describe('滑动方式', () => {
 });
 
 describe('swipe bezier params', () => {
-  it('未写 bezier 时跟随全局', () => {
-    expect(swipeBezierMode({})).toBe('global');
-    expect(swipeBezierMode({ bezier: true })).toBe('on');
-    expect(swipeBezierMode({ bezier: false })).toBe('off');
-  });
-
   it('兼容脚本里的 0/1/2/3 速度类型', () => {
     expect(parseSwipeEasing(0)).toBe('linear');
     expect(parseSwipeEasing(1)).toBe('ease_in');

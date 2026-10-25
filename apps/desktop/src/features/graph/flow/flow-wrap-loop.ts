@@ -13,7 +13,7 @@ import {
 } from '@/features/graph/flow/flow-structure';
 import type { FlowStep } from '@/types';
 
-const BLOCK_END_MARKS = new Set(['else', 'condend', 'loopend']);
+const BLOCK_END_MARKS = new Set(['else', 'condend', 'loopend', 'parallelbranch', 'parallelend']);
 
 function sortedContiguousIndices(
   steps: readonly FlowStep[],

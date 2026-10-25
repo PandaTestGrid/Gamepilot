@@ -30,13 +30,16 @@ export function useRunControl(): RunControl {
   const stopRun = useSessionStore((state) => state.stopRun);
 
   const device = activeDevice(devices, activeId);
-  const blocker = !device
-    ? '先在设备面板里选择并连接一台设备'
-    : device.status !== 'connected'
-      ? '设备还没连上（在设备标签条那台点一下，或用画面栏的「连接设备」）'
-      : flowStepCount === 0
-        ? '工作流还是空的：左侧拖模块到画布'
-        : null;
+  // Stopping must not depend on graph content or a possibly stale device scan.
+  const blocker = running
+    ? null
+    : !device
+      ? '先在设备面板里选择并连接一台设备'
+      : device.status !== 'connected'
+        ? '设备还没连上（在设备标签条那台点一下，或用画面栏的「连接设备」）'
+        : flowStepCount === 0
+          ? '工作流还是空的：左侧拖模块到画布'
+          : null;
 
   const toggle = useCallback(() => {
     if (!activeId || blocker) {

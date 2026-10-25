@@ -1,26 +1,25 @@
 /**
- * 步骤级搜索范围：搜索范围是「这一步怎么执行」的能力，不是模板的固有属性。
+ * 步骤级搜索范围：唯一一处配置「这一步在哪找」。
  *
- * - `auto`：跟随模板默认（录制时 / 识别器面板里设的值）
- * - `region`：这一步只在模板的 roi（录制框选区域）里找
+ * - `region`（默认）：只在模板的 roi（录制框选区域）里找
  * - `full`：这一步整帧找 —— 目标可能出现在屏幕任意位置（较慢）
  *
- * 引擎里由 `FlowEngine._step_search_overrides()` 读取，覆盖模板默认值。
+ * 录制时不再设置模板默认值：同一个模板在 A 步可以区域搜、B 步全屏搜，
+ * 没写就是区域。引擎里由 `FlowEngine._step_search_overrides()` 读取。
  */
 import { type ReactNode } from 'react';
 
 import { cn } from '@/lib/utils';
 
-export type StepSearchScopeValue = 'auto' | 'region' | 'full';
+export type StepSearchScopeValue = 'region' | 'full';
 
 const OPTIONS: ReadonlyArray<{ id: StepSearchScopeValue; label: string; title: string }> = [
-  { id: 'auto', label: '跟随模板', title: '使用模板默认的搜索范围' },
-  { id: 'region', label: '原区域', title: '这一步只在录制时框选的区域里找' },
+  { id: 'region', label: '原区域', title: '这一步只在录制时框选的区域里找（默认）' },
   { id: 'full', label: '全屏', title: '这一步整帧找：目标出现在屏幕任意位置都能命中（较慢）' },
 ];
 
 export function parseStepSearchScope(value: unknown): StepSearchScopeValue {
-  return value === 'region' || value === 'full' ? value : 'auto';
+  return value === 'full' ? 'full' : 'region';
 }
 
 export function StepSearchScope({
@@ -58,7 +57,7 @@ export function StepSearchScope({
         </button>
       ))}
       <span className="ml-auto truncate text-[10px] text-faint">
-        {current === 'full' ? '整帧搜索' : current === 'region' ? '只在框选区' : '模板默认'}
+        {current === 'full' ? '整帧搜索' : '只在框选区'}
       </span>
     </div>
   );

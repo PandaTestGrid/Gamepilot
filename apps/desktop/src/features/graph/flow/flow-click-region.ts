@@ -1,6 +1,6 @@
-/** 点击模块：归一化矩形内随机落点（与引擎 `by=随机范围` + `rect` 对齐） */
+/** 点击模块：归一化矩形内随机落点（与引擎 `by=region` + `rect` 对齐） */
 
-export const CLICK_BY_REGION = '随机范围';
+export const CLICK_BY_REGION = 'region';
 
 /** 无分辨率信息时示意图默认竖屏（宽/高） */
 export const DEFAULT_SCREEN_ASPECT = 9 / 19.5;

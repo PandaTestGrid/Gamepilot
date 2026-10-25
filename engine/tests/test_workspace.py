@@ -58,7 +58,7 @@ def ws(tmp_path: Path, cfg_dir: Path) -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def test_layout_constants_and_paths(tmp_path: Path) -> None:
+def test_layout_constants_and_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert workspace.WORKSPACE_NAME == "默认"
     assert workspace.WORKSPACE_ROOT == "workspaces"
     assert workspace.WORKSPACE_DIR_ENV == "GAMEPILOT_WORKSPACE_DIR"
@@ -66,6 +66,11 @@ def test_layout_constants_and_paths(tmp_path: Path) -> None:
 
     assert workspace.workspace_root(str(tmp_path)) == str(tmp_path)
     assert library.GRAPH_FILE == "graph.json"
+
+    import sys
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert workspace.recommended_root() == os.path.join(config.default_config_dir(), "workspaces", "默认")
 
 
 def test_normalize_dir_accepts_absolute_and_tilde_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

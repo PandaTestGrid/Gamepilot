@@ -2,6 +2,11 @@ export type DeviceKind = 'android' | 'ios' | 'emulator' | 'windows' | 'remote';
 
 export type DeviceStatus = 'idle' | 'discovered' | 'connecting' | 'connected' | 'failed';
 
+export interface DeviceCapabilities {
+  readonly multiTouch: boolean;
+  readonly maxTouchPoints: number;
+}
+
 export interface DeviceRuntime {
   readonly id: string;
   readonly name: string;
@@ -14,6 +19,7 @@ export interface DeviceRuntime {
   readonly model?: string;
   readonly error?: string;
   readonly suggestedFix?: string;
+  readonly capabilities?: DeviceCapabilities;
   /** 是否已在多开网格 / 独立窗口中打开 */
   readonly windowed?: boolean;
 }
@@ -92,15 +98,21 @@ export interface GraphEdgeView {
   readonly actionSpec: EdgeAction;
 }
 
-export type RecognizerType = 'template' | 'color' | 'ocr';
+export type RecognizerType = 'template' | 'color' | 'ocr' | 'yolo';
 
 export interface RecognizerView {
   readonly label: string;
+  /** 缺省开启；关闭只屏蔽识别命中，保留素材和步骤引用。 */
+  readonly enabled?: boolean;
   readonly type: RecognizerType;
   /** 模板文件名（template 识别器才有），界面用它去取模板截图 */
   readonly template?: string;
   /** OCR 识别器要认的文字（type === 'ocr' 才有） */
   readonly text?: string;
+  /** YOLO 识别器的类别名（type === 'yolo' 才有） */
+  readonly classes?: readonly string[];
+  /** YOLO 识别器的示例个数（type === 'yolo' 才有） */
+  readonly examplesCount?: number;
   /** 录制时的帧像素尺寸（template 才有）：引擎按它和当前帧的比例自动缩放模板 */
   readonly recordedSize?: readonly [number, number];
   readonly score: number;
@@ -130,6 +142,8 @@ export interface GraphData {
   readonly variables: readonly GraphVariable[];
   readonly activeNodeId: string | null;
   readonly pendingNodeId: string | null;
+  /** 设备运行态；并行分支可以同时高亮多个步骤，不落入 graph.json。 */
+  readonly live?: { readonly activeStepIds?: readonly string[] };
   /** 有该字段 = 走步骤链编辑器（Automa 逻辑）；`steps` 可为空数组 */
   readonly flow?: { readonly steps: readonly FlowStep[] };
 }
@@ -150,6 +164,8 @@ export type TraceEventType =
   // 流程引擎（v4 步骤链）
   | 'flow_started'
   | 'flow_finished'
+  | 'branch_finished'
+  | 'gesture_retry'
   | 'breakpoint_hit'
   | 'action_executed'
   | 'action_failed'
@@ -168,6 +184,7 @@ export type TraceEventType =
   | 'step_error_insert'
   | 'subflow_waiting'
   | 'subflow_resumed'
+  | 'random_delay'
   // 前端合成（引擎不发）
   | 'device_lost'
   | 'device_reconnected'

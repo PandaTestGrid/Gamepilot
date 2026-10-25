@@ -11,7 +11,7 @@
 | `long_press` | 同 click，可选 `duration_ms`（默认 800） | 长按 |
 | `swipe` | 起点（target/rect/x+y）+ `to_x`+`to_y`，可选 `duration_ms` / `path` / `hold_ms` | 滑动（`path`=连续轨迹，`hold_ms`=末端按住，摇杆靠这两个） |
 | `wait` | `seconds`（>0） | 等待（阻塞当前设备循环） |
-| `key` | `value`（back/home/recents/power/volume_up/volume_down/enter/delete） | 功能键 |
+| `key` | `value`（手机：back/home/recents/power/volume_up/volume_down/enter/delete；Windows 窗口另有 a-z/0-9/f1-f12/space/shift/ctrl/alt/tab/escape/方向键等） | 按键 |
 | `text` | `value` | 输入文本 |
 
 `wait` 之外都不阻塞：动作发出去就返回，是否切界面由边的条件在后续帧确认。
@@ -22,8 +22,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..devices.base import SUPPORTED_KEYS
+from ..devices.base import ACTION_KEYS
 from .bezier_trajectory import normalize_path
+from .selection import SELECTION_LABELS, normalize_index, normalize_strategy
 
 ACTION_TYPES = ("click", "double_click", "long_press", "swipe", "wait", "key", "text")
 
@@ -75,6 +76,9 @@ class Action:
     seconds: float = 0.5
     value: str = ""
     random_in_rect: bool = False
+    # 同一识别器命中多个目标时点哪一个（见 core/selection.py；默认 auto = 多个就报错）
+    strategy: str = "auto"
+    index: int = 1
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -126,6 +130,8 @@ class Action:
             seconds=_as_number(spec.get("seconds"), 0.5),
             value=str(spec.get("value", "")),
             random_in_rect=bool(spec.get("random_in_rect")),
+            strategy=str(spec.get("strategy") or "auto").strip().lower(),
+            index=_as_int(spec.get("index"), 1),
         )
         # 有轨迹时，起点/终点就是轨迹首尾（显式给的 x/y/to_x/to_y 优先，方便手写时少写两个字段）
         if action.path:
@@ -154,10 +160,16 @@ class Action:
             if self.seconds <= 0:
                 raise ValueError("wait.seconds 必须大于 0")
         elif self.type == "key":
-            if self.value not in SUPPORTED_KEYS:
-                raise ValueError(f"key.value 必须是: {', '.join(sorted(SUPPORTED_KEYS))}")
+            if self.value not in ACTION_KEYS:
+                raise ValueError(f"key.value 必须是: {', '.join(sorted(ACTION_KEYS))}")
         elif self.type == "text" and not self.value:
             raise ValueError("text.value 不能为空")
+        if self.strategy != "auto":
+            self.strategy = normalize_strategy(self.strategy)
+            if self.strategy == "nth":
+                self.index = normalize_index(self.index)
+            elif self.index < 1:
+                self.index = 1
 
     def _has_point(self) -> bool:
         if self.target:
@@ -192,6 +204,10 @@ class Action:
             out["seconds"] = self.seconds
         if self.value:
             out["value"] = self.value
+        if self.strategy and self.strategy != "auto":
+            out["strategy"] = self.strategy
+        if self.strategy == "nth":
+            out["index"] = max(1, self.index)
         out.update(self.extra)
         return out
 
@@ -204,6 +220,10 @@ class Action:
             return f"输入「{self.value}」"
         if self.target:
             start = self.target
+            if self.strategy == "nth":
+                start = f"{self.target}（第 {max(1, self.index)} 个）"
+            elif self.strategy and self.strategy != "auto":
+                start = f"{self.target}（{SELECTION_LABELS.get(self.strategy, self.strategy)}）"
         elif self.rect is not None:
             start = "范围内随机" if self.random_in_rect else "矩形中心"
         elif self.x is not None:

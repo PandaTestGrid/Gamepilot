@@ -66,8 +66,9 @@ def test_interval_trigger_arms_then_auto_runs(session: DeviceSession) -> None:
     session._maybe_auto_run()
 
     assert session.running, "到点应当自动开跑"
+    assert session._auto_at is not None, "自动触发后应排下一次"
     session.stop_run()
-    assert session._auto_at is not None, "跑完要顺延排下一次"
+    assert session._auto_at is None, "用户手动停止必须同时取消下一次自动触发，不能自行复活"
 
 
 def test_manual_trigger_never_auto_runs(session: DeviceSession) -> None:
@@ -90,9 +91,8 @@ def _frames(session: DeviceSession) -> list[dict[str, Any]]:
 def test_running_flow_reports_the_current_step_id_in_frames(session: DeviceSession) -> None:
     """跑起来后，每帧的 node 必须是**当前步骤 id** —— 前端就是靠它高亮「跑到第几步」。"""
     _set_flow(session, _blocking_flow({"id": "t", "type": "manual", "params": {}}))
-    assert _wait(lambda: len(_frames(session)) > 0), "先要有帧推上来"
-    # 没运行时，node 停在第一步（触发器）
-    assert _frames(session)[-1].get("node") == "t"
+    # 采集与识别独立，须等新图的帧状态，而不是误读切图前已交付的第一帧。
+    assert _wait(lambda: _frames(session) and _frames(session)[-1].get("node") == "t")
 
     session.start_run()
     # 跑起来就前进到延时那一步，帧里的 node 跟着变成那一步的 id

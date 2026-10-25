@@ -39,6 +39,7 @@ export function toGraphData(
   live?: {
     node?: string | null;
     pending?: string | null;
+    activeStepIds?: readonly string[];
     detections?: ReadonlyArray<{ label: string; score: number; state: string }>;
   },
 ): GraphData {
@@ -87,21 +88,41 @@ export function toGraphData(
   });
 
   const recognizers: RecognizerView[] = Object.entries(payload.recognizers ?? {}).map(([label, spec]) => {
-    const live1 = liveScores.get(label);
+    const live1 = spec.enabled === false ? undefined : liveScores.get(label);
     const type = str(spec.type, 'template');
     // 没写 roi = 整帧（引擎的语义）；界面按 [0,0,1,1] 画全屏框，不能显示成 0×0
     const roi = Array.isArray(spec.roi) && spec.roi.length === 4 ? (spec.roi as number[]) : [0, 0, 1, 1];
     return {
       label,
-      type: type === 'color' ? 'color' : type === 'ocr' ? 'ocr' : 'template',
+      enabled: spec.enabled !== false,
+      type: type === 'color' ? 'color' : type === 'ocr' ? 'ocr' : type === 'yolo' ? 'yolo' : 'template',
       template: typeof spec.template === 'string' ? spec.template : undefined,
+      examplesCount: Array.isArray(spec.examples) ? spec.examples.length : undefined,
       text: typeof spec.text === 'string' ? spec.text : undefined,
+      classes:
+        Array.isArray(spec.classes) && spec.classes.length > 0
+          ? [...new Set(spec.classes.map(String))]
+          : Array.isArray(spec.examples) && spec.examples.length > 0
+            ? [
+                ...new Set(
+                  spec.examples
+                    .map((item) => {
+                      if (!item || typeof item !== 'object') {
+                        return '';
+                      }
+                      const label = (item as Record<string, unknown>).label;
+                      return typeof label === 'string' ? label.trim() : '';
+                    })
+                    .filter(Boolean),
+                ),
+              ]
+            : undefined,
       recordedSize:
         Array.isArray(spec.recorded_size) && spec.recorded_size.length === 2
           ? [Number(spec.recorded_size[0]) || 0, Number(spec.recorded_size[1]) || 0]
           : undefined,
       score: live1?.score ?? 0,
-      threshold: num(spec.threshold, 0.82),
+      threshold: num(spec.threshold, type === 'yolo' ? 0.3 : 0.82),
       roi: [roi[0] ?? 0, roi[1] ?? 0, roi[2] ?? 1, roi[3] ?? 1],
       search: spec.search === 'full' ? 'full' : 'region',
       samples: 1,
@@ -130,6 +151,7 @@ export function toGraphData(
     variables,
     activeNodeId: live?.node ?? null,
     pendingNodeId: live?.pending ?? null,
+    ...(live ? { live: { activeStepIds: live.activeStepIds ?? (live.node ? [live.node] : []) } } : {}),
     flow: { steps: flowSteps },
   };
 }

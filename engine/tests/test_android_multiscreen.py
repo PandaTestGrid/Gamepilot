@@ -79,7 +79,9 @@ def _reset_channel() -> None:
     FakeChannel.instance = None
 
 
-def _controller(monkeypatch: pytest.MonkeyPatch, display: int = 0, physical: int | None = None) -> android.AndroidController:
+def _controller(
+    monkeypatch: pytest.MonkeyPatch, display: int = 0, physical: int | None = None
+) -> android.AndroidController:
     controller = android.AndroidController(serial="emulator-5554", display=display, physical=physical)
     controller._client_device = Mock()
     controller._connected = True
@@ -130,7 +132,8 @@ def test_main_screen_starts_scrcpy_on_display_zero(monkeypatch: pytest.MonkeyPat
 def test_start_scrcpy_without_first_frame_raises_and_closes(monkeypatch: pytest.MonkeyPatch) -> None:
     class EmptyVideo(FakeChannel):
         def latest_frame(self, timeout: float = 0.0) -> None:
-            assert timeout == 2.0
+            # 首帧等待上限来自通道（默认 5s），不能退回原来的 2s：MuMu 慢时会被误判失败
+            assert timeout == 5.0
             return None
 
     monkeypatch.setattr(scrcpy, "find_server_jar", lambda: "server.jar")

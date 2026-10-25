@@ -30,12 +30,13 @@ describe('SwipeStepFields 录制', () => {
       );
       expect(screen.getByTestId('swipe-mode-select')).toHaveValue('point');
       expect(screen.getByText('起点')).toBeTruthy();
-      // 「按住」是连续方式的末端拖住，点对点只记起止点与时长
-      expect(screen.queryByTestId('swipe-hold-ms')).toBeNull();
+      // 点对点与连续方式共用末端按住时长。
+      expect(screen.getByTestId('swipe-hold-ms')).toBeInTheDocument();
       expect(screen.queryByTestId('swipe-record-track')).toBeNull();
       fireEvent.click(screen.getByTestId('swipe-record-single'));
       expect(beginRecordSwipe).toHaveBeenCalledWith('sw0', 'single');
-      expect(screen.getByTestId('swipe-bezier-compact')).toHaveTextContent('跟随全局');
+      // 拟人只在全局设置里配：节点卡片与详细配置都不出现
+      expect(screen.queryByTestId('swipe-bezier-compact')).toBeNull();
       expect(screen.queryByTestId('swipe-bezier-fields')).toBeNull();
 
       fireEvent.change(screen.getByTestId('swipe-mode-select'), { target: { value: 'track' } });
@@ -77,7 +78,7 @@ describe('SwipeStepFields 录制', () => {
       expect(beginRecordSwipe).toHaveBeenCalledWith('sw0', 'track');
 
       fireEvent.change(screen.getByTestId('swipe-mode-select'), { target: { value: 'point' } });
-      expect(onPatch).toHaveBeenCalledWith({ swipe_mode: 'point', path: undefined, hold_ms: undefined });
+      expect(onPatch).toHaveBeenCalledWith({ swipe_mode: 'point', path: undefined });
     } finally {
       useUiStore.setState({ beginRecordSwipeForFlowStep: original });
     }
@@ -95,22 +96,17 @@ describe('SwipeStepFields 录制', () => {
     expect(screen.queryByTestId('swipe-track')).toBeNull();
   });
 
-  it('详细配置可覆盖拟人贝塞尔参数', () => {
-    const onPatch = vi.fn();
+  it('详细配置也没有拟人贝塞尔参数（统一走全局设置）', () => {
     render(
       <SwipeStepFields
         stepId="sw1"
         params={{ x: 0.5, y: 0.8, to_x: 0.5, to_y: 0.2, duration_ms: 300 }}
-        onPatch={onPatch}
+        onPatch={vi.fn()}
       />,
     );
-    expect(screen.getByTestId('swipe-bezier-fields')).toBeTruthy();
-    fireEvent.change(screen.getByTestId('swipe-bezier-mode'), { target: { value: 'on' } });
-    expect(onPatch).toHaveBeenCalledWith({ bezier: true });
-    fireEvent.change(screen.getByTestId('swipe-bezier-order'), { target: { value: '4' } });
-    expect(onPatch).toHaveBeenCalledWith({ bezier_order: 4 });
-    fireEvent.change(screen.getByTestId('swipe-bezier-easing'), { target: { value: 'ease_in' } });
-    expect(onPatch).toHaveBeenCalledWith({ bezier_easing: 'ease_in' });
+    expect(screen.queryByTestId('swipe-bezier-fields')).toBeNull();
+    expect(screen.queryByTestId('swipe-bezier-mode')).toBeNull();
+    expect(screen.queryByText(/拟人贝塞尔/)).toBeNull();
   });
 });
 
@@ -183,21 +179,57 @@ describe('SwipeStepFields 连续滑动', () => {
 });
 
 describe('ClickStepFields 拟人点击', () => {
-  it('详细配置可覆盖偏移与按下时长', () => {
-    const onPatch = vi.fn();
+  it('节点里没有拟人参数：偏移 / 按下 / 微移只在全局设置', () => {
     render(
       <ClickStepFields
         stepId="c-human"
-        params={{ by: '坐标', event: 'click', x: 0.5, y: 0.5 }}
+        params={{ by: 'coord', event: 'click', x: 0.5, y: 0.5 }}
         recognizerLabels={[]}
-        onPatch={onPatch}
+        onPatch={vi.fn()}
       />,
     );
-    expect(screen.getByTestId('click-human-fields')).toBeTruthy();
-    fireEvent.change(screen.getByTestId('click-jitter-px'), { target: { value: '5' } });
-    expect(onPatch).toHaveBeenCalledWith({ click_jitter_px: 5 });
-    fireEvent.change(screen.getByTestId('click-tap-duration'), { target: { value: '80' } });
-    expect(onPatch).toHaveBeenCalledWith({ tap_duration_ms: 80 });
+    expect(screen.queryByTestId('click-human-fields')).toBeNull();
+    expect(screen.queryByTestId('click-jitter-px')).toBeNull();
+    expect(screen.queryByTestId('click-tap-duration')).toBeNull();
+    expect(screen.queryByTestId('click-micro-px')).toBeNull();
+  });
+
+  it('画布卡片（compact）也不显示拟人参数', () => {
+    render(
+      <ClickStepFields
+        stepId="c-human-compact"
+        params={{ by: 'coord', event: 'click', x: 0.5, y: 0.5 }}
+        recognizerLabels={[]}
+        onPatch={vi.fn()}
+        compact
+      />,
+    );
+    expect(screen.queryByTestId('click-human-compact-fields')).toBeNull();
+    expect(screen.queryByTestId('click-compact-jitter-px')).toBeNull();
+    expect(screen.queryByTestId('click-compact-tap-duration')).toBeNull();
+    expect(screen.queryByTestId('click-compact-micro-px')).toBeNull();
+  });
+
+  it('老数据里残留的拟人字段不会渲染成输入框', () => {
+    render(
+      <ClickStepFields
+        stepId="c-human-old"
+        params={{
+          by: 'coord',
+          event: 'click',
+          x: 0.5,
+          y: 0.5,
+          click_jitter_px: 5,
+          tap_duration_ms: 80,
+          click_micro_px: 7,
+        }}
+        recognizerLabels={[]}
+        onPatch={vi.fn()}
+        compact
+      />,
+    );
+    expect(screen.queryByText('拟人')).toBeNull();
+    expect(screen.queryByTestId('click-human-compact-fields')).toBeNull();
   });
 });
 
@@ -211,7 +243,7 @@ describe('ClickStepFields 坐标点', () => {
       render(
         <ClickStepFields
           stepId="c0"
-          params={{ by: '坐标', event: 'click', x: 0.15, y: 0.43 }}
+          params={{ by: 'coord', event: 'click', x: 0.15, y: 0.43 }}
           recognizerLabels={[]}
           onPatch={onPatch}
           compact
@@ -223,30 +255,69 @@ describe('ClickStepFields 坐标点', () => {
       fireEvent.click(screen.getByTestId('click-coord-pick'));
       expect(beginPickCoord).toHaveBeenCalledWith('c0');
       fireEvent.change(screen.getByTestId('click-coord-x'), { target: { value: '0.2' } });
-      expect(onPatch).toHaveBeenCalledWith({ by: '坐标', rec: '', x: 0.2 });
+      expect(onPatch).toHaveBeenCalledWith({ by: 'coord', rec: '', x: 0.2 });
     } finally {
       useUiStore.setState({ beginPickClickCoordForFlowStep: original });
     }
   });
 
-  it('点击方式用下拉切换，第一项是图像', () => {
+  it.each(['识别器', '坐标', '随机范围'])('旧中文 by=%s 显示无效状态，不静默转成坐标/图像/范围', (by) => {
+    const onPatch = vi.fn();
+    render(
+      <ClickStepFields
+        stepId="invalid-click"
+        params={{ by, rec: 'region_1', rect: [0, 0, 0.2, 0.2], x: 0.5, y: 0.5 }}
+        recognizerLabels={['region_1']}
+        onPatch={onPatch}
+      />,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('无效点击方式');
+    const select = screen.getByTestId<HTMLSelectElement>('click-target-mode-select');
+    expect(select.value).toBe('');
+    expect(screen.queryByTestId('click-coord-field')).toBeNull();
+    expect(screen.queryByTestId('click-region-field')).toBeNull();
+    expect(screen.queryByTestId('step-selection-strategy')).toBeNull();
+    expect(onPatch).not.toHaveBeenCalled();
+    fireEvent.change(select, { target: { value: 'coord' } });
+    expect(onPatch).toHaveBeenCalledWith(expect.objectContaining({ by: 'coord', rec: '' }));
+  });
+
+  it('点击方式用下拉切换，第一项是图像识别、第二项是 AI 识别', () => {
     const onPatch = vi.fn();
     render(
       <ClickStepFields
         stepId="c0"
-        params={{ by: '识别器', rec: '' }}
+        params={{ by: 'recognizer', rec: '' }}
         recognizerLabels={[]}
         onPatch={onPatch}
         compact
       />,
     );
     const select = screen.getByTestId<HTMLSelectElement>('click-target-mode-select');
-    expect(select.value).toBe('recognizer');
-    expect(select.querySelector('option')?.textContent).toBe('图像');
+    expect(select.value).toBe('image');
+    const options = Array.from(select.querySelectorAll('option')).map((item) => item.textContent);
+    expect(options).toEqual(['图像识别', 'AI 识别', '坐标点', '范围内随机']);
     fireEvent.change(select, { target: { value: 'region' } });
     expect(onPatch).toHaveBeenCalled();
     const patch = onPatch.mock.calls[0]![0] as Record<string, unknown>;
-    expect(patch.by).toBe('随机范围');
+    expect(patch.by).toBe('region');
+  });
+
+  it('切到 AI 识别：仍写 by=recognizer，只加 ai 标记', () => {
+    const onPatch = vi.fn();
+    render(
+      <ClickStepFields
+        stepId="c0b"
+        params={{ by: 'recognizer', rec: '' }}
+        recognizerLabels={[]}
+        onPatch={onPatch}
+        compact
+      />,
+    );
+    fireEvent.change(screen.getByTestId('click-target-mode-select'), { target: { value: 'ai' } });
+    const patch = onPatch.mock.calls[0]![0] as Record<string, unknown>;
+    expect(patch.by).toBe('recognizer');
+    expect(patch.ai).toBe(true);
   });
 });
 
@@ -256,7 +327,7 @@ describe('ClickStepFields 交互', () => {
     const { rerender } = render(
       <ClickStepFields
         stepId="c1"
-        params={{ by: '坐标', event: 'click', x: 0.5, y: 0.5 }}
+        params={{ by: 'coord', event: 'click', x: 0.5, y: 0.5 }}
         recognizerLabels={[]}
         onPatch={onPatch}
       />,
@@ -271,7 +342,7 @@ describe('ClickStepFields 交互', () => {
     rerender(
       <ClickStepFields
         stepId="c1"
-        params={{ by: '坐标', event: 'long_press', x: 0.5, y: 0.5, duration_ms: 600 }}
+        params={{ by: 'coord', event: 'long_press', x: 0.5, y: 0.5, duration_ms: 600 }}
         recognizerLabels={[]}
         onPatch={onPatch}
       />,
@@ -292,7 +363,7 @@ describe('ClickStepFields 范围内随机的布局', () => {
       const { rerender } = render(
         <ClickStepFields
           stepId="c2"
-          params={{ by: '随机范围', event: 'click' }}
+          params={{ by: 'region', event: 'click' }}
           recognizerLabels={[]}
           onPatch={onPatch}
           compact
@@ -315,7 +386,7 @@ describe('ClickStepFields 范围内随机的布局', () => {
       rerender(
         <ClickStepFields
           stepId="c2"
-          params={{ by: '随机范围', event: 'click' }}
+          params={{ by: 'region', event: 'click' }}
           recognizerLabels={[]}
           onPatch={onPatch}
           compact
@@ -326,7 +397,7 @@ describe('ClickStepFields 范围内随机的布局', () => {
       rerender(
         <ClickStepFields
           stepId="c2"
-          params={{ by: '随机范围', event: 'click', rect: [0.04, 0.58, 0.9, 0.23] }}
+          params={{ by: 'region', event: 'click', rect: [0.04, 0.58, 0.9, 0.23] }}
           recognizerLabels={[]}
           onPatch={onPatch}
           compact
@@ -341,7 +412,7 @@ describe('ClickStepFields 范围内随机的布局', () => {
 
       fireEvent.click(screen.getByText('清除'));
       expect(onPatch).toHaveBeenCalledWith({
-        by: '坐标',
+        by: 'coord',
         rect: undefined,
         screenAspect: undefined,
         preview: undefined,
@@ -436,7 +507,7 @@ describe('CallStepFields 交互', () => {
 });
 
 describe('KeyStepFields 交互', () => {
-  it('在节点上可切换主页 / 返回 / 最近任务及系统平台，Windows 显示不支持提示', () => {
+  it('Android 可切系统键与平台；Windows 显示游戏键盘并可点 WASD', () => {
     const onPatch = vi.fn();
     const { rerender } = render(
       <KeyStepFields params={{ value: 'back' }} deviceKind="android" onPatch={onPatch} compact />,
@@ -452,7 +523,12 @@ describe('KeyStepFields 交互', () => {
     expect(onPatch).toHaveBeenCalledWith({ platform: 'ios', value: 'home' });
 
     rerender(<KeyStepFields params={{ value: 'back' }} deviceKind="windows" onPatch={onPatch} />);
-    expect(screen.getByTestId('key-step-unsupported')).toBeInTheDocument();
+    expect(screen.getByTestId('key-step-fields')).toBeInTheDocument();
+    expect(screen.queryByTestId('key-platform-select')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('key-option-w'));
+    expect(onPatch).toHaveBeenCalledWith({ value: 'w' });
+    fireEvent.click(screen.getByTestId('key-option-space'));
+    expect(onPatch).toHaveBeenCalledWith({ value: 'space' });
   });
 });
 
@@ -483,7 +559,7 @@ describe('FlowStepEditor 图像配置中的阈值设置', () => {
       flow: {
         steps: [
           { id: 't', type: 'manual', params: {} },
-          { id: 's_1', type: 'click', params: { by: '识别器', rec: 'region_1' } },
+          { id: 's_1', type: 'click', params: { by: 'recognizer', rec: 'region_1' } },
         ],
       },
     };
@@ -501,12 +577,12 @@ describe('FlowStepEditor 图像配置中的阈值设置', () => {
     expect(useGraphStore.getState().graphs[SCRIPT_SCOPE]?.recognizers[0]?.threshold).toBe(0.91);
   });
 
-  it('搜索范围可以按步骤单独覆盖：默认跟随模板，可切全屏', () => {
+  it('搜索范围只在步骤上配：默认原区域，可切全屏', () => {
     const onPatch = vi.fn();
     render(
       <ClickStepFields
         stepId="s1"
-        params={{ by: '识别器', rec: 'region_1' }}
+        params={{ by: 'recognizer', rec: 'region_1' }}
         recognizerLabels={['region_1']}
         onPatch={onPatch}
         previewSide
@@ -514,12 +590,59 @@ describe('FlowStepEditor 图像配置中的阈值设置', () => {
       />,
     );
 
-    // 步骤里只留一排「搜索」；模板默认那排只在录制浮层里设置
+    // 只有两个选项：原区域（默认）/ 全屏；录制时不再设模板默认值
     expect(screen.getByTestId('step-search-scope')).toBeInTheDocument();
     expect(screen.queryByTestId('recognizer-search-control')).toBeNull();
-    expect(screen.getByTestId('step-search-auto')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByTestId('step-search-auto')).toBeNull();
+    expect(screen.getByTestId('step-search-region')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('step-search-full')).toHaveAttribute('aria-pressed', 'false');
 
     fireEvent.click(screen.getByTestId('step-search-full'));
     expect(onPatch).toHaveBeenCalledWith({ search: 'full' });
+  });
+
+  it('图像点击可以配「多目标」策略：全屏命中一排图标时选点哪一个', () => {
+    const onPatch = vi.fn();
+    const { rerender } = render(
+      <ClickStepFields
+        stepId="s1"
+        params={{ by: 'recognizer', rec: 'region_1' }}
+        recognizerLabels={['region_1']}
+        onPatch={onPatch}
+        previewSide
+        part="image"
+      />,
+    );
+
+    expect(screen.getByTestId('step-selection-strategy')).toBeInTheDocument();
+    expect(screen.getByTestId<HTMLSelectElement>('step-selection-select').value).toBe('auto');
+
+    fireEvent.change(screen.getByTestId('step-selection-select'), { target: { value: 'nearest' } });
+    expect(onPatch).toHaveBeenCalledWith({ strategy: 'nearest', index: undefined });
+
+    rerender(
+      <ClickStepFields
+        stepId="s1"
+        params={{ by: 'recognizer', rec: 'region_1', strategy: 'nth', index: 2 }}
+        recognizerLabels={['region_1']}
+        onPatch={onPatch}
+        previewSide
+        part="image"
+      />,
+    );
+    expect(screen.getByTestId<HTMLInputElement>('step-selection-index').value).toBe('2');
+  });
+
+  it('坐标 / 随机范围点击不显示多目标策略', () => {
+    render(
+      <ClickStepFields
+        stepId="s1"
+        params={{ by: 'coord', x: 0.5, y: 0.5 }}
+        recognizerLabels={['region_1']}
+        onPatch={vi.fn()}
+        part="image"
+      />,
+    );
+    expect(screen.queryByTestId('step-selection-strategy')).toBeNull();
   });
 });

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import abc
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -81,6 +82,36 @@ SUPPORTED_KEYS: frozenset[str] = frozenset(
     {"back", "home", "recents", "power", "volume_up", "volume_down", "enter", "delete"}
 )
 
+# Windows 窗口游戏里常用的键盘按键（动作 `key` 的 value 允许这些）。
+# Android/iOS 控制器运行时遇到不认识的键会明确报「不支持的按键」，不会静默。
+GAME_KEYS: frozenset[str] = frozenset(
+    {
+        *"abcdefghijklmnopqrstuvwxyz",
+        *"0123456789",
+        "space",
+        "enter",
+        "escape",
+        "tab",
+        "backspace",
+        "delete",
+        "shift",
+        "ctrl",
+        "alt",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+        "insert",
+        "left",
+        "up",
+        "right",
+        "down",
+        *(f"f{index}" for index in range(1, 13)),
+    }
+)
+# 工作流 `key` 动作保存/加载时允许的按键全集（具体设备不支持的在运行时报错）
+ACTION_KEYS: frozenset[str] = SUPPORTED_KEYS | GAME_KEYS
+
 
 class Controller(abc.ABC):
     """设备控制器：截图 + 输入 + 生命周期。所有坐标都是归一化坐标。"""
@@ -112,6 +143,15 @@ class Controller(abc.ABC):
         """
         return ""
 
+    @property
+    def preferred_fps(self) -> float:
+        """引擎截图/识别循环的目标帧率（0 = 用会话默认 8fps）。
+
+        抓图很快的设备（例如 WGC 抓 Windows 窗口，单帧 3ms）不需要被 8fps 卡住：
+        覆盖这个属性，会话层会用它作为循环上限；界面要多少帧仍由 `device.stream` 决定。
+        """
+        return 0.0
+
     # ---------- 能力 ----------
 
     @property
@@ -121,6 +161,24 @@ class Controller(abc.ABC):
     @abc.abstractmethod
     def screenshot(self) -> np.ndarray:
         """返回 BGR uint8 ndarray。"""
+
+    @property
+    def max_touch_points(self) -> int:
+        """显式 owner 隔离多指能力；0 表示不支持，不影响旧单指 touch。"""
+        return 0
+
+    def touch_down(self, x: float, y: float, *, pointer_id: int, owner: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} 不支持多指触控")
+
+    def touch_move(self, x: float, y: float, *, pointer_id: int, owner: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} 不支持多指触控")
+
+    def touch_up(self, *, pointer_id: int, owner: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} 不支持多指触控")
+
+    def release_touches(self, *, owner: str | None = None) -> None:
+        """释放指定运行实例的触点；None 只用于设备级关闭/全局清理。"""
+        return None
 
     # ---------- 输入（归一化坐标） ----------
 
@@ -163,7 +221,32 @@ class Controller(abc.ABC):
             "scheme": type(self).__name__,
             "connected": self._connected,
             "resolution": list(self.resolution) if self._connected else None,
+            "capabilities": {"multiTouch": self.max_touch_points > 1, "maxTouchPoints": self.max_touch_points},
         }
+
+
+def validate_touch_identity(pointer_id: int, owner: str) -> None:
+    if isinstance(pointer_id, bool) or not isinstance(pointer_id, int) or not 1 <= pointer_id <= 10:
+        raise ValueError("pointer_id 必须是 1..10 的整数")
+    validate_touch_owner(owner)
+
+
+def validate_touch_owner(owner: str) -> None:
+    if not isinstance(owner, str) or not owner.strip():
+        raise ValueError("owner 必须是非空的运行实例字符串")
+
+
+def normalize_touch_point(x: float, y: float) -> tuple[float, float]:
+    if (
+        isinstance(x, bool)
+        or isinstance(y, bool)
+        or not isinstance(x, (int, float))
+        or not isinstance(y, (int, float))
+        or not math.isfinite(x)
+        or not math.isfinite(y)
+    ):
+        raise ValueError("触控坐标必须是有限数字")
+    return min(1.0, max(0.0, x)), min(1.0, max(0.0, y))
 
 
 _REGISTRY: dict[str, type[Controller]] = {}

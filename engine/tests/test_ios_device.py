@@ -9,11 +9,10 @@
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 import stat
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -43,34 +42,56 @@ def _echo_binary(directory: Path, name: str, text: str) -> str:
 
 @pytest.mark.parametrize(
     ("version", "expected"),
-    [("17.3", False), ("17.4", True), ("17.4.1", True), ("18.1", True), ("16.7", False), ("", False)],
+    [("17.3", False), ("17.4", True), ("17.4.1", True), ("18.1", True), ("16.7", False), ("26.6", True)],
 )
 def test_version_gate(version: str, expected: bool) -> None:
     assert ios.version_supported(version) is expected
 
 
+def test_unknown_version_is_not_treated_as_old() -> None:
+    """读不到版本 ≠ 版本太低。
+
+    以前空版本会被判成"只支持 17.4+"，把真正的连接失败（隧道残留）盖掉；
+    现在未知版本放行，交给建隧道那一步给出准确原因。
+    """
+    assert ios.version_known("") is False
+    assert ios.version_supported("") is True
+    assert ios.version_supported("  ") is True
+
+
 # ---------------------------------------------------------------- 设备列表
 
 
-def test_list_devices_parses_usbmux_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = [
-        {"Identifier": "00008110-001A2B3C4D5E", "DeviceName": "iPhone 15", "ProductVersion": "18.1"},
-        {"Identifier": "00008101-00FFEEDDCCBB", "DeviceName": "老 iPhone", "ProductVersion": "16.7"},
-        {"DeviceName": "坏数据，没有 udid"},
-    ]
-    binary = _echo_binary(tmp_path, "pymobiledevice3", json.dumps(payload))
-    monkeypatch.setattr(shutil, "which", lambda name: binary if name == "pymobiledevice3" else None)
+def test_list_devices_uses_in_process_usbmux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """冻结包里不能再起 `python -m pymobiledevice3`：直接走库的 usbmux 客户端。"""
 
-    devices = ios.list_devices()
-    assert [item.udid for item in devices] == ["00008110-001A2B3C4D5E", "00008101-00FFEEDDCCBB"]
-    assert devices[0].supported() and not devices[1].supported()
-    assert devices[0].uri == "iOS:///?udid=00008110-001A2B3C4D5E"
+    class Lockdown:
+        def __init__(self) -> None:
+            self.short_info = {"DeviceName": "iPhone 15", "ProductVersion": "18.1"}
+
+        async def close(self) -> None:
+            return None
+
+    async def devices() -> list[object]:
+        return [types.SimpleNamespace(serial="00008110-001A2B3C4D5E", connection_type="USB")]
+
+    async def lockdown(*_args: object, **_kwargs: object) -> Lockdown:
+        return Lockdown()
+
+    import pymobiledevice3
+    import pymobiledevice3.lockdown
+
+    monkeypatch.setattr(pymobiledevice3.usbmux, "list_devices", devices)
+    monkeypatch.setattr(pymobiledevice3.lockdown, "create_using_usbmux", lockdown)
+
+    found = ios.list_devices()
+    assert [item.udid for item in found] == ["00008110-001A2B3C4D5E"]
+    assert found[0].name == "iPhone 15"
+    assert found[0].version == "18.1"
 
 
-def test_discover_marks_unsupported_devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = [{"Identifier": "A", "DeviceName": "iPhone 15", "ProductVersion": "18.1"}]
-    binary = _echo_binary(tmp_path, "pymobiledevice3", json.dumps(payload))
-    monkeypatch.setattr(shutil, "which", lambda name: binary if name == "pymobiledevice3" else None)
+def test_discover_marks_unsupported_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ios, "list_devices", lambda: [ios.IosDevice(udid="A", name="iPhone 15", version="18.1")])
 
     monkeypatch.setattr(ios, "screen_size", lambda udid: (1170, 2532))
 
@@ -82,13 +103,9 @@ def test_discover_marks_unsupported_devices(tmp_path: Path, monkeypatch: pytest.
     assert found[0].resolution == (1170, 2532)
 
 
-def test_discover_skips_resolution_probe_for_unsupported_versions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_discover_skips_resolution_probe_for_unsupported_versions(monkeypatch: pytest.MonkeyPatch) -> None:
     """不达标的系统（<17.4）连不上，没必要为它去开 lockdown 会话。"""
-    payload = [{"Identifier": "OLD", "DeviceName": "老 iPhone", "ProductVersion": "16.7"}]
-    binary = _echo_binary(tmp_path, "pymobiledevice3", json.dumps(payload))
-    monkeypatch.setattr(shutil, "which", lambda name: binary if name == "pymobiledevice3" else None)
+    monkeypatch.setattr(ios, "list_devices", lambda: [ios.IosDevice(udid="OLD", name="老 iPhone", version="16.7")])
     probed: list[str] = []
 
     def fake_screen_size(udid: str) -> tuple[int, int] | None:
@@ -146,11 +163,18 @@ def test_screen_size_without_the_keys_is_none(monkeypatch: pytest.MonkeyPatch) -
     assert ios.screen_size("UDID-3") is None
 
 
-def test_ios_uses_tunnel_capture_not_quicktime() -> None:
-    """macOS 无 ffmpeg/avfoundation iPhone 采集路径。"""
-    assert not hasattr(ios, "find_capture_device")
-    assert not hasattr(ios, "QuickTimeCapture")
+def test_ios_defaults_to_tunnel_capture() -> None:
+    """默认采集走 DVT 截图；QuickTime 码流是显式开启的可选通道。
+
+    QuickTime 要切私有的 USB 配置，失败时会把设备从 usbmux 拉下线，
+    所以默认必须是能用、能降级的那条路。
+    """
+    assert not hasattr(ios, "find_capture_device"), "不再走 macOS ffmpeg/avfoundation"
     assert hasattr(ios, "TunnelSession"), "采集走隧道 + DVT 截图"
+    assert hasattr(ios, "QuickTimeCapture"), "码流通道已实现，但需显式开启"
+
+    ctrl = ios.IosController(udid="UDID-X")
+    assert ctrl._qt_enabled is False
 
 
 # ---------------------------------------------------------------- 进程级隧道额度

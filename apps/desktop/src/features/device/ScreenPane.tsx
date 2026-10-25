@@ -8,30 +8,38 @@
 import {
   ChevronDown,
   ChevronUp,
-  Grid2x2,
   Link2,
   Loader2,
   MousePointerClick,
+  Pencil,
   Power,
   ScanText,
   Search,
+  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { Group, Panel, type PanelImperativeHandle, Separator, usePanelRef } from 'react-resizable-panels';
+import { useShallow } from 'zustand/react/shallow';
+import { shallow } from 'zustand/shallow';
 
 import { DeviceControls } from '@/features/device/DeviceControls';
 import { EmulatorDisplayTabs } from '@/features/device/EmulatorDisplayTabs';
+import { RecordTools } from '@/features/device/RecordTools';
+import { YoloRecognizerDialog } from '@/features/device/YoloRecognizerDialog';
 import { connectableDevices } from '@/features/device/device-kinds';
 import { DraftForm } from '@/features/device/DraftForm';
 import { DraftSelectionBox, SelectionFrame } from '@/features/device/SelectionBox';
+import { GridSplitButton } from '@/features/device/GridSplitButton';
+import { gridColumnsFor } from '@/features/device/grid-columns';
 import { type SurfaceGesture, useScreenSurface } from '@/features/device/use-screen-surface';
 import { powerKeyFor } from '@/features/device/nav-keys';
 import type { GesturePoint } from '@/features/device/touch-gesture';
 import { simplifyTrack } from '@/features/device/touch-gesture';
 import { checkRecognizerName, trimRecognizerName } from '@/features/recognizers/recognizer-name';
 import { TemplateThumb } from '@/features/recognizers/TemplateThumb';
+import { YoloExampleGallery } from '@/features/recognizers/YoloExampleGallery';
 import { taskName } from '@/features/graph/task-name';
 import { clickTargetMode } from '@/features/graph/flow/flow-click-params';
 import { isNormRect } from '@/features/graph/flow/flow-click-region';
@@ -45,10 +53,12 @@ import { type Box, canvasPointToPixels, canvasRectToPixels } from '@/lib/canvas'
 import { devLog, type OcrBoxItem } from '@/lib/rpc';
 import { deviceRunLabel } from '@/lib/flow-run-attribution';
 import { cn } from '@/lib/utils';
+import { closePaneWindow, isPaneWindow, openPaneWindow } from '@/lib/windows';
 import { sanitizeOcrLabel, useOcrStore } from '@/stores/ocr.store';
 
 const EMPTY_OCR_BOXES: readonly OcrBoxItem[] = [];
 const EMPTY_FLOW_STEPS: readonly FlowStep[] = [];
+const EMPTY_RECOGNIZERS: readonly RecognizerView[] = [];
 
 import { activeDevice, connectedDevices, useDeviceStore } from '@/stores/device.store';
 import { graphForDevice, useGraphStore } from '@/stores/graph.store';
@@ -59,7 +69,12 @@ import type { DeviceRuntime, FlowStep, RecognizerView, RecordDraft, RecordMode }
 /** 上一次记录的画面栏分支（只在变化时打日志） */
 let lastBranchKey = '';
 let lastGridSummary = '';
+/** 上一次写"多开瓦片状态"的时间：那行带帧号，不限频就是每帧一条（见 ScreenGrid 里的注释） */
+let lastGridLoggedAt = 0;
 let imgLoadLogs = 0;
+
+/** 多开瓦片状态日志的最小间隔：够看到变化，又不至于把日志滚没 */
+const GRID_LOG_MIN_GAP_MS = 2000;
 
 /**
  * 素材区收起时的高度：正好放下那一行标题（h-7 = 28px，和详情坞收起条一样）。
@@ -101,16 +116,41 @@ export function ScreenPane(): ReactNode {
   const ocrScanBusy = scanningScreen || recognizing;
   const pressKey = useSessionStore((state) => state.pressKey);
   const isConnected = useSessionStore((state) => Boolean(state.ready[activeId]));
-  const frame = useSessionStore((state) => state.frames[activeId]);
-  const graph = useGraphStore((state) => graphForDevice(state, activeId));
+  // 外壳只需诊断是否有帧；实际帧在 SingleScreen 内订阅，不带动素材区/工具栏。
+  const hasFrame = useSessionStore((state) => Boolean(state.frames[activeId]));
 
   useEffect(() => {
     void useOcrStore.getState().refreshStatus();
   }, []);
 
   const device = activeDevice(devices, activeId);
+  // 本组件在两处渲染：主窗口三栏里的「画面」，以及独立窗口（`?pane=screen`）里那一栏。
+  // 只有主窗口需要为"已弹窗"的设备让位；独立窗口里必须照常画。
+  const inPane = isPaneWindow();
 
   const connected = useMemo(() => connectedDevices(devices), [devices]);
+  // 自动分列的结果要在面板头显示（「多开 ▾ → 自动（2）」），所以在这里算一次，
+  // 而不是只在 ScreenGrid 内部算。宽度由 ScreenGrid 量到后回传（见下方 onMeasure）。
+  const [gridBox, setGridBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  // 订阅派生数值而非 frames 整表：新帧尺寸没变就不重绘外壳。
+  const widestAspect = useSessionStore((state) => {
+    let widest = 0;
+    for (const device of connected) {
+      const resolution = state.frames[device.id]?.resolution ?? device.resolution;
+      if (resolution && resolution[1] > 0) {
+        widest = Math.max(widest, resolution[0] / resolution[1]);
+      }
+    }
+    return widest > 0 ? widest : 9 / 16;
+  });
+  const autoColumns = gridColumnsFor({
+    width: gridBox.width,
+    height: gridBox.height,
+    count: connected.length,
+    aspect: widestAspect,
+    preference: 'auto',
+  });
+
   // 素材区的展开/收起：store 是唯一状态源，面板尺寸跟着它走（和底部抽屉一个规矩）
   const materialOpen = useUiStore((state) => state.materialOpen);
   const setMaterialOpen = useUiStore((state) => state.setMaterialOpen);
@@ -121,15 +161,14 @@ export function ScreenPane(): ReactNode {
   useEffect(() => {
     const key =
       `${activeId}|${device?.name ?? '-'}|${device?.status ?? '-'}|${String(gridView)}|` +
-      `${connected.length}|${String(Boolean(frame))}`;
+      `${connected.length}|${String(hasFrame)}`;
     if (lastBranchKey !== key) {
       lastBranchKey = key;
       devLog(
-        `画面栏分支: activeId=${activeId || '(空)'} 设备=${device?.name ?? '(无)'} 状态=${device?.status ?? '-'} 多开=${String(gridView)} 已连接=${connected.length} 有帧=${String(Boolean(frame))}`,
+        `画面栏分支: activeId=${activeId || '(空)'} 设备=${device?.name ?? '(无)'} 状态=${device?.status ?? '-'} 多开=${String(gridView)} 已连接=${connected.length} 有帧=${String(hasFrame)}`,
       );
     }
-  }, [activeId, device?.name, device?.status, gridView, connected.length, frame]);
-  const recognizers = graph?.recognizers ?? [];
+  }, [activeId, device?.name, device?.status, gridView, connected.length, hasFrame]);
   // 电源键不是导航键（不在投屏下面那条里）：跟着"设备功能"放面板头。
   // macOS 本机窗口发不了电源键 → 这台设备就不显示
   const powerKey = device ? powerKeyFor(device.kind) : null;
@@ -140,8 +179,7 @@ export function ScreenPane(): ReactNode {
     <PanelShell
       title="画面"
       actions={
-        <>
-          <GhostButton
+        <>          <GhostButton
             disabled={ocrDownloading}
             onClick={() => {
               if (ocrScanBusy) {
@@ -185,9 +223,13 @@ export function ScreenPane(): ReactNode {
             <MousePointerClick className="size-3" />
             控制
           </GhostButton>
-          <GhostButton
+          {/* 多开 + ∫分列 = 一颗连体按钮：分列菜单挂在右半格的 ▾ 上，不再单独占一行 */}
+          <GridSplitButton
             active={gridView}
-            onClick={() => {
+            connectedCount={connected.length}
+            deviceCount={devices.length}
+            autoColumns={autoColumns}
+            onToggle={() => {
               // 不用禁用：点了没反应才是最难排查的。这里直接把原因写在顶部错误条
               if (connected.length === 0) {
                 useSessionStore.setState({
@@ -197,11 +239,7 @@ export function ScreenPane(): ReactNode {
               }
               toggleGrid();
             }}
-            title={`多开网格（当前 ${connected.length} 台已连接 / 共 ${devices.length} 台设备）`}
-          >
-            <Grid2x2 className="size-3" />
-            多开{connected.length > 0 ? ` ${connected.length}` : ''}
-          </GhostButton>
+          />
           {/* 电源键：不属于"导航键"，所以不占投屏下面那条；这台设备没有就不显示 */}
           {powerKey && (
             <>
@@ -239,13 +277,21 @@ export function ScreenPane(): ReactNode {
             <div className="flex min-h-0 flex-1 flex-col gap-1 p-2">
               <div className="flex min-h-0 flex-1 flex-col">
                 {gridView ? (
-                  <ScreenGrid />
+                  <ScreenGrid onMeasure={setGridBox} />
+                ) : device?.status === 'connected' && device.windowed && !inPane ? (
+                  // 画面已经被弹到独立窗口：这里让位，不再重复渲染同一路投屏。
+                  // 以前两个 WebView 各拉一遍帧、各解一遍 JPEG，主窗口这块留着旧画面 ——
+                  // 看起来像"独立窗口没生效"，其实是同一台设备画了两份。
+                  <SeparatedWindowNotice
+                    deviceId={device.id}
+                    deviceName={device.name}
+                    onOpen={() => void openPaneWindow('screen', device.id)}
+                  />
                 ) : device?.status === 'connected' ? (
                   <SingleScreen
                     deviceId={device.id}
                     deviceName={device.name}
                     resolution={device.resolution}
-                    frame={frame}
                   />
                 ) : (
                   <EmptyState onOpenPanel={() => toggleDevicePopover(true)} />
@@ -283,7 +329,7 @@ export function ScreenPane(): ReactNode {
           }}
           style={{ overflow: 'hidden' }}
         >
-          <MaterialArea deviceId={activeId} recognizers={recognizers} panelRef={materialRef} />
+          <ConnectedMaterialArea deviceId={activeId} panelRef={materialRef} />
         </Panel>
       </Group>
     </PanelShell>
@@ -291,6 +337,56 @@ export function ScreenPane(): ReactNode {
 }
 
 /* ------------------------------------------------------------------ 空态 */
+
+/**
+ * 「画面已经在独立窗口」占位：主窗口不再重复画一路投屏。
+ *
+ * 这台设备的画面还在推（独立窗口在看），但主窗口这里不再拉帧，
+ * 留一个明确的入口让人把窗口切回来 / 再打开一次。
+ */
+function SeparatedWindowNotice({
+  deviceId,
+  deviceName,
+  onOpen,
+}: {
+  deviceId: string;
+  deviceName: string;
+  onOpen: () => void;
+}): ReactNode {
+  const bringBack = useDeviceStore((state) => state.markWindowed);
+  return (
+    <div
+      data-testid="screen-in-separate-window"
+      className="flex h-full flex-col items-center justify-center gap-2 overflow-auto bg-[#0b0d12] px-4 text-faint"
+    >
+      <span className="text-panelhead text-dim">画面在独立窗口</span>
+      <p className="max-w-[420px] text-center text-badge">
+        {deviceName} 的投屏已经移到独立窗口 · 关闭独立窗口不影响运行
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="h-7 rounded-sm bg-brand px-4 text-body font-medium text-[#0b0d12] hover:opacity-90"
+        >
+          切换到独立窗口
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            // 先关独立窗口（Rust 会回调 pane-window-closed，主窗口据此复位 windowed 并恢复拉帧）；
+            // 命令失败时也照样复位，别让画面卡在"已经在别处"的占位上。
+            void closePaneWindow('screen', deviceId).finally(() => bringBack(deviceId, false));
+          }}
+          title="关掉独立窗口，把画面收回这里"
+          className="h-7 rounded-sm border border-line px-3 text-body text-dim hover:bg-raised hover:text-fg"
+        >
+          收回主窗口
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function EmptyState({ onOpenPanel }: { onOpenPanel: () => void }): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
@@ -382,18 +478,13 @@ function SingleScreen({
   deviceId,
   deviceName,
   resolution,
-  frame,
 }: {
   deviceId: string;
   deviceName: string;
   resolution: readonly [number, number] | null;
-  frame: FrameState | undefined;
 }): ReactNode {
+  const frame = useSessionStore((state) => state.frames[deviceId]);
   const recordMode = useUiStore((state) => state.recordMode);
-  const scanVisual = useOcrStore((state) =>
-    state.scanVisual?.deviceId === deviceId ? state.scanVisual : null,
-  );
-  const pickBoxes = useOcrStore((state) => state.pickBoxes[deviceId] ?? EMPTY_OCR_BOXES);
   // 画面上的鼠标/指针操作按"控制"与"录操作"两个开关决定行为（开关按钮在画面下方的控制条里）
   const controlMode = useUiStore((state) => state.controlMode);
   const recordActionMode = useUiStore((state) => state.recordActionMode);
@@ -402,7 +493,6 @@ function SingleScreen({
   const clearPendingFlowSwipeStep = useUiStore((state) => state.clearPendingFlowSwipeStep);
   const showSwipeRecordGuide = recordActionMode || Boolean(pendingFlowSwipeStepId);
   const draft = useUiStore((state) => state.draft);
-  const beginDraft = useUiStore((state) => state.beginDraft);
   // 触控反馈存的是**画面归一化坐标**，渲染时要换算成容器像素（否则有黑边时看起来是偏的）
   const [feedback, setFeedback] = useState<TouchFeedback | null>(null);
   /** 引导条上的实时轨迹点数（简化后）：拖的时候能看见"这一笔已经成线了"。 */
@@ -608,8 +698,7 @@ function SingleScreen({
         'relative min-h-0 w-full flex-1 border border-line bg-[#0b0d12]',
         screenCursorClass(recordMode, controlMode),
       )}
-    >
-      {frame ? (
+    >      {frame ? (
         <img
           ref={imgRef}
           /*
@@ -707,31 +796,9 @@ function SingleScreen({
         <SwipeTrail from={feedback.from} to={feedback.to} points={feedback.points} box={imageBox} />
       )}
 
-      {/* 识别框：绿=投票已确认 / 橙=待确认；坐标是引擎给的归一化值 */}
-      {detections.map((item) => {
-        const [x, y, w, h] = item.rect;
-        const tone = item.ambiguous
-          ? 'border-pending border-dashed text-pending'
-          : item.state === 'confirmed'
-            ? 'border-confirmed text-confirmed'
-            : 'border-pending text-pending';
-        return (
-          <div
-            key={item.label}
-            className={cn('pointer-events-none absolute border', tone)}
-            title={item.ambiguous ? '有多个同分候选：点击会拒绝猜位置，请提高阈值或改回原区域' : undefined}
-            style={
-              // 引擎给的是"相对画面"的归一化框：黑边不参与
-              canvasRectToPixels(imageBox, [x, y, w, h]) ?? { left: 0, top: 0, width: 0, height: 0 }
-            }
-          >
-            <span className="absolute -top-4 left-0 text-badge whitespace-nowrap">
-              {item.label} {item.score.toFixed(2)}
-              {item.ambiguous ? ' · 多个候选' : ''}
-            </span>
-          </div>
-        );
-      })}
+      {/* 识别框：绿=投票已确认 / 橙=待确认；坐标是引擎给的归一化值。
+          和 GridTile 共用 `DetectionOverlay`，避免两条分支各写一份、只修一边。 */}
+      <DetectionOverlay detections={detections} imageBox={imageBox} />
 
       {/* 录制态：十字准星 + 归一化坐标读数 */}
       {recordMode !== 'off' && pointer && (
@@ -766,103 +833,7 @@ function SingleScreen({
         </>
       )}
 
-      {/* OCR 扫描激光特效（手动点击整屏扫描或框选区域 OCR 时展示） */}
-      {scanVisual && imageBox && (
-        <div
-          data-testid="ocr-scan-effect"
-          style={
-            scanVisual.rect
-              ? (canvasRectToPixels(imageBox, scanVisual.rect) ?? {
-                  left: imageBox.left,
-                  top: imageBox.top,
-                  width: imageBox.width,
-                  height: imageBox.height,
-                })
-              : {
-                  left: imageBox.left,
-                  top: imageBox.top,
-                  width: imageBox.width,
-                  height: imageBox.height,
-                }
-          }
-          className="pointer-events-none absolute z-30 overflow-hidden border border-brand/90 bg-brand/10"
-        >
-          {/* 四角激光取景框装饰 */}
-          <span className="absolute top-0 left-0 size-2.5 border-t-2 border-l-2 border-brand" />
-          <span className="absolute top-0 right-0 size-2.5 border-t-2 border-r-2 border-brand" />
-          <span className="absolute bottom-0 left-0 size-2.5 border-b-2 border-l-2 border-brand" />
-          <span className="absolute bottom-0 right-0 size-2.5 border-b-2 border-r-2 border-brand" />
-          {/* 科技感网格底纹 */}
-          <div
-            className="absolute inset-0 opacity-25"
-            style={{
-              backgroundImage:
-                'linear-gradient(to right, rgba(77,163,255,0.28) 1px, transparent 1px), linear-gradient(to bottom, rgba(77,163,255,0.28) 1px, transparent 1px)',
-              backgroundSize: '20px 20px',
-            }}
-          />
-          {/* 上下往返扫描激光束 */}
-          <div
-            data-testid="ocr-scan-beam"
-            className="animate-ocr-scan absolute right-0 left-0 h-[2px] bg-brand shadow-[0_0_12px_2px_rgba(77,163,255,0.95)]"
-          >
-            <div className="absolute right-0 bottom-0 left-0 h-7 bg-gradient-to-t from-brand/35 to-transparent" />
-          </div>
-          {!scanVisual.rect && (
-            <button
-              type="button"
-              data-testid="ocr-scan-stop"
-              className="pointer-events-auto absolute right-2 bottom-2 flex items-center gap-1 rounded-sm border border-brand/40 bg-canvas/90 px-2 py-0.5 text-[10px] font-medium text-brand hover:bg-brand/15"
-              onClick={() => void useOcrStore.getState().cancelRecognize()}
-            >
-              <Loader2 className="size-3 animate-spin" />
-              OCR 扫描中… 点击停止
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* 点 OCR 扫描后的可点选文字框：点哪个文字框就直接取它的区域并自动填入文字名称 */}
-      {!draft &&
-        imageBox &&
-        pickBoxes.map((item, idx) => {
-          const boxStyle = canvasRectToPixels(imageBox, item.rect);
-          if (!boxStyle) {
-            return null;
-          }
-          const cleanText = sanitizeOcrLabel(item.text);
-          return (
-            <button
-              key={`${idx}-${item.text}-${item.rect[0]}-${item.rect[1]}`}
-              type="button"
-              data-testid="ocr-pick-box"
-              title={`点击选取「${cleanText}」(${Math.round(item.score * 100)}%)`}
-              onPointerDown={(event) => event.stopPropagation()}
-              onMouseDown={(event) => event.stopPropagation()}
-              onMouseUp={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                beginDraft({
-                  rect: item.rect,
-                  resolution: frame?.resolution,
-                  score: item.score,
-                  mode: 'pick',
-                  pickCenter: [item.rect[0] + item.rect[2] / 2, item.rect[1] + item.rect[3] / 2],
-                  label: cleanText,
-                  // 扫出来的文字直接带进「文字识别」表单：点一下文字框就是想认它
-                  kind: 'ocr',
-                  text: cleanText,
-                });
-              }}
-              style={boxStyle}
-              className="group absolute z-10 cursor-pointer border border-brand/80 bg-brand/15 transition-colors hover:border-2 hover:border-brand hover:bg-brand/30"
-            >
-              <span className="pointer-events-none absolute -top-4 left-0 max-w-[140px] truncate rounded-xs bg-brand px-1 py-0 text-[10px] leading-4 font-medium text-[#0b0d12] shadow-xs">
-                {cleanText}
-              </span>
-            </button>
-          );
-        })}
+      <OcrOverlay deviceId={deviceId} imageBox={imageBox} resolution={frame?.resolution ?? resolution} />
 
       {/* 框选进行中的选区 */}
       {selection && imageBox && (
@@ -906,7 +877,7 @@ function SingleScreen({
           className="pointer-events-none absolute bottom-1 left-1 flex max-w-[calc(100%-0.5rem)] flex-wrap items-center gap-x-2 rounded-sm bg-black/55 px-1.5 py-0.5 text-badge text-white/85"
         >
           <span>
-            帧 #{frame.index} · {frame.resolution[0]}×{frame.resolution[1]} · {frame.fps.toFixed(1)}fps
+            帧 #{frame.index} · {frame.resolution[0]}×{frame.resolution[1]}
           </span>
           <span className="text-white/60">
             node={frame.node ?? '-'} · tick={frame.tick}
@@ -919,6 +890,186 @@ function SingleScreen({
         <DraftForm deviceId={deviceId} anchor={selectionViewportRect(draft.rect)} />
       )}
     </div>
+  );
+}
+
+/**
+ * 识别框（模板 / 颜色 / OCR / AI）：绿=投票已确认 / 橙=待确认；引擎给的是归一化坐标。
+ *
+ * 单画面和多开瓦片共用这一份：以前多开分支漏挂，YOLO 明明有结果却一个框都看不到
+ * （`ScreenPane.grid.test.tsx` 用非空 detections 守着）。坐标按各自的 `imageBox`
+ * 换算，`object-contain` 的黑边不参与。
+ */
+function DetectionOverlay({
+  detections,
+  imageBox,
+}: {
+  detections: FrameState['detections'];
+  imageBox: Box | null;
+}): ReactNode {
+  if (!imageBox) {
+    return null;
+  }
+  return (
+    <>
+      {detections.flatMap((item) => {
+        // 同一识别器命中多个时，每个候选都画出来：用户要能看见「最近 / 第 N 个」会挑哪一个
+        const rects = item.candidates && item.candidates.length > 1 ? item.candidates : [item.rect];
+        const tone = item.ambiguous
+          ? 'border-pending border-dashed text-pending'
+          : item.state === 'confirmed'
+            ? 'border-confirmed text-confirmed'
+            : 'border-pending text-pending';
+        return rects.map((rect, index) => (
+          <div
+            key={`${item.label}-${index}`}
+            data-testid={`detection-${item.label}-${index}`}
+            className={cn('pointer-events-none absolute border', tone, index > 0 && 'opacity-70')}
+            title={
+              item.ambiguous ? '有多个同分候选：这一步没配「多目标」时会拒绝点击，不会猜位置' : undefined
+            }
+            style={canvasRectToPixels(imageBox, rect) ?? { left: 0, top: 0, width: 0, height: 0 }}
+          >
+            {index === 0 ? (
+              <span className="absolute -top-4 left-0 text-badge whitespace-nowrap">
+                {item.label} {item.score.toFixed(2)}
+                {item.ambiguous ? ' · 多个候选' : ''}
+                {rects.length > 1 ? ` · 共 ${rects.length} 个` : ''}
+              </span>
+            ) : (
+              <span className="absolute -top-4 left-0 text-[10px] whitespace-nowrap opacity-70">
+                #{index + 1}
+              </span>
+            )}
+          </div>
+        ));
+      })}
+    </>
+  );
+}
+
+/**
+ * OCR 的扫描高亮和识别文字框。
+ *
+ * OCR 状态按设备保存；多开时每个瓦片都必须订阅自己的状态，不能只画在单画面
+ * 分支里，否则扫描实际上成功了，但用户看不到选中效果，也无法点文字框生成草稿。
+ */
+function OcrOverlay({
+  deviceId,
+  imageBox,
+  resolution,
+  onActivate,
+}: {
+  deviceId: string;
+  imageBox: Box | null;
+  resolution: readonly [number, number] | null;
+  onActivate?: () => void;
+}): ReactNode {
+  const scanVisual = useOcrStore((state) =>
+    state.scanVisual?.deviceId === deviceId ? state.scanVisual : null,
+  );
+  const pickBoxes = useOcrStore((state) => state.pickBoxes[deviceId] ?? EMPTY_OCR_BOXES);
+  const draft = useUiStore((state) => state.draft);
+  const beginDraft = useUiStore((state) => state.beginDraft);
+
+  if (!imageBox) {
+    return null;
+  }
+
+  return (
+    <>
+      {scanVisual && (
+        <div
+          data-testid="ocr-scan-effect"
+          style={
+            scanVisual.rect
+              ? (canvasRectToPixels(imageBox, scanVisual.rect) ?? {
+                  left: imageBox.left,
+                  top: imageBox.top,
+                  width: imageBox.width,
+                  height: imageBox.height,
+                })
+              : {
+                  left: imageBox.left,
+                  top: imageBox.top,
+                  width: imageBox.width,
+                  height: imageBox.height,
+                }
+          }
+          className="pointer-events-none absolute z-30 overflow-hidden border border-brand/90 bg-brand/10"
+        >
+          <span className="absolute top-0 left-0 size-2.5 border-t-2 border-l-2 border-brand" />
+          <span className="absolute top-0 right-0 size-2.5 border-t-2 border-r-2 border-brand" />
+          <span className="absolute bottom-0 left-0 size-2.5 border-b-2 border-l-2 border-brand" />
+          <span className="absolute right-0 bottom-0 size-2.5 border-b-2 border-r-2 border-brand" />
+          <div
+            className="absolute inset-0 opacity-25"
+            style={{
+              backgroundImage:
+                'linear-gradient(to right, rgba(77,163,255,0.28) 1px, transparent 1px), linear-gradient(to bottom, rgba(77,163,255,0.28) 1px, transparent 1px)',
+              backgroundSize: '20px 20px',
+            }}
+          />
+          <div
+            data-testid="ocr-scan-beam"
+            className="animate-ocr-scan absolute right-0 left-0 h-[2px] bg-brand shadow-[0_0_12px_2px_rgba(77,163,255,0.95)]"
+          >
+            <div className="absolute right-0 bottom-0 left-0 h-7 bg-gradient-to-t from-brand/35 to-transparent" />
+          </div>
+          {!scanVisual.rect && (
+            <button
+              type="button"
+              data-testid="ocr-scan-stop"
+              className="pointer-events-auto absolute right-2 bottom-2 flex items-center gap-1 rounded-sm border border-brand/40 bg-canvas/90 px-2 py-0.5 text-[10px] font-medium text-brand hover:bg-brand/15"
+              onClick={() => void useOcrStore.getState().cancelRecognize()}
+            >
+              <Loader2 className="size-3 animate-spin" />
+              OCR 扫描中… 点击停止
+            </button>
+          )}
+        </div>
+      )}
+
+      {!draft &&
+        pickBoxes.map((item, idx) => {
+          const boxStyle = canvasRectToPixels(imageBox, item.rect);
+          if (!boxStyle) {
+            return null;
+          }
+          const cleanText = sanitizeOcrLabel(item.text);
+          return (
+            <button
+              key={`${idx}-${item.text}-${item.rect[0]}-${item.rect[1]}`}
+              type="button"
+              data-testid="ocr-pick-box"
+              title={`点击选取「${cleanText}」(${Math.round(item.score * 100)}%)`}
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+              onMouseUp={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onActivate?.();
+                beginDraft({
+                  rect: item.rect,
+                  resolution: resolution ?? undefined,
+                  score: item.score,
+                  mode: 'pick',
+                  pickCenter: [item.rect[0] + item.rect[2] / 2, item.rect[1] + item.rect[3] / 2],
+                  label: cleanText,
+                  kind: 'ocr',
+                  text: cleanText,
+                });
+              }}
+              style={boxStyle}
+              className="group absolute z-10 cursor-pointer border border-brand/80 bg-brand/15 transition-colors hover:border-2 hover:border-brand hover:bg-brand/30"
+            >
+              <span className="pointer-events-none absolute -top-4 left-0 max-w-[140px] truncate rounded-xs bg-brand px-1 py-0 text-[10px] leading-4 font-medium text-[#0b0d12] shadow-xs">
+                {cleanText}
+              </span>
+            </button>
+          );
+        })}
+    </>
   );
 }
 
@@ -1108,19 +1259,74 @@ function SwipeTrail({
 
 /* --------------------------------------------------------------- 多开网格 */
 
-function ScreenGrid(): ReactNode {
+function ScreenGrid({
+  onMeasure,
+}: {
+  /** 把网格的真实可用宽高回传给面板头（「自动（N）」要显示同一个结果） */
+  onMeasure: (box: { width: number; height: number }) => void;
+}): ReactNode {
   const devices = useDeviceStore((state) => state.devices);
   const activeId = useDeviceStore((state) => state.activeId);
   const setActive = useDeviceStore((state) => state.setActive);
   const frames = useSessionStore((state) => state.frames);
   const links = useSessionStore((state) => state.links);
   const connected = useMemo(() => connectedDevices(devices), [devices]);
-  const columns = connected.length >= 4 ? 2 : 1;
   const gridRef = useRef<HTMLDivElement>(null);
+  const gridColumnPreference = useUiStore((state) => state.gridColumns);
+  const [gridBox, setGridBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
+  /*
+   * 列数按**真实可用宽度**算，而不是写死 `count >= 4 ? 2 : 1`。
+   * 写死的那版会把两条竖屏手机排成一列：宽窗口里每台只在中间露一小块，左右全黑边。
+   */
+  useEffect(() => {
+    const node = gridRef.current;
+    if (!node) {
+      return;
+    }
+    const measure = (): void => {
+      setGridBox((current) =>
+        current.width === node.clientWidth && current.height === node.clientHeight
+          ? current
+          : { width: node.clientWidth, height: node.clientHeight },
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  // 面板头的「自动（N）」要和这里用同一份度量
+  useEffect(() => {
+    onMeasure(gridBox);
+  }, [gridBox, onMeasure]);
+  // 用最"宽"的那块画面比例来判断浪费：横屏设备并排反而更省黑边
+  const widestAspect = useMemo(() => {
+    const aspects = connected
+      .map((device) => {
+        const resolution = frames[device.id]?.resolution ?? device.resolution;
+        return resolution && resolution[1] > 0 ? resolution[0] / resolution[1] : 0;
+      })
+      .filter((value) => value > 0);
+    return aspects.length > 0 ? Math.max(...aspects) : 9 / 16;
+  }, [connected, frames]);
+  const columns = gridColumnsFor({
+    width: gridBox.width,
+    height: gridBox.height,
+    count: connected.length,
+    aspect: widestAspect,
+    preference: gridColumnPreference,
+  });
   // 这个订阅必须放在下面的早退**之前**：hooks 不能有条件地调用
   const draft = useUiStore((state) => state.draft);
 
-  // 每块瓦片的帧状态：多开看不到画面时，先分清是"没帧"还是"有帧但没渲染"
+  /*
+   * 每块瓦片的帧状态：多开看不到画面时，先分清是"没帧"还是"有帧但没渲染"。
+   *
+   * **必须限频**：summary 里带帧号，等于每帧一条日志（~2.7KB/s）。日志文件默认只有 40KB，
+   * 十几秒就被滚掉一份 —— 引擎崩溃的原因、stderr 的最后几行全跟着丢。
+   * 现在是"变了才写，且最快 2 秒一条"：既看得到状态变化，也留得住历史。
+   */
   useEffect(() => {
     const summary = connected
       .map((device) => {
@@ -1129,8 +1335,10 @@ function ScreenGrid(): ReactNode {
         return `${device.name}=#${frame?.index ?? '-'}/${urlKind}/${frame ? frame.fps.toFixed(0) : '0'}fps`;
       })
       .join(' ');
-    if (summary && summary !== lastGridSummary) {
+    const now = Date.now();
+    if (summary && summary !== lastGridSummary && now - lastGridLoggedAt >= GRID_LOG_MIN_GAP_MS) {
       lastGridSummary = summary;
+      lastGridLoggedAt = now;
       devLog(`多开瓦片状态: ${summary}`);
     }
   });
@@ -1166,10 +1374,11 @@ function ScreenGrid(): ReactNode {
         `minmax(0, 1fr)` 在面板矮的时候会把画面压到接近 0（"多开看不到画面"的第二形态）。
         放不下就让它自己滚（overflow-auto），宁可滚动也不要压没画面。
       */}
+
       <div
         ref={gridRef}
         data-testid="screen-grid"
-        className="grid h-full min-h-0 gap-1 overflow-auto"
+        className="grid min-h-0 flex-1 gap-1 overflow-auto"
         style={{
           gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
           gridAutoRows: 'minmax(132px, 1fr)',
@@ -1268,9 +1477,7 @@ function GridTile({
           >
             {liveName}
           </span>
-        ) : (
-          <span className="shrink-0 text-badge text-faint">{frame ? `${frame.fps}fps` : '—'}</span>
-        )}
+        ) : null}
       </button>
 
       <div
@@ -1283,8 +1490,7 @@ function GridTile({
           'relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden',
           screenCursorClass(recordMode, controlMode),
         )}
-      >
-        {frame ? (
+      >        {frame ? (
           <img
             ref={imgRef}
             // 空串会给 React 告警（浏览器会把当前页面当成图片地址再拉一遍），传 undefined
@@ -1303,6 +1509,15 @@ function GridTile({
             <span>通道 {link ? link.channel : '-'} · 若一直如此看顶部红条</span>
           </span>
         )}
+
+        <DetectionOverlay detections={frame?.detections ?? []} imageBox={imageBox} />
+
+        <OcrOverlay
+          deviceId={deviceId}
+          imageBox={imageBox}
+          resolution={frame?.resolution ?? resolution}
+          onActivate={onActivate}
+        />
 
         {/* 框选进行中的选区：和单画面同一套换算（黑边不进选区） */}
         {selection && imageBox && (
@@ -1326,7 +1541,8 @@ function GridTile({
         className="flex h-5 shrink-0 items-center justify-between border-t border-line px-2 text-badge text-faint"
       >
         <span>{formatResolution(resolution)}</span>
-        <span>{frame ? `帧 #${frame.index} · ${frame.fps.toFixed(1)}fps` : '无帧'}</span>
+        {/* 帧号留着（排查"画面不动"要看它）；帧率只在底栏显示一处 */}
+        <span>{frame ? `帧 #${frame.index}` : '无帧'}</span>
       </button>
 
       {/* 按键条跟着**当前设备**那一格走（整片网格里只有一条） */}
@@ -1339,7 +1555,29 @@ function GridTile({
 
 /** 这一帧"命中"了吗：待确认/稳定都算命中，只有 idle 是没命中。 */
 function isHit(item: RecognizerView): boolean {
-  return item.state !== 'idle';
+  return item.enabled !== false && item.state !== 'idle';
+}
+
+/** selector 自己缓存等价的快照，避免 updateLive 重建其它设备 view 导致无效通知。 */
+function createMaterialRecognizerSelector(deviceId: string) {
+  let previous = EMPTY_RECOGNIZERS;
+  return (state: Parameters<typeof graphForDevice>[0]): readonly RecognizerView[] => {
+    const next = graphForDevice(state, deviceId)?.recognizers ?? EMPTY_RECOGNIZERS;
+    if (next.length !== previous.length || next.some((item, index) => !shallow(item, previous[index]))) {
+      previous = next;
+    }
+    return previous;
+  };
+}
+
+/** 实时识别分数仅驱动素材区，不再经过画面栏外壳。 */
+function ConnectedMaterialArea({ deviceId, panelRef }: {
+  deviceId: string;
+  panelRef: React.RefObject<PanelImperativeHandle | null>;
+}): ReactNode {
+  const selectRecognizers = useMemo(() => createMaterialRecognizerSelector(deviceId), [deviceId]);
+  const recognizers = useGraphStore(selectRecognizers);
+  return <MaterialArea deviceId={deviceId} recognizers={recognizers} panelRef={panelRef} />;
 }
 
 /** 导出只为单测直接渲染这一格（不用把 <img> 量测、指针坐标那一整套搭起来）。 */
@@ -1358,15 +1596,42 @@ export function MaterialArea({
   const setFilter = useUiStore((state) => state.setMaterialFilter);
   const open = useUiStore((state) => state.materialOpen);
   const setOpen = useUiStore((state) => state.setMaterialOpen);
-  const beginOcr = useUiStore((state) => state.beginOcrRecognizerCapture);
   const rename = useSessionStore((state) => state.renameRecognizer);
   const removeRecognizer = useSessionStore((state) => state.removeRecognizer);
-  const graph = useGraphStore((state) => graphForDevice(state, deviceId));
+  const setRecognizerEnabled = useSessionStore((state) => state.setRecognizerEnabled);
+  const [toggling, setToggling] = useState<ReadonlySet<string>>(new Set());
+  const togglesInFlight = useRef(new Set<string>());
+  const workflowRoot = useSessionStore((state) => state.currentWorkflow?.root ?? '');
+  const toggleRecognizer = async (item: RecognizerView): Promise<void> => {
+    const key = `${workflowRoot}:${deviceId}:${item.label}`;
+    if (togglesInFlight.current.has(key)) return;
+    togglesInFlight.current.add(key);
+    setToggling(new Set(togglesInFlight.current));
+    try {
+      await setRecognizerEnabled(deviceId, item.label, item.enabled === false);
+    } finally {
+      togglesInFlight.current.delete(key);
+      setToggling(new Set(togglesInFlight.current));
+    }
+  };
+  // 引用关系只取结构字段：运行节点/识别分数变动不必重算素材引用。
+  const [nodes, edges, flow] = useGraphStore(useShallow((state) => {
+    const graph = graphForDevice(state, deviceId);
+    return [graph?.nodes, graph?.edges, graph?.flow] as const;
+  }));
+  const graph = useMemo(() => nodes && edges ? {
+    deviceId, nodes, edges, flow, recognizers: EMPTY_RECOGNIZERS,
+    variables: [], activeNodeId: null, pendingNodeId: null,
+  } : undefined, [deviceId, nodes, edges, flow]);
   const selectedNodeId = useGraphStore((state) => state.selectedNodeId);
   const focusNode = useGraphStore((state) => state.focusNode);
   // 正在改名的行：值 + 校验错误（null = 可以提交）
   const [editing, setEditing] = useState<{ label: string; value: string; error: string | null } | null>(null);
   const [query, setQuery] = useState('');
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiEditLabel, setAiEditLabel] = useState<string | null>(null);
+  const [galleryRevision, setGalleryRevision] = useState(0);
+  const [collapsedGroups, setCollapsedGroups] = useState({ ai: false, template: false, text: false });
   // 这次编辑是否已经了结（提交成功 / Esc 取消）：输入框卸载时浏览器还会补一个 blur，
   // 不挡住的话同一个改名会发两遍（第二遍必然报"识别器不存在"）
   const finished = useRef(false);
@@ -1379,6 +1644,13 @@ export function MaterialArea({
     );
   }, [filter, hits, recognizers, query, graph]);
   const searchActive = query.trim().length > 0;
+  // AI、图像模板（含颜色识别）、文字各自独立展开，实时分数更新不重置展开状态。
+  const aiRows = useMemo(() => rows.filter((item) => item.type === 'yolo'), [rows]);
+  const templateRows = useMemo(
+    () => rows.filter((item) => item.type === 'template' || item.type === 'color'),
+    [rows],
+  );
+  const textRows = useMemo(() => rows.filter((item) => item.type === 'ocr'), [rows]);
 
   useEffect(() => {
     const panel = panelRef.current;
@@ -1421,11 +1693,243 @@ export function MaterialArea({
     }
   };
 
+  const renderRecognizerRow = (item: RecognizerView): ReactNode => {
+    const editingThis = editing?.label === item.label;
+    const enabled = item.enabled !== false;
+    const togglePending = toggling.has(`${workflowRoot}:${deviceId}:${item.label}`);
+    const pass = enabled && item.score >= item.threshold;
+    // 谁在用它：被引用着就删不掉（引擎会拒绝），所以按钮先置灰并写清原因
+    const usage = collectRecognizerUsage(graph, item.label);
+    const blocked = usage.total > 0;
+    const usageText = describeRecognizerUsage(usage);
+    const jumpTargets = [
+      ...usage.flowSteps.map((step) => ({
+        id: step.id,
+        label: `模块 · ${step.label}（${step.id}）`,
+      })),
+      ...usage.nodes.map((node) => ({
+        id: node.id,
+        label: `界面 · ${nodeRef(node)}`,
+      })),
+    ];
+    const jumpToNextTarget = (): void => {
+      if (jumpTargets.length === 0) {
+        return;
+      }
+      const currentIdx = jumpTargets.findIndex((target) => target.id === selectedNodeId);
+      const nextTarget =
+        currentIdx >= 0 ? jumpTargets[(currentIdx + 1) % jumpTargets.length] : jumpTargets[0];
+      if (nextTarget) {
+        focusNode(nextTarget.id);
+      }
+    };
+    return (
+      <div key={item.label} className="border-b border-line/60 px-2 py-1 hover:bg-raised">
+        <div className="flex h-[30px] items-center gap-2">
+          {item.type === 'template' && item.template ? (
+            <TemplateThumb label={item.label} />
+          ) : item.type === 'ocr' && item.template ? (
+            // OCR 也存一块证据截图（spec.template）：给用户看它读的是哪一块，
+            // 右下角小图标标明"文字识别"，别和图像模板混在一起
+            <span className="relative inline-flex shrink-0" title={`OCR 识别器：读「${item.text ?? ''}」`}>
+              <TemplateThumb label={item.label} />
+              <ScanText className="absolute -right-0.5 -bottom-0.5 size-3 rounded-[2px] bg-panel p-[1px] text-brand" />
+            </span>
+          ) : (
+            <span
+              className="flex size-[26px] shrink-0 items-center justify-center rounded-sm border border-line bg-raised"
+              title={
+                item.type === 'color'
+                  ? '颜色识别器（纯色区域自动降级）'
+                  : item.type === 'ocr'
+                    ? `OCR 识别器：读「${item.text ?? ''}」`
+                    : item.type === 'yolo'
+                      ? `AI 识别器：${(item.classes ?? []).join(' / ')}`
+                      : '识别器'
+              }
+            >
+              {item.type === 'ocr' ? (
+                <ScanText className="size-3.5 text-brand" />
+              ) : item.type === 'yolo' ? (
+                <Sparkles className="size-3.5 text-brand" />
+              ) : null}
+            </span>
+          )}
+          <StatusDot
+            tone={!enabled ? 'idle' : item.state === 'confirmed' ? 'confirmed' : item.state === 'pending' ? 'pending' : 'idle'}
+          />
+          {editingThis ? (
+            <input
+              autoFocus
+              data-testid="recognizer-name-input"
+              value={editing.value}
+              aria-label={`${item.label} 改名`}
+              aria-invalid={Boolean(editing.error)}
+              title={editing.error ?? '回车保存 · Esc 取消'}
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) => setEditing({ label: item.label, value: event.target.value, error: null })}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  submitRename(item.label, editing.value);
+                } else if (event.key === 'Escape') {
+                  finished.current = true;
+                  setEditing(null);
+                }
+              }}
+              onBlur={() => {
+                if (finished.current) {
+                  finished.current = false;
+                  return;
+                }
+                submitRename(item.label, editing.value);
+              }}
+              className={cn(
+                'h-[20px] w-28 shrink-0 rounded-sm border bg-canvas px-1 text-body text-fg outline-none',
+                editing.error ? 'border-failed' : 'border-brand',
+              )}
+            />
+          ) : (
+            <button
+              type="button"
+              data-testid="recognizer-name"
+              title="双击改名（引用它的节点/边会一起改）"
+              onDoubleClick={() => beginRename(item.label)}
+              className="w-28 shrink-0 truncate text-left text-body hover:text-brand"
+            >
+              {item.label}
+            </button>
+          )}
+          <span className={cn('shrink-0 text-body', pass ? 'text-confirmed' : 'text-dim')}>
+            {enabled ? item.score.toFixed(2) : '—'}
+          </span>
+          <span className="shrink-0 text-badge text-faint">
+            {!enabled ? '已关闭' : item.state === 'confirmed' ? '稳定' : item.state === 'pending' ? '待确认' : '未命中'}
+          </span>
+          {editingThis && editing.error ? (
+            <span className="min-w-0 flex-1 truncate text-right text-badge text-failed" title={editing.error}>
+              {editing.error}
+            </span>
+          ) : (
+            <span className="flex-1" />
+          )}
+          <div className="group relative inline-flex shrink-0">
+            <button
+              type="button"
+              data-testid="recognizer-usage-badge"
+              disabled={jumpTargets.length === 0}
+              title={jumpTargets.length > 0 ? `${usageText}（点击定位到对应模块）` : usageText}
+              aria-label={usageText}
+              onClick={jumpToNextTarget}
+              className={cn(
+                'inline-flex h-5 shrink-0 items-center gap-0.5 rounded-sm border px-1 text-[10px]',
+                blocked
+                  ? 'cursor-pointer border-pending/40 bg-pending/10 text-pending hover:border-pending hover:bg-pending/20'
+                  : 'cursor-default border-line text-faint',
+              )}
+            >
+              <Link2 className="size-2.5 shrink-0" strokeWidth={2} />
+              <span>{usage.total > 0 ? usage.total : '0'}</span>
+            </button>
+            <div role="tooltip" className=" absolute right-0 bottom-full z-30 hidden pb-1 group-hover:block">
+              <div className="w-max max-w-[260px] rounded-sm border border-line bg-panel px-2 py-1.5 text-left text-[11px] leading-snug whitespace-normal text-fg shadow-md">
+                {jumpTargets.length > 0 ? (
+                  <div className="flex flex-col gap-0.5">
+                    <div className="text-[10px] text-faint">正在被引用（点击跳转）：</div>
+                    {jumpTargets.map((target) => (
+                      <button
+                        key={target.id}
+                        type="button"
+                        data-testid="recognizer-usage-target"
+                        onClick={() => focusNode(target.id)}
+                        className={cn(
+                          'truncate rounded-sm px-1 py-0.5 text-left hover:bg-raised hover:text-brand',
+                          selectedNodeId === target.id && 'bg-active text-brand',
+                        )}
+                      >
+                        {target.label}
+                      </button>
+                    ))}
+                    {usage.edges.map((edge) => (
+                      <div key={edge.id} className="px-1 py-0.5 text-dim">
+                        {edge.id}（{edge.reasons.join(' + ')}）
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-faint">{usageText}</span>
+                )}
+              </div>
+            </div>
+          </div>
+          {item.type === 'yolo' ? (
+            <button
+              type="button"
+              data-testid="recognizer-edit"
+              aria-label={`编辑 ${item.label}`}
+              title="编辑示例 / 阈值 / 分辨率 / 分块"
+              onClick={() => {
+                setAiEditLabel(item.label);
+                setAiOpen(true);
+              }}
+              className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-brand hover:bg-raised"
+            >
+              <Pencil className="size-3" strokeWidth={2} />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            data-testid="recognizer-power"
+             role="switch"
+             aria-checked={enabled}
+             aria-busy={togglePending}
+             aria-label={`${item.label} 参与识别`}
+             title={enabled ? '关闭识别：不再命中，保留素材和引用' : '开启识别：恢复参与命中判断'}
+             disabled={togglePending}
+             onClick={() => void toggleRecognizer(item)}
+             className={cn(
+               'inline-flex size-6 shrink-0 items-center justify-center rounded-sm hover:bg-raised disabled:opacity-40',
+               enabled ? 'text-brand hover:text-fg' : 'text-faint hover:text-brand',
+             )}
+           >
+             {togglePending ? <Loader2 className="size-3.5 animate-spin" /> : <Power className="size-3.5" strokeWidth={1.75} />}
+           </button>
+           <button
+             type="button"
+             data-testid="recognizer-remove"
+            disabled={blocked}
+            aria-label={`删除 ${item.label}`}
+            title={
+              blocked
+                ? `删不掉：${usageText}。先到工作流里把这些引用去掉（节点的进入条件 / 边的判断条件 / 动作目标）`
+                : `删除 ${item.label}（模板文件一起删）`
+            }
+            onClick={() => {
+              void removeRecognizer(deviceId, item.label);
+            }}
+            className={cn(
+              'inline-flex size-5 shrink-0 items-center justify-center rounded-sm',
+              blocked ? 'cursor-not-allowed text-faint opacity-50' : 'text-failed hover:bg-raised',
+            )}
+          >
+            <Trash2 className="size-3" strokeWidth={2} />
+          </button>
+        </div>
+        {item.type === 'yolo' ? (
+          <YoloExampleGallery
+            deviceId={deviceId}
+            label={item.label}
+            examplesCount={item.examplesCount}
+            revision={`${workflowRoot}:${galleryRevision}`}
+          />
+        ) : null}
+      </div>
+    );
+  };
+
   return (
     // 高度由上方分隔线决定；列表自己滚动（素材一多，撑开会把画面挤没）
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-panel">
-      <div className="flex h-7 shrink-0 items-center gap-2 px-2 text-badge text-faint">
-        {/* 标题本身就是收起/展开的开关：收起后画面拿走全部高度，这一行还留着（点得到） */}
+      <div className="flex min-h-7 shrink-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-2 py-0.5 text-badge text-faint">
         <button
           type="button"
           data-testid="material-toggle"
@@ -1440,7 +1944,7 @@ export function MaterialArea({
           素材区
         </button>
         {open ? (
-          <label className="flex min-w-0 flex-1 items-center gap-0.5 rounded-sm border border-line bg-canvas px-1">
+          <label className="flex min-w-[6rem] flex-1 items-center gap-0.5 rounded-sm border border-line bg-canvas px-1">
             <Search className="size-3 shrink-0 text-faint" strokeWidth={2} />
             <input
               data-testid="material-search"
@@ -1476,7 +1980,6 @@ export function MaterialArea({
           <span className="flex-1" />
         )}
         {open ? (
-          /* 全部 / 命中：素材一多，"这一帧谁在命中"才是要看的信息 */
           <span className="flex shrink-0 items-center overflow-hidden rounded-sm border border-line">
             {(
               [
@@ -1502,217 +2005,65 @@ export function MaterialArea({
             命中 {hits.length}
           </span>
         )}
-        {/* 文字识别是独立识别器，入口放在它自己的列表旁：不用先框一块再在表单里改「识别方式」 */}
-        {open ? (
-          <button
-            type="button"
-            data-testid="material-ocr-new"
-            title="新建文字识别（OCR）：在画面栏框住要读字的区域，填上要认的字"
-            onClick={() => beginOcr()}
-            className="flex h-[18px] shrink-0 items-center gap-0.5 rounded-sm border border-line px-1.5 text-badge text-dim hover:border-brand hover:text-brand"
-          >
-            <ScanText className="size-3" strokeWidth={2} />
-            文字
-          </button>
-        ) : null}
+        <button
+          type="button"
+          data-testid="material-ai-recognizer"
+          title="新建 AI 识别器：框一个示例，找同类目标"
+          onClick={() => {
+            setAiEditLabel(null);
+            setAiOpen(true);
+          }}
+          className="flex h-[18px] shrink-0 items-center gap-0.5 rounded-sm border border-line px-1 text-dim hover:border-brand/50 hover:text-fg"
+        >
+          <Sparkles className="size-3" strokeWidth={1.75} />
+          AI 识别
+        </button>
+        <RecordTools deviceId={deviceId} />
       </div>
       {open ? (
         <div className="min-h-0 flex-1 overflow-auto">
-          {rows.map((item) => {
-            const editingThis = editing?.label === item.label;
-            const pass = item.score >= item.threshold;
-            // 谁在用它：被引用着就删不掉（引擎会拒绝），所以按钮先置灰并写清原因
-            const usage = collectRecognizerUsage(graph, item.label);
-            const blocked = usage.total > 0;
-            const usageText = describeRecognizerUsage(usage);
-            const jumpTargets = [
-              ...usage.flowSteps.map((step) => ({
-                id: step.id,
-                label: `模块 · ${step.label}（${step.id}）`,
-              })),
-              ...usage.nodes.map((node) => ({
-                id: node.id,
-                label: `界面 · ${nodeRef(node)}`,
-              })),
-            ];
-            const jumpToNextTarget = (): void => {
-              if (jumpTargets.length === 0) {
-                return;
-              }
-              const currentIdx = jumpTargets.findIndex((target) => target.id === selectedNodeId);
-              const nextTarget =
-                currentIdx >= 0 ? jumpTargets[(currentIdx + 1) % jumpTargets.length] : jumpTargets[0];
-              if (nextTarget) {
-                focusNode(nextTarget.id);
-              }
-            };
+          {(
+            [
+              { id: 'ai', label: 'AI', items: aiRows },
+              { id: 'template', label: '模板', items: templateRows },
+              { id: 'text', label: '文字', items: textRows },
+            ] as const
+          ).map((group) => {
+            const collapsed = collapsedGroups[group.id];
             return (
-              <div key={item.label} className="border-b border-line/60 px-2 py-1 hover:bg-raised">
-                <div className="flex h-[30px] items-center gap-2">
-                  {item.type === 'template' && item.template ? (
-                    <TemplateThumb label={item.label} />
-                  ) : item.type === 'ocr' && item.template ? (
-                    // OCR 也存一块证据截图（spec.template）：给用户看它读的是哪一块，
-                    // 右下角小图标标明"文字识别"，别和图像模板混在一起
-                    <span
-                      className="relative inline-flex shrink-0"
-                      title={`OCR 识别器：读「${item.text ?? ''}」`}
-                    >
-                      <TemplateThumb label={item.label} />
-                      <ScanText className="absolute -right-0.5 -bottom-0.5 size-3 rounded-[2px] bg-panel p-[1px] text-brand" />
-                    </span>
-                  ) : (
-                    <span
-                      className="flex size-[26px] shrink-0 items-center justify-center rounded-sm border border-line bg-raised"
-                      title={
-                        item.type === 'color'
-                          ? '颜色识别器（纯色区域自动降级）'
-                          : item.type === 'ocr'
-                            ? `OCR 识别器：读「${item.text ?? ''}」`
-                            : '识别器'
-                      }
-                    >
-                      {item.type === 'ocr' ? <ScanText className="size-3.5 text-brand" /> : null}
-                    </span>
-                  )}
-                  <StatusDot
-                    tone={
-                      item.state === 'confirmed' ? 'confirmed' : item.state === 'pending' ? 'pending' : 'idle'
-                    }
+              <section
+                key={group.id}
+                data-testid={`material-group-${group.id}`}
+                aria-label={`${group.label}素材`}
+              >
+                <button
+                  type="button"
+                  data-testid={`material-group-toggle-${group.id}`}
+                  aria-expanded={!collapsed}
+                  aria-controls={`material-group-${group.id}-content`}
+                  onClick={() =>
+                    setCollapsedGroups((current) => ({ ...current, [group.id]: !current[group.id] }))
+                  }
+                  className="flex h-7 w-full items-center gap-1.5 border-b border-line/60 px-2 text-left text-badge font-medium text-dim hover:bg-raised hover:text-fg focus-visible:outline-1 focus-visible:outline-brand"
+                >
+                  <ChevronDown
+                    aria-hidden="true"
+                    className={cn('size-3 shrink-0', collapsed && '-rotate-90')}
                   />
-                  {editingThis ? (
-                    <input
-                      autoFocus
-                      data-testid="recognizer-name-input"
-                      value={editing.value}
-                      aria-label={`${item.label} 改名`}
-                      aria-invalid={Boolean(editing.error)}
-                      title={editing.error ?? '回车保存 · Esc 取消'}
-                      onFocus={(event) => event.currentTarget.select()}
-                      onChange={(event) =>
-                        setEditing({ label: item.label, value: event.target.value, error: null })
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          submitRename(item.label, editing.value);
-                        } else if (event.key === 'Escape') {
-                          finished.current = true;
-                          setEditing(null);
-                        }
-                      }}
-                      onBlur={() => {
-                        if (finished.current) {
-                          finished.current = false;
-                          return;
-                        }
-                        submitRename(item.label, editing.value);
-                      }}
-                      className={cn(
-                        'h-[20px] w-28 shrink-0 rounded-sm border bg-canvas px-1 text-body text-fg outline-none',
-                        editing.error ? 'border-failed' : 'border-brand',
-                      )}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      data-testid="recognizer-name"
-                      title="双击改名（引用它的节点/边会一起改）"
-                      onDoubleClick={() => beginRename(item.label)}
-                      className="w-28 shrink-0 truncate text-left text-body hover:text-brand"
-                    >
-                      {item.label}
-                    </button>
-                  )}
-                  <span className={cn('shrink-0 text-body', pass ? 'text-confirmed' : 'text-dim')}>
-                    {item.score.toFixed(2)}
-                  </span>
-                  <span className="shrink-0 text-badge text-faint">
-                    {item.state === 'confirmed' ? '稳定' : item.state === 'pending' ? '待确认' : '未命中'}
-                  </span>
-                  {editingThis && editing.error ? (
-                    <span
-                      className="min-w-0 flex-1 truncate text-right text-badge text-failed"
-                      title={editing.error}
-                    >
-                      {editing.error}
-                    </span>
-                  ) : (
-                    <span className="flex-1" />
-                  )}
-                  <div className="group relative inline-flex shrink-0">
-                    <button
-                      type="button"
-                      data-testid="recognizer-usage-badge"
-                      disabled={jumpTargets.length === 0}
-                      title={jumpTargets.length > 0 ? `${usageText}（点击定位到对应模块）` : usageText}
-                      aria-label={usageText}
-                      onClick={jumpToNextTarget}
-                      className={cn(
-                        'inline-flex h-5 shrink-0 items-center gap-0.5 rounded-sm border px-1 text-[10px]',
-                        blocked
-                          ? 'cursor-pointer border-pending/40 bg-pending/10 text-pending hover:border-pending hover:bg-pending/20'
-                          : 'cursor-default border-line text-faint',
-                      )}
-                    >
-                      <Link2 className="size-2.5 shrink-0" strokeWidth={2} />
-                      <span>{usage.total > 0 ? usage.total : '0'}</span>
-                    </button>
-                    <div
-                      role="tooltip"
-                      className=" absolute right-0 bottom-full z-30 hidden pb-1 group-hover:block"
-                    >
-                      <div className="w-max max-w-[260px] rounded-sm border border-line bg-panel px-2 py-1.5 text-left text-[11px] leading-snug whitespace-normal text-fg shadow-md">
-                        {jumpTargets.length > 0 ? (
-                          <div className="flex flex-col gap-0.5">
-                            <div className="text-[10px] text-faint">正在被引用（点击跳转）：</div>
-                            {jumpTargets.map((target) => (
-                              <button
-                                key={target.id}
-                                type="button"
-                                data-testid="recognizer-usage-target"
-                                onClick={() => focusNode(target.id)}
-                                className={cn(
-                                  'truncate rounded-sm px-1 py-0.5 text-left hover:bg-raised hover:text-brand',
-                                  selectedNodeId === target.id && 'bg-active text-brand',
-                                )}
-                              >
-                                {target.label}
-                              </button>
-                            ))}
-                            {usage.edges.map((edge) => (
-                              <div key={edge.id} className="px-1 py-0.5 text-dim">
-                                {edge.id}（{edge.reasons.join(' + ')}）
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-faint">{usageText}</span>
-                        )}
-                      </div>
-                    </div>
+                  <span>{group.label}</span>
+                  <span className="text-faint tabular-nums">{group.items.length}</span>
+                </button>
+                {!collapsed ? (
+                  <div id={`material-group-${group.id}-content`}>
+                    {group.items.map(renderRecognizerRow)}
+                    {group.items.length === 0 && rows.length > 0 ? (
+                      <p className="px-6 py-2 text-badge text-faint">
+                        {searchActive || filter === 'hit' ? '没有符合筛选的素材' : `暂无${group.label}素材`}
+                      </p>
+                    ) : null}
                   </div>
-                  <button
-                    type="button"
-                    data-testid="recognizer-remove"
-                    disabled={blocked}
-                    aria-label={`删除 ${item.label}`}
-                    title={
-                      blocked
-                        ? `删不掉：${usageText}。先到工作流里把这些引用去掉（节点的进入条件 / 边的判断条件 / 动作目标）`
-                        : `删除 ${item.label}（模板文件一起删）`
-                    }
-                    onClick={() => {
-                      void removeRecognizer(deviceId, item.label);
-                    }}
-                    className={cn(
-                      'inline-flex size-5 shrink-0 items-center justify-center rounded-sm',
-                      blocked ? 'cursor-not-allowed text-faint opacity-50' : 'text-failed hover:bg-raised',
-                    )}
-                  >
-                    <Trash2 className="size-3" strokeWidth={2} />
-                  </button>
-                </div>
-              </div>
+                ) : null}
+              </section>
             );
           })}
           {recognizers.length === 0 && (
@@ -1730,6 +2081,17 @@ export function MaterialArea({
           )}
         </div>
       ) : null}
+      <YoloRecognizerDialog
+        deviceId={deviceId}
+        open={aiOpen}
+        editLabel={aiEditLabel}
+        onClose={() => {
+          setAiOpen(false);
+          setAiEditLabel(null);
+          // 即使示例数量没变（换图/改框），退出编辑也要刷新素材预览。
+          setGalleryRevision((current) => current + 1);
+        }}
+      />
     </div>
   );
 }

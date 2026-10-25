@@ -1,5 +1,5 @@
 /**
- * 画布右侧弹出的「工作流全局配置」面板。
+ * 画布右侧的「工作流全局配置」竖列（贴在画布 + 控制台上方这一格的右边）。
  * 从画布右上角「⋯」菜单打开，读写当前工作流的 `graph.defaults`。
  */
 import { Eye, Hand, Move, RotateCcw, ShieldAlert, SlidersHorizontal, Timer, X } from 'lucide-react';
@@ -397,10 +397,7 @@ export function FlowGlobalSettingsDrawer(): ReactNode {
       </div>
 
       <div
-        className={cn(
-          'min-h-0 flex-1 space-y-2 overflow-y-auto p-2',
-          lockEdits && 'pointer-events-none opacity-60',
-        )}
+        className={cn('min-h-0 flex-1 overflow-y-auto p-2', lockEdits && 'pointer-events-none opacity-60')}
       >
         {tab === 'basic' ? (
           <div data-testid="global-settings-pane-basic" className="space-y-2">
@@ -439,15 +436,6 @@ export function FlowGlobalSettingsDrawer(): ReactNode {
               open={openTouch}
               onToggle={() => setOpenTouch((v) => !v)}
             >
-              <NumberFieldRow
-                label="单击按下"
-                unit="ms"
-                value={cfg.tap_duration_ms}
-                min={10}
-                max={2000}
-                step={10}
-                onChange={(val) => updateField('tap_duration_ms', val)}
-              />
               <NumberFieldRow
                 label="长按"
                 unit="ms"
@@ -588,6 +576,15 @@ export function FlowGlobalSettingsDrawer(): ReactNode {
               open={openClickHuman}
               onToggle={() => setOpenClickHuman((v) => !v)}
             >
+              <NumberFieldRow
+                label="单击按下"
+                unit="ms"
+                value={cfg.tap_duration_ms}
+                min={10}
+                max={2000}
+                step={10}
+                onChange={(val) => updateField('tap_duration_ms', val)}
+              />
               <NumberFieldRow
                 label="坐标偏移"
                 unit="px"

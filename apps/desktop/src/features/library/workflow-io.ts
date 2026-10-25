@@ -13,7 +13,14 @@ export function downloadWorkflowJson(filename: string, graph: GraphPayload): voi
   URL.revokeObjectURL(url);
 }
 
-export function pickWorkflowJsonFile(): Promise<string | null> {
+export interface PickedWorkflowJson {
+  /** 用户选的文件名（导入时用它预填工作流名） */
+  readonly name: string;
+  readonly text: string;
+}
+
+/** 选一个 graph.json：同时带回文件名，导入新工作流时能给出一个像样的默认名字。 */
+export function pickWorkflowJsonFileNamed(): Promise<PickedWorkflowJson | null> {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -25,12 +32,26 @@ export function pickWorkflowJsonFile(): Promise<string | null> {
         return;
       }
       const reader = new FileReader();
-      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+      reader.onload = () =>
+        resolve(typeof reader.result === 'string' ? { name: file.name, text: reader.result } : null);
       reader.onerror = () => resolve(null);
       reader.readAsText(file, 'utf-8');
     };
     input.click();
   });
+}
+
+export function pickWorkflowJsonFile(): Promise<string | null> {
+  return pickWorkflowJsonFileNamed().then((picked) => picked?.text ?? null);
+}
+
+/** `斗技.json` → `斗技`（导入时预填；真正校验仍由 WorkflowNameForm/引擎负责）。 */
+export function suggestedWorkflowName(fileName: string): string {
+  const base = fileName
+    .replace(/^.*[\\/]/, '')
+    .replace(/\.json$/i, '')
+    .trim();
+  return base || '导入的工作流';
 }
 
 export function parseWorkflowJson(text: string): GraphPayload {

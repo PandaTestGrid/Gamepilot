@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import platform
 import shutil
@@ -75,11 +76,17 @@ def run_pyinstaller(adb_dir: Path, scrcpy_server: Path, ocr_dir: Path) -> Path:
         "av",
         "--collect-all",
         "pymobiledevice3",
+        "--collect-all",
+        "pytun_pmd3",
         "--hidden-import",
         "gamepilot.rpc.stdio",
         *add_data(scrcpy_server, "vendor"),
         *add_data(ocr_dir, "gamepilot/assets/ppocr_v4"),
     ]
+    # 可选：装了 windows-capture（`uv sync --extra wgc`）就把 WGC 抓图通道一起打进去；
+    # 没装则引擎自动回退 PrintWindow/BitBlt，不影响运行。
+    if importlib.util.find_spec("windows_capture") is not None:
+        cmd.extend(["--collect-all", "windows_capture"])
     for name in ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll"):
         src = adb_dir / name
         if src.is_file():

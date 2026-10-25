@@ -31,6 +31,7 @@ export function KeyStepFields({
 }): ReactNode {
   const supported = supportsKeyModule(deviceKind);
   const platform = resolveKeyPlatform(params, deviceKind);
+  const isWindows = platform === 'windows';
   const options = keysForPlatform(platform);
   const primaryKeys = options.filter((item) => item.primary);
   const extraKeys = options.filter((item) => !item.primary);
@@ -70,22 +71,28 @@ export function KeyStepFields({
       onClick={(event) => event.stopPropagation()}
       data-testid="key-step-fields"
     >
-      <label className={cn('flex items-center gap-1 text-dim', compact && 'text-[11px]')}>
-        系统
-        <select
-          aria-label="按键系统"
-          data-testid="key-platform-select"
-          className={selectClass}
-          value={platform}
-          onChange={(event) => handlePlatformChange(event.target.value as KeyPlatformId)}
-        >
-          {KEY_PLATFORMS.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      {isWindows ? (
+        <p className={cn('text-[10px] leading-snug text-dim', compact && 'text-[10px]')}>
+          本机窗口键盘：点常用键，其它键从下拉选（WASD / 空格 / 功能键）
+        </p>
+      ) : (
+        <label className={cn('flex items-center gap-1 text-dim', compact && 'text-[11px]')}>
+          系统
+          <select
+            aria-label="按键系统"
+            data-testid="key-platform-select"
+            className={selectClass}
+            value={platform}
+            onChange={(event) => handlePlatformChange(event.target.value as KeyPlatformId)}
+          >
+            {KEY_PLATFORMS.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       <div
         className={cn('flex flex-wrap gap-0.5', compact && 'text-[10px]')}
@@ -100,7 +107,8 @@ export function KeyStepFields({
             data-testid={`key-option-${item.id}`}
             onClick={() => handleKeySelect(item.id)}
             className={cn(
-              'nodrag nopan flex-1 rounded-sm border px-1 py-0.5 text-center transition-colors hover:border-brand/50 hover:bg-raised',
+              'nodrag nopan rounded-sm border px-1 py-0.5 text-center transition-colors hover:border-brand/50 hover:bg-raised',
+              isWindows ? 'min-w-7 flex-none' : 'flex-1',
               currentKey === item.id ? 'border-brand bg-active text-brand' : 'border-line bg-canvas text-dim',
             )}
           >
@@ -117,7 +125,7 @@ export function KeyStepFields({
             data-testid="key-value-select"
             className={selectClass}
             value={currentKey}
-            onChange={(event) => handleKeySelect(event.target.value as SystemKeyId)}
+            onChange={(event) => handleKeySelect(event.target.value)}
           >
             {options.map((item) => (
               <option key={item.id} value={item.id}>

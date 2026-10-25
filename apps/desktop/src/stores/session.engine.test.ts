@@ -373,7 +373,7 @@ describe('前端 ↔ 引擎 联调（真实子进程 + Synthetic 测试设备）
       flow: {
         steps: [
           { id: 'trigger', type: 'manual', params: {} },
-          { id: 's_click', type: 'click', params: { by: '识别器', rec: 'logo' } },
+          { id: 's_click', type: 'click', params: { by: 'recognizer', rec: 'logo' } },
         ],
       },
     };

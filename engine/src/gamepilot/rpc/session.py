@@ -14,17 +14,21 @@ import re
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 import cv2
 
 from .. import workspace
+from ..core import yolo_component
 from ..core.flow_engine import FlowEngine
 from ..core.frame import Frame
 from ..core.geometry import Rect
 from ..core.graph import GRAPH_WRITE_LOCK, Graph
 from ..core.ocr import OCR_MANAGER
+from ..core.recognizer import YoloRecognizer
+from ..core.yolo import YOLO_MANAGER
 from ..devices.base import Controller, controller_for_scheme
 from ..devices.ios import KIND_IOS
 from ..project import Project, resolve_project
@@ -51,21 +55,44 @@ from ..protocol import (
     METHOD_OCR_LOAD,
     METHOD_OCR_RECOGNIZE,
     METHOD_OCR_STATUS,
+    METHOD_RECOGNIZER_CREATE,
+    METHOD_RECOGNIZER_DETAIL,
+    METHOD_RECOGNIZER_ENABLED,
+    METHOD_RECOGNIZER_EXAMPLE,
+    METHOD_RECOGNIZER_FRAME_AT,
+    METHOD_RECOGNIZER_FRAME_META,
+    METHOD_RECOGNIZER_FRAMES,
+    METHOD_RECOGNIZER_PREVIEW,
     METHOD_RECOGNIZER_REMOVE,
     METHOD_RECOGNIZER_RENAME,
     METHOD_RECOGNIZER_SEARCH,
     METHOD_RECOGNIZER_THRESHOLD,
+    METHOD_RECOGNIZER_UPDATE,
     METHOD_RECORD_ACTION,
     METHOD_RECORD_OCR,
     METHOD_RECORD_TEMPLATE,
+    METHOD_RECORDING_DELETE,
+    METHOD_RECORDING_FRAME_AT,
+    METHOD_RECORDING_META,
+    METHOD_RECORDING_START,
+    METHOD_RECORDING_STOP,
     METHOD_RUN_EVIDENCE,
     METHOD_RUN_RESUME,
     METHOD_RUN_START,
+    METHOD_RUN_STATUS,
     METHOD_RUN_STEP,
     METHOD_RUN_STOP,
     METHOD_TEMPLATE_IMAGE,
     METHOD_TIMELINE,
     METHOD_VARIABLE_SET,
+    METHOD_WINDOW_LIST,
+    METHOD_YOLO_ADD_MODEL,
+    METHOD_YOLO_INSTALL,
+    METHOD_YOLO_MODELS,
+    METHOD_YOLO_REMOVE,
+    METHOD_YOLO_SET_MODEL,
+    METHOD_YOLO_STATUS,
+    METHOD_YOLO_WARMUP,
     NOTIFY_DEVICE_CONNECTED,
     NOTIFY_DEVICE_CONNECTING,
     NOTIFY_DEVICE_DISCONNECTED,
@@ -73,6 +100,7 @@ from ..protocol import (
     NOTIFY_OCR_PROGRESS,
     NOTIFY_OCR_RESULT,
     NOTIFY_PROJECT_CHANGED,
+    NOTIFY_YOLO_PROGRESS,
 )
 from ..session import (
     DeviceSession,
@@ -81,6 +109,7 @@ from ..session import (
     graph_node_add,
     graph_node_remove,
     graph_node_update,
+    graph_recognizer_detail,
     graph_remove_recognizer,
     graph_rename_recognizer,
 )
@@ -157,7 +186,7 @@ def _create_controller(
 ) -> Controller:
     cls = controller_for_scheme(scheme)
     if cls is None:
-        raise ValueError(f"暂不支持该设备类型: {scheme}（当前支持 Android / iOS / macOS 窗口）")
+        raise ValueError(f"暂不支持该设备类型: {scheme}（当前支持 Android / iOS / macOS 窗口 / Windows 窗口）")
     if _ios_slot_taken(device_id, sessions):
         # 引擎进程只能有一条用户态隧道（见 devices/ios.py）：第二台起换成子进程
         from ..devices.ios_worker import IosWorkerController
@@ -190,6 +219,14 @@ def parse_device_uri(uri: str) -> tuple[str, dict[str, Any]]:
     for key in ("serial", "udid"):
         if key in query:
             options[key] = query[key]
+    # 窗口句柄统一成十进制字符串：界面列表给的是十进制，手输允许 `0x1A2B`。
+    # 不归一化的话同一个窗口会出 `windows:6700` 与 `windows:0x1a2b` 两个会话（互相顶不掉）。
+    if "hwnd" in query:
+        raw_handle = query["hwnd"].strip()
+        try:
+            options["hwnd"] = str(int(raw_handle, 0))
+        except ValueError:
+            options["hwnd"] = raw_handle
     return scheme, options
 
 
@@ -272,21 +309,24 @@ class SessionManager:
         target_key = session._root_key(target)
         if caller and caller == target_key:
             raise ValueError(f"不能调用当前正在运行的工作流「{name}」")
-        if session._root_busy(target_key):
-            raise ValueError(f"目标工作流「{name}」已经在运行，不能重复调用")
-        parent = session.runners.get(caller)
-        if parent is None:
-            raise ValueError("当前没有正在运行的工作流，不能调用子工作流")
-        session.start_run(workflow_root=target)
-        target_runner = session.runners.get(target_key)
-        if target_runner is None or not isinstance(target_runner.engine, FlowEngine):
-            if target_runner is not None:
-                session.stop_run(workflow_root=target_key)
-            raise ValueError(f"工作流「{name}」没有步骤链，不能用「调用工作流」运行")
-        if isinstance(parent.engine, FlowEngine):
-            parent.engine.wait_for_subflow(target_key)
-            with session.lock:
-                session.subflow_parent[target_key] = caller
+        with session._lifecycle_lock:
+            if session._root_busy(target_key):
+                raise ValueError(f"目标工作流「{name}」已经在运行，不能重复调用")
+            parent = session.runners.get(caller)
+            if parent is None or parent.cancelled or session._stop.is_set():
+                raise ValueError("当前没有正在运行的工作流，不能调用子工作流")
+            if session._ticking_engine is not None and parent.engine is not session._ticking_engine:
+                raise ValueError("调用方已停止，不能启动子工作流")
+            session.start_run(workflow_root=target)
+            target_runner = session.runners.get(target_key)
+            if target_runner is None or not isinstance(target_runner.engine, FlowEngine):
+                if target_runner is not None:
+                    session.stop_run(workflow_root=target_key)
+                raise ValueError(f"工作流「{name}」没有步骤链，不能用「调用工作流」运行")
+            if isinstance(parent.engine, FlowEngine):
+                parent.engine.wait_for_subflow(target_key)
+                with session.lock:
+                    session.subflow_parent[target_key] = caller
 
     def _require_project(self) -> Project:
         if not self.project.root:
@@ -321,9 +361,10 @@ class SessionManager:
             # 现有文件读不回来时**拒绝覆盖**：界面此时看到的是空画布，
             # 直接存会把那份打不开的图换成空的 —— 坏数据也是用户的数据，
             # 宁可让他先备份/删除，也不要悄悄替他"清空"。
+            existing_graph: Graph | None = None
             if os.path.exists(project.graph_path):
                 try:
-                    load_session_graph(project)
+                    existing_graph = load_session_graph(project)
                 except ValueError as error:
                     raise ValueError(
                         f"{describe_graph_error(project, error)}；"
@@ -422,9 +463,12 @@ class SessionManager:
     def _connect_locked(self, device_id: str, uri: str, scheme: str, options: dict[str, Any]) -> DeviceSession:
         existing = self.sessions.get(device_id)
         if existing is not None and existing.started:
-            if existing.capture_error is None:
+            # URI 里有输入参数（`post=global|sync|message`、`cursor=1`）：同一个窗口换了
+            # 输入方式再连，必须重建会话；直接复用会让用户以为"切了后台但没生效"。
+            same_link = not existing.source_uri or existing.source_uri == uri
+            if existing.capture_error is None and same_link:
                 return existing
-            # 点击「重试」必须真正重建坏会话，不能返回一个已经抓不到画面的旧对象。
+            # 点击「重试」/切换输入方式：都必须真正重建，不能返回旧对象。
             self.disconnect(device_id)
 
         self.emit(NOTIFY_DEVICE_CONNECTING, {"deviceId": device_id, "uri": uri, "phase": "adb 连接中…"})
@@ -439,7 +483,16 @@ class SessionManager:
             self.emit(NOTIFY_DEVICE_FAILED, {"deviceId": device_id, "uri": uri, "error": str(exc)})
             raise
 
-        session = DeviceSession(device_id, controller, self.project, self.emit)
+        # 抓图很快的设备（Windows WGC 约 3ms/帧）自带更高的循环帧率；其它设备用默认 8fps。
+        preferred_fps = float(getattr(controller, "preferred_fps", 0.0) or 0.0)
+        session = DeviceSession(
+            device_id,
+            controller,
+            self.project,
+            self.emit,
+            fps=preferred_fps if preferred_fps > 0 else 8.0,
+        )
+        session.source_uri = uri
         # 「运行子工作流」（图上的 call 动作）：后台启动目标工作流，不切当前画布；
         # caller_root 用正在 tick 的 runner（嵌套调用时不能拿 project.root）
         session.on_call_script = lambda name: self._call_workflow(
@@ -468,6 +521,10 @@ class SessionManager:
                 "uri": uri,
                 "resolution": resolution,
                 "channel": getattr(controller, "channel", "unknown"),
+                "capabilities": {
+                    "multiTouch": getattr(controller, "max_touch_points", 0) > 1,
+                    "maxTouchPoints": getattr(controller, "max_touch_points", 0),
+                },
                 "linkNote": getattr(controller, "link_note", ""),
                 "kind": getattr(controller, "kind", None),
                 # 人类可读的名字（iOS 的"wisdom (iOS 26.6.2)"、macOS 的窗口标题），
@@ -519,6 +576,27 @@ def register(server: RpcServer) -> SessionManager:
             "windows": [item.to_dict() for item in macos.list_windows()],
         }
 
+    @server.method(METHOD_WINDOW_LIST)
+    def _window_list(params: dict[str, Any]) -> dict[str, Any]:
+        """列出本机可以**绑定**的窗口（统一入口：Windows / macOS）。
+
+        返回的每一项都自带 `uri`（`Windows:///?hwnd=…` / `Mac:///?window=…`）与 `deviceId`，
+        界面点一下就能直接连接；`hwnd` / `handle` 同时给出来，手输句柄也行。
+        """
+        from ..devices import macos, windows
+
+        include_own = bool(params.get("includeOwn", False))
+        if sys.platform == "win32":
+            return windows.window_list_payload(include_own=include_own)
+        if sys.platform == "darwin":
+            return macos.window_list_payload(include_own=include_own)
+        return {
+            "platform": sys.platform,
+            "allowed": False,
+            "note": "本机窗口自动化只在 Windows / macOS 上可用",
+            "windows": [],
+        }
+
     @server.method(METHOD_DEVICE_CONNECT)
     def _connect(params: dict[str, Any]) -> dict[str, Any]:
         uri = _require_str(params, "uri")
@@ -527,6 +605,10 @@ def register(server: RpcServer) -> SessionManager:
             "deviceId": session.device_id,
             "resolution": list(session.controller.resolution),
             "channel": getattr(session.controller, "channel", "unknown"),
+            "capabilities": {
+                "multiTouch": session.controller.max_touch_points > 1,
+                "maxTouchPoints": session.controller.max_touch_points,
+            },
             # 界面用它显示设备条目（iOS 显示"wisdom (iOS 26.6.2)"、macOS 显示窗口标题）
             "name": session.controller.display_name,
             "kind": getattr(session.controller, "kind", None),
@@ -541,11 +623,7 @@ def register(server: RpcServer) -> SessionManager:
         action = params.get("action")
         if not isinstance(action, dict):
             raise ValueError("缺少 action 参数（对象，含 type 等）")
-        with session.lock:
-            if not session.running:
-                image = session.controller.screenshot()
-                session.engine.perceive(Frame(image=image, size=session.controller.resolution, index=session.index))
-            described = session.engine.run_action(action)
+        described = session.run_action(action)
         return {"ok": True, "described": described}
 
     @server.method(METHOD_DEVICE_DISCONNECT)
@@ -556,6 +634,20 @@ def register(server: RpcServer) -> SessionManager:
     @server.method(METHOD_DEVICE_STATUS)
     def _status(params: dict[str, Any]) -> dict[str, Any]:
         return manager.get(_require_str(params, "deviceId")).status()
+
+    @server.method(METHOD_RUN_STATUS)
+    def _run_status(params: dict[str, Any]) -> dict[str, Any]:
+        """Authoritative lightweight run state; never wait for execution/lifecycle I/O."""
+        session = manager.get(_require_str(params, "deviceId"))
+        with session.lock:
+            roots = [runner.root for runner in session.runners.values() if session._runner_busy(runner)]
+            return {
+                "deviceId": session.device_id,
+                "workflowRoot": session._root_key(session.project.root),
+                "runningWorkflowRoots": roots,
+                "runRevision": session._run_revision,
+                "running": bool(roots),
+            }
 
     @server.method(METHOD_DEVICE_TOUCH)
     def _touch(params: dict[str, Any]) -> dict[str, Any]:
@@ -604,6 +696,39 @@ def register(server: RpcServer) -> SessionManager:
             raise ValueError("fps 必须是数字（0 表示暂停推帧）")
         session.set_stream_fps(float(fps))
         return {"ok": True, "streamFps": session.stream_fps}
+
+    # AI dialog recordings use separate disk-backed storage, not the bounded recognizer preview history.
+    @server.method(METHOD_RECORDING_START)
+    def _recording_start(params: dict[str, Any]) -> dict[str, Any]:
+        return manager.get(_require_str(params, "deviceId")).start_recording()
+
+    @server.method(METHOD_RECORDING_STOP)
+    def _recording_stop(params: dict[str, Any]) -> dict[str, Any]:
+        return manager.get(_require_str(params, "deviceId")).stop_recording(_optional_str(params, "recordingId"))
+
+    @server.method(METHOD_RECORDING_META)
+    def _recording_meta(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        after_index = params.get("afterIndex", -1)
+        limit = params.get("limit", 100)
+        if isinstance(after_index, bool) or not isinstance(after_index, int):
+            raise ValueError("afterIndex 必须是整数帧号")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit 必须是整数")
+        return session.recording_meta(_require_str(params, "recordingId"), after_index=after_index, limit=limit)
+
+    @server.method(METHOD_RECORDING_FRAME_AT)
+    def _recording_frame_at(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        index = params.get("index")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("index 必须是整数帧号")
+        return session.recording_frame_at(_require_str(params, "recordingId"), index)
+
+    @server.method(METHOD_RECORDING_DELETE)
+    def _recording_delete(params: dict[str, Any]) -> dict[str, Any]:
+        manager.get(_require_str(params, "deviceId")).delete_recording(_require_str(params, "recordingId"))
+        return {"ok": True}
 
     @server.method(METHOD_RECORD_ACTION)
     def _record_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -691,8 +816,14 @@ def register(server: RpcServer) -> SessionManager:
             lambda graph: graph_remove_recognizer(graph, label, project_root=project.root)
         )
 
+    recognizer_edit_lock = threading.Lock()
+
     @server.method(METHOD_RECOGNIZER_RENAME)
     def _recognizer_rename(params: dict[str, Any]) -> dict[str, Any]:
+        with recognizer_edit_lock:
+            return _rename_recognizer(params)
+
+    def _rename_recognizer(params: dict[str, Any]) -> dict[str, Any]:
         """识别器改名：`{deviceId, label, to}` → `{from, to, refs, graph}`。
 
         引用会一起改（节点进入条件 / 边条件 / 动作目标 / 动作里的 $score），
@@ -702,7 +833,13 @@ def register(server: RpcServer) -> SessionManager:
         to = _require_str(params, "to")
         device_id = params.get("deviceId")
         if isinstance(device_id, str) and device_id and device_id in manager.sessions:
-            result: dict[str, Any] = manager.get(device_id).rename_recognizer(old, to)
+            selected = manager.get(device_id)
+            result: dict[str, Any] = selected.rename_recognizer(old, to)
+            updated = Graph.from_dict(result["graph"], selected.project.root, path=selected.project.graph_path)
+            from ..sessions.yolo import sync_recognizer_update
+
+            for current in list(manager.sessions.values()):
+                sync_recognizer_update(current, updated, old, result["to"])
             return result
         return manager.mutate_project_graph(lambda graph: graph_rename_recognizer(graph, old, to))
 
@@ -774,6 +911,59 @@ def register(server: RpcServer) -> SessionManager:
             search=str(params.get("search", "region")),
         )
 
+    recognizer_enabled_lock = threading.Lock()
+
+    @server.method(METHOD_RECOGNIZER_ENABLED)
+    def _recognizer_enabled(params: dict[str, Any]) -> dict[str, Any]:
+        with recognizer_enabled_lock:
+            return _set_recognizer_enabled(params)
+
+    def _set_recognizer_enabled(params: dict[str, Any]) -> dict[str, Any]:
+        label = _require_str(params, "label")
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled 必须是布尔值")
+        device_id = params.get("deviceId")
+        selected = manager.get(device_id) if isinstance(device_id, str) and device_id else None
+        workflow_root = _optional_str(params, "workflowRoot")
+        project = (
+            Project(root=os.path.realpath(os.path.abspath(os.path.expanduser(workflow_root))))
+            if workflow_root
+            else selected.project
+            if selected is not None
+            else manager._require_project()
+        )
+        with GRAPH_WRITE_LOCK:
+            graph = load_session_graph(project)
+            result = graph.set_recognizer_enabled(label, enabled)
+            graph.save()
+        root = selected._root_key(project.root) if selected is not None else os.path.realpath(project.root)
+        for session in list(manager.sessions.values()):
+            with session.lock:
+                targets = [session.graph] if session._same_root(session.project.root, root) else []
+                targets.extend(
+                    runner.graph for runner in session.runners.values() if session._same_root(runner.root, root)
+                )
+                seen: set[int] = set()
+                for live_graph in targets:
+                    if id(live_graph) in seen or label not in live_graph.specs:
+                        continue
+                    seen.add(id(live_graph))
+                    live_graph.set_recognizer_enabled(label, enabled)
+                    recognizer = live_graph.recognizers[label]
+                    if isinstance(recognizer, YoloRecognizer):
+                        recognizer.enabled_after_frame = session.index
+                engines = [session.engine, *(runner.engine for runner in session.runners.values())]
+                for engine in engines:
+                    if id(engine.graph) not in seen:
+                        continue
+                    engine.detections.pop(label, None)
+                    vote = engine._vote if isinstance(engine, FlowEngine) else engine.vote
+                    vote.update(label, False)
+                if id(session.engine.graph) in seen:
+                    session._view_snapshot = None
+        return result
+
     @server.method(METHOD_RECOGNIZER_THRESHOLD)
     def _threshold(params: dict[str, Any]) -> dict[str, Any]:
         label = _require_str(params, "label")
@@ -794,13 +984,120 @@ def register(server: RpcServer) -> SessionManager:
             return manager.get(device_id).set_recognizer_search(label, search)
         return manager.mutate_project_graph(lambda graph: graph.set_recognizer_search(label, search))
 
+    @server.method(METHOD_RECOGNIZER_DETAIL)
+    def _recognizer_detail(params: dict[str, Any]) -> dict[str, Any]:
+        label = _require_str(params, "label")
+        device_id = params.get("deviceId")
+        if isinstance(device_id, str) and device_id and device_id in manager.sessions:
+            return manager.get(device_id).recognizer_detail(label)
+        # 示例是工作流的磁盘素材，与是否连接设备无关（与 graph.get / template.image 一致）。
+        return graph_recognizer_detail(manager.project_graph(), label)
+
+    @server.method(METHOD_RECOGNIZER_UPDATE)
+    def _recognizer_update(params: dict[str, Any]) -> dict[str, Any]:
+        with recognizer_edit_lock:
+            return _update_recognizer(params)
+
+    def _update_recognizer(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        label = _require_str(params, "label")
+        spec = params.get("spec")
+        if not isinstance(spec, dict):
+            raise RuntimeError("spec 必须是对象")
+        new_label = params.get("newLabel")
+        if new_label is not None and not isinstance(new_label, str):
+            raise ValueError("newLabel 必须是字符串")
+        result = session.recognizer_update(label, spec, new_label)
+        updated = Graph.from_dict(result["graph"], session.project.root, path=session.project.graph_path)
+        from ..sessions.yolo import sync_recognizer_update
+
+        for other in list(manager.sessions.values()):
+            if other is not session:
+                sync_recognizer_update(other, updated, label, result["label"])
+        return result
+
+    @server.method(METHOD_RECOGNIZER_EXAMPLE)
+    def _recognizer_example(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        label = _require_str(params, "label")
+        rect = params.get("rect")
+        if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+            raise RuntimeError("rect 必须是 [x, y, w, h]")
+        return session.add_example(
+            label,
+            [float(value) for value in rect],
+            params.get("image"),
+        )
+
+    @server.method(METHOD_RECOGNIZER_FRAMES)
+    def _recognizer_frames(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        return {"frames": session.frame_history(int(params.get("count", 20)))}
+
+    @server.method(METHOD_RECOGNIZER_FRAME_META)
+    def _recognizer_frame_meta(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        return session.frame_meta()
+
+    @server.method(METHOD_RECOGNIZER_FRAME_AT)
+    def _recognizer_frame_at(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        # nearest 默认 false（精确命中、滚出缓冲报错）；界面回放时可传 true 容错取最近帧
+        return session.frame_at(
+            int(_require_float(params, "index")),
+            nearest=bool(params.get("nearest", False)),
+        )
+
+    @server.method(METHOD_RECOGNIZER_PREVIEW)
+    def _recognizer_preview(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        examples = params.get("examples")
+        if not isinstance(examples, list):
+            raise RuntimeError("examples 必须是数组")
+        return session.preview_yolo(
+            str(params.get("previewId") or "default"),
+            [dict(item) for item in examples if isinstance(item, dict)],
+            conf=float(params.get("conf", 0.3)),
+            iou=float(params.get("iou", 0.45)),
+            imgsz=int(params.get("imgsz", 640)),
+            tile=bool(params.get("tile", False)),
+            tile_size=int(params.get("tileSize", 640)),
+            tile_overlap=float(params.get("tileOverlap", 0.2)),
+            freeze=bool(params.get("freeze", True)),
+            roi=params.get("roi"),
+        )
+
+    @server.method(METHOD_RECOGNIZER_CREATE)
+    def _recognizer_create(params: dict[str, Any]) -> dict[str, Any]:
+        session = manager.get(_require_str(params, "deviceId"))
+        label = _require_str(params, "label")
+        spec = params.get("spec")
+        if not isinstance(spec, dict):
+            raise RuntimeError("spec 必须是对象")
+        return session.add_recognizer(label, spec)
+
     @server.method(METHOD_RUN_START)
     def _run_start(params: dict[str, Any]) -> dict[str, Any]:
         session = manager.get(_require_str(params, "deviceId"))
         step_id = params.get("stepId")
         from_step = str(step_id).strip() if step_id is not None and str(step_id).strip() else None
         workflow_root = _optional_str(params, "workflowRoot")
-        session.start_run(from_step_id=from_step, workflow_root=workflow_root)
+        # A priority stop may overtake a start waiting in the ordinary RPC pool.
+        # Recheck while holding the same lifecycle lock used by stop/start so an
+        # already superseded start cannot resurrect the stopped workflow.
+        with session._lifecycle_lock:
+            if not server.run_command_current():
+                return {"ok": True, "running": False, "superseded": True}
+            root = session._root_key(workflow_root or session.project.root)
+            previous = session.runners.get(root)
+            stop_intent = server.take_run_stop_intent()
+            if previous is not None and (
+                stop_intent or (isinstance(previous.engine, FlowEngine) and previous.engine._stop_requested.is_set())
+            ):
+                # A newer start may supersede stop after its cancellation signal.
+                # Retire that exact cancelled generation before starting afresh.
+                session.stop_run(workflow_root)
+            session.start_run(from_step_id=from_step, workflow_root=workflow_root)
         return {"ok": True, "running": True, **({"stepId": from_step} if from_step else {})}
 
     @server.method(METHOD_RUN_RESUME)
@@ -834,7 +1131,20 @@ def register(server: RpcServer) -> SessionManager:
     @server.method(METHOD_RUN_STOP)
     def _run_stop(params: dict[str, Any]) -> dict[str, Any]:
         session = manager.get(_require_str(params, "deviceId"))
-        session.stop_run(_optional_str(params, "workflowRoot"))
+        workflow_root = _optional_str(params, "workflowRoot")
+        root = session._root_key(workflow_root or session.project.root)
+        # Snapshot identities before checking the command generation: an old stop
+        # must never look up and cancel a new runner after its final token check.
+        targets = [session.runners.get(key) for key in [root, *session._subflow_descendants(root)]]
+        if not server.run_command_current():
+            return {"ok": True, "running": session.running, "superseded": True}
+        for runner in targets:
+            if runner is not None and isinstance(runner.engine, FlowEngine):
+                runner.engine.request_stop()
+        with session._lifecycle_lock:
+            if not server.run_command_current():
+                return {"ok": True, "running": session.running, "superseded": True}
+            session.stop_run(workflow_root)
         return {"ok": True, "running": session.running}
 
     @server.method(METHOD_TIMELINE)
@@ -903,6 +1213,67 @@ def register(server: RpcServer) -> SessionManager:
     def _ocr_cancel(params: dict[str, Any]) -> dict[str, Any]:
         _ = params
         return OCR_MANAGER.cancel_recognize()
+
+    # ---------------- YOLO 组件（可选下载） ----------------
+
+    @server.method(METHOD_YOLO_STATUS)
+    def _yolo_status(params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        return {"component": yolo_component.status(), "runtime": YOLO_MANAGER.status()}
+
+    @server.method(METHOD_YOLO_WARMUP)
+    def _yolo_warmup(_params: dict[str, Any]) -> dict[str, Any]:
+        return YOLO_MANAGER.warmup()
+
+    @server.method(METHOD_YOLO_MODELS)
+    def _yolo_models(params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        return YOLO_MANAGER.models()
+
+    @server.method(METHOD_YOLO_SET_MODEL)
+    def _yolo_set_model(params: dict[str, Any]) -> dict[str, Any]:
+        return YOLO_MANAGER.set_model(_require_str(params, "model"))
+
+    @server.method(METHOD_YOLO_ADD_MODEL)
+    def _yolo_add_model(params: dict[str, Any]) -> dict[str, Any]:
+        source = Path(_require_str(params, "path"))
+        if not source.is_file():
+            raise RuntimeError(f"文件不存在: {source}")
+        added = yolo_component.import_models(source)
+        return {"added": added, "models": yolo_component.list_models()}
+
+    @server.method(METHOD_YOLO_INSTALL)
+    def _yolo_install(params: dict[str, Any]) -> dict[str, Any]:
+        source = str(params.get("source") or "").strip() or yolo_component.default_source()
+        if not source:
+            raise RuntimeError(
+                "没有组件下载源：传入 source（http(s)/file:///本地 zip），或设置 GAMEPILOT_YOLO_COMPONENT_URL"
+            )
+
+        def run() -> None:
+            try:
+                result = yolo_component.install(
+                    source,
+                    on_progress=lambda payload: server.notify(NOTIFY_YOLO_PROGRESS, payload),
+                )
+                # 组件换了（版本/变体）→ 停掉旧 worker，下一次推理用新组件
+                YOLO_MANAGER.shutdown()
+                server.notify(
+                    NOTIFY_YOLO_PROGRESS,
+                    {"state": "done", "progress": 100.0, "stage": "AI 组件已就绪", "status": result},
+                )
+            except Exception as exc:  # 安装失败只通知，不影响引擎
+                logger.warning("YOLO 组件安装失败: %s", exc)
+                server.notify(NOTIFY_YOLO_PROGRESS, {"state": "error", "error": str(exc)})
+
+        threading.Thread(target=run, name="yolo-install", daemon=True).start()
+        return {"accepted": True}
+
+    @server.method(METHOD_YOLO_REMOVE)
+    def _yolo_remove(params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        YOLO_MANAGER.shutdown()
+        return yolo_component.remove()
 
     return manager
 

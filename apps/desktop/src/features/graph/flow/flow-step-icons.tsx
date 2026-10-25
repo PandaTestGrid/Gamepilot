@@ -30,6 +30,7 @@ export function FlowStepIcon({ type, ...props }: { type: string } & LucideProps)
       return <Timer {...props} />;
     case 'click':
       return <MousePointerClick {...props} />;
+    case 'touch':
     case 'hold':
       return <Hand {...props} />;
     case 'swipe':
@@ -43,6 +44,8 @@ export function FlowStepIcon({ type, ...props }: { type: string } & LucideProps)
       return <ScanEye {...props} />;
     case 'delay':
       return <Clock {...props} />;
+    case 'parallel':
+      return <Split {...props} />;
     case 'cond':
       return <GitBranch {...props} />;
     case 'else':

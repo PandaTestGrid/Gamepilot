@@ -119,4 +119,21 @@ describe('推流策略：引擎重启后旧缓存不能挡住新的 device.strea
     await vi.advanceTimersByTimeAsync(300);
     expect(frameRequests()).toBe(before);
   });
+
+  it('pollFps=0 时连事件主路也不拉帧（画面已弹到独立窗口）', async () => {
+    vi.useFakeTimers();
+    useSessionStore.setState({ ready: { [DEVICE_ID]: true } });
+
+    // 引擎照推（独立窗口在看），但本窗口不拉：只给引擎 fps，拉帧节奏给 0
+    useSessionStore.getState().setStreamPolicy(DEVICE_ID, 10, 0);
+    await flush();
+    expect(streamFpsCalls()).toEqual([10]);
+
+    // 事件到了（engine.frame 会调用 pullFrame）—— 本窗口必须一个字节都不拉
+    useSessionStore.setState({ frames: { [DEVICE_ID]: frameState(1) } });
+    await vi.advanceTimersByTimeAsync(300);
+    await flush();
+    expect(frameRequests()).toBe(0);
+  });
 });
+

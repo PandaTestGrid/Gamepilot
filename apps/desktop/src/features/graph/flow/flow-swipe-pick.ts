@@ -46,6 +46,8 @@ export async function commitSwipePick(
     to_x,
     to_y,
     duration_ms,
+    // 录制连续滑动（包括 Shift 直线）时显式保留模式；否则有 path 但旧模式为 point 时会显示回点对点。
+    ...(track ? { swipe_mode: 'track' } : {}),
     path,
     hold_ms,
   };

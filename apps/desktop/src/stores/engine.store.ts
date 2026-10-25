@@ -65,7 +65,10 @@ export const useEngineStore = create<EngineState>()((set) => {
         await engineStart();
         await applyProbe();
       } catch (error) {
-        set({ status: 'error', info: error instanceof Error ? error.message : String(error) });
+        set({
+          status: 'error',
+          info: `引擎启动失败：${error instanceof Error ? error.message : String(error)}`,
+        });
       }
     },
 
@@ -80,7 +83,10 @@ export const useEngineStore = create<EngineState>()((set) => {
         await applyProbe();
         await useDeviceStore.getState().scan();
       } catch (error) {
-        set({ status: 'error', info: error instanceof Error ? error.message : String(error) });
+        set({
+          status: 'error',
+          info: `引擎启动失败：${error instanceof Error ? error.message : String(error)}`,
+        });
       }
     },
 
@@ -92,6 +98,18 @@ export const useEngineStore = create<EngineState>()((set) => {
             ...state.notifications,
           ].slice(0, 5),
         }));
+        if (notification.method === 'engine.exited') {
+          // 引擎进程没了（自己崩了 / 被关掉）：必须马上在界面上说清楚。
+          // 不说的话，接下来每个调用只会回「引擎没在运行」这种没头没尾的错，
+          // 而"什么时候退的、为什么退"全看不出来（见 engine.rs 的 watch_engine_exit）。
+          // reason 是 Rust 给的字符串（退出状态）；别用 String() 硬转任意值（对象会变成 [object Object]）
+          const raw = notification.params.reason;
+          const reason = typeof raw === 'string' ? raw.trim() : '';
+          set({
+            status: 'error',
+            info: `引擎已退出${reason ? `（${reason}）` : ''}：点「重启引擎」重开一次`,
+          });
+        }
         if (notification.method === 'engine.ready') {
           // 握手通知里带方法表：不用额外发一次 engine.info 就能发现"旧进程"
           const methods = notification.params.methods;

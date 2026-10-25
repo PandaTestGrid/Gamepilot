@@ -88,7 +88,7 @@ export function PaneColumns(): ReactNode {
       <Panel
         id="right"
         defaultSize="26%"
-        minSize="16%"
+        minSize="12%"
         collapsible
         collapsedSize="0px"
         panelRef={rightRef}

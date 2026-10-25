@@ -35,6 +35,7 @@ import {
   workspaceList,
   workspaceRemove,
   workspaceTree,
+  type GraphPayload,
   type WorkspaceSummary,
   type WorkflowSummary,
 } from '@/lib/rpc';
@@ -44,6 +45,7 @@ import {
   copyStoredPositions,
   migrateStoredPositions,
 } from '@/lib/node-positions';
+import { useEngineStore } from '@/stores/engine.store';
 import { useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
 import { useUiStore } from '@/stores/ui.store';
@@ -67,6 +69,8 @@ export interface LibraryState {
   readonly reconcileOpenWorkflowTabs: () => void;
   /** 新建工作流并切过去（**名字必填**：界面弹输入框，v4 §2.2）。 */
   readonly createWorkflow: (name: string, description?: string) => Promise<boolean>;
+  /** 导入一份 graph.json 为新工作流（在**当前工作区**下建目录，然后写图并切过去）。 */
+  readonly importWorkflow: (name: string, graph: GraphPayload) => Promise<boolean>;
   readonly renameWorkflow: (dir: string, name: string) => Promise<boolean>;
   /** 复制（`name` 省略 = 引擎自动「<原名>-副本」）。 */
   readonly duplicateWorkflow: (dir: string, name?: string) => Promise<boolean>;
@@ -86,9 +90,22 @@ export const useLibraryStore = create<LibraryState>()((set, get) => {
     set({ workspaceRoot: tree.root, workflows: tree.workflows, error: null });
   };
 
+  /**
+   * 引擎还没起来时的失败**不进错误行**：首屏几秒里 RPC 必然被拒，
+   * 把「引擎未启动，请先调用 engine_start」挂在工作区面板上纯属噪音（而且它不会自己消失，
+   * 因为失败请求可能在引擎就绪之后才落地）。引擎就绪时那次刷新会把列表补上。
+   */
+  const reportFailure = (message: string): void => {
+    if (useEngineStore.getState().status !== 'ready' || message.includes('引擎没在运行')) {
+      devLog(`工作区暂时读不到（引擎未就绪）: ${message}`);
+      return;
+    }
+    set({ error: message });
+  };
+
   const fail = (error: unknown, what: string): false => {
     const message = error instanceof Error ? error.message : String(error);
-    set({ error: message });
+    reportFailure(message);
     devLog(`${what}: ${message}`);
     return false;
   };
@@ -98,8 +115,18 @@ export const useLibraryStore = create<LibraryState>()((set, get) => {
    * 再拉一次树（`modified` 之类的字段要跟着变）并让会话层回显当前工作流。
    */
   const reconcileOpenWorkflowTabs = (): void => {
-    const { workspaces, workflows } = get();
-    if (workspaces.length === 0 || workflows.length === 0) {
+    const { workspaces, workflows, workspaceRoot } = get();
+    // 启动时 `workspace.tree` 往往先于 `workspace.list` 回来：那一刻列表还是空的，
+    // 不能因此把 localStorage 里的标签清掉（「重启后标签全没了」就是这么来的）。
+    // 只有**确实没有任何工作区**时才清；拿不到树根时什么都不做。
+    if (!workspaceRoot) {
+      if (workspaces.length === 0) {
+        useUiStore.getState().clearOpenWorkflowTabs();
+        useGraphStore.getState().pruneWorkflowSnapshots([]);
+      }
+      return;
+    }
+    if (workflows.length === 0) {
       useUiStore.getState().clearOpenWorkflowTabs();
       useGraphStore.getState().pruneWorkflowSnapshots([]);
       return;
@@ -160,7 +187,7 @@ export const useLibraryStore = create<LibraryState>()((set, get) => {
         reconcileOpenWorkflowTabs();
       } catch (error) {
         // 引擎没起来是常态（首屏几秒），别把它当异常刷屏，只在面板里显示一行提示
-        set({ error: error instanceof Error ? error.message : String(error) });
+        reportFailure(error instanceof Error ? error.message : String(error));
       } finally {
         set({ loading: false });
       }
@@ -176,7 +203,34 @@ export const useLibraryStore = create<LibraryState>()((set, get) => {
         });
       } catch (error) {
         // 面板里显示一行提示就够了（和 refresh 一样，引擎没起来不算异常）
-        set({ error: error instanceof Error ? error.message : String(error) });
+        reportFailure(error instanceof Error ? error.message : String(error));
+      }
+    },
+
+    importWorkflow: async (name, graph) => {
+      let created = '';
+      try {
+        const result = await workflowCreate(name);
+        created = result.created;
+        set({ workflows: toWorkflowItems(result), error: null });
+        await useSessionStore.getState().syncCurrentWorkflow();
+        await graphSave(graph);
+        await get().refresh();
+        await useSessionStore.getState().syncCurrentWorkflow();
+        reconcileOpenWorkflowTabs();
+        return true;
+      } catch (error) {
+        // 建完目录但图写不进去：把刚建的空工作流删掉，别留一个打不开的壳
+        if (created) {
+          try {
+            await workflowDelete(created);
+            await useSessionStore.getState().syncCurrentWorkflow();
+            await get().refresh();
+          } catch {
+            // 清理失败也不掩盖原始错误
+          }
+        }
+        return fail(error, '导入工作流失败');
       }
     },
 

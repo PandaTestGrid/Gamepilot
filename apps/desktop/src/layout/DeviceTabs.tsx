@@ -1,21 +1,20 @@
 /**
- * 顶部条：设备标签（左）+ 布局、引擎状态（右）。
+ * 顶部条：设备标签（左）+ 引擎状态（右）。
  *
  * 多设备的核心入口（DESIGN.md §4.6）：
- *   - 每个「已连接」设备一个标签，带状态点与 fps
+ *   - 每个「已连接」设备一个标签（状态点 + 名称）；**帧率只在底栏指标行显示一处**
  *   - 点击 = 切换活动设备（状态图/事件/识别器/底栏一起跟着切）
  *   - 双击 = 在独立窗口打开该设备画面（Tauri 多窗口）
  *   - 右键菜单：断开 / 复制 URI / 独立窗口
  *
  * 它也是界面上**唯一**的顶部条：原来那条独立工具栏（品牌 / 运行 / 录制 / 设备选择器 / 多开 / 工作流）
  * 已经删掉 —— 那些入口都在就近的面板里（见 docs/DESIGN.md §4.2 A），
- * 只有「布局」与「引擎状态」没有别处可放，收到这一排的右端。
+ * 引擎状态保留在这一排右端；布局预设入口已移除，避免和现有面板布局控制重复。
  */
 import { Cable, MonitorUp, PanelBottom, PanelLeft, PanelRight, Plus, X } from 'lucide-react';
 import { type ReactNode } from 'react';
 
 import { taskName } from '@/features/graph/task-name';
-import { LayoutMenu } from '@/layout/LayoutMenu';
 import { StatusDot, ToolbarButton, VDivider, type DotTone } from '@/layout/PanelShell';
 import { deviceRunLabel } from '@/lib/flow-run-attribution';
 import { jumpToDeviceAndWorkflow } from '@/lib/jump-to-run';
@@ -38,7 +37,6 @@ export function DeviceTabs(): ReactNode {
   const setActive = useDeviceStore((state) => state.setActive);
   const disconnect = useSessionStore((state) => state.disconnect);
   // fps 必须读会话里的实时帧：device.fps 没人更新，之前标签永远显示 0fps
-  const frames = useSessionStore((state) => state.frames);
   const runningWorkflowRoots = useSessionStore((state) => state.runningWorkflowRoots);
   const markWindowed = useDeviceStore((state) => state.markWindowed);
   const toggleDevicePopover = useUiStore((state) => state.toggleDevicePopover);
@@ -90,12 +88,13 @@ export function DeviceTabs(): ReactNode {
                   <span className="max-w-[8rem] shrink-0 truncate text-badge">{liveName}</span>
                 ) : (
                   <span className="shrink-0 text-badge text-faint">
-                    {device.status === 'connected'
-                      ? `${frames[device.id]?.fps.toFixed(0) ?? '0'}fps`
-                      : device.status === 'connecting'
-                        ? '连接中…'
-                        : device.status === 'failed'
-                          ? '连接失败'
+                    {/* 帧率只在底栏那一处显示（这里以前也写一遍，一格画面同时看到三个 31fps） */}
+                    {device.status === 'connecting'
+                      ? '连接中…'
+                      : device.status === 'failed'
+                        ? '连接失败'
+                        : device.status === 'connected'
+                          ? null
                           : '未连接'}
                   </span>
                 )}
@@ -136,9 +135,6 @@ export function DeviceTabs(): ReactNode {
       </span>
       <VDivider />
       <PaneToggles />
-      <VDivider />
-      <LayoutMenu />
-      <VDivider />
       <EngineStatus />
     </div>
   );

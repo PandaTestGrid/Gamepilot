@@ -16,10 +16,10 @@ def action_to_flow_step(action: Action, *, step_id: str | None = None) -> dict[s
     sid = step_id or new_record_step_id()
     if action.type == "click":
         if action.target:
-            params: dict[str, Any] = {"by": "识别器", "rec": action.target}
+            params: dict[str, Any] = {"by": "recognizer", "rec": action.target}
         else:
             params = {
-                "by": "坐标",
+                "by": "coord",
                 "x": action.x if action.x is not None else 0.5,
                 "y": action.y if action.y is not None else 0.5,
             }

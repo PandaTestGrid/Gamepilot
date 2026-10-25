@@ -20,13 +20,22 @@ const invoke = vi.fn((_cmd: string, _args?: Record<string, unknown>): Promise<un
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: Record<string, unknown>): Promise<unknown> => invoke(cmd, args),
 }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => undefined)) }));
+
+/** `engine://event` 的 handler：`init()` 订阅之后从这里灌通知 */
+const { handlers } = vi.hoisted(() => ({ handlers: [] as Array<(event: { payload: unknown }) => void> }));
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn((_name: string, handler: (event: { payload: unknown }) => void) => {
+    handlers.push(handler);
+    return Promise.resolve(() => undefined);
+  }),
+}));
 
 // 协议版本从 rpc.ts 拿：契约一升级，这里跟着走（别手写死数字）
 const START = { pong: true, version: '0.0.1', protocol: PROTOCOL_VERSION, ts: 0 };
 
 describe('引擎 store', () => {
   beforeEach(() => {
+    handlers.length = 0;
     invoke.mockReset();
     invoke.mockImplementation((_cmd: string, args?: Record<string, unknown>) => {
       const method = args?.method;
@@ -141,5 +150,20 @@ describe('引擎 store', () => {
 
     expect(useEngineStore.getState().status).toBe('error');
     expect(useEngineStore.getState().info).toContain('未找到 engine/.venv');
+  });
+
+  it('引擎进程自己退出（engine.exited）：状态变 error，并把"怎么办"写在信息里', async () => {
+    const unlisten = await useEngineStore.getState().init();
+    expect(handlers).toHaveLength(1);
+
+    handlers[0]?.({ payload: { method: 'engine.exited', params: { reason: 'exit status: 1' } } });
+
+    const state = useEngineStore.getState();
+    // 以前这里什么都不做：界面只会回「引擎没在运行」这种没头没尾的错，日志里也没有一行
+    expect(state.status).toBe('error');
+    expect(state.info).toContain('引擎已退出');
+    expect(state.info).toContain('exit status: 1');
+    expect(state.info).toContain('重启引擎');
+    unlisten();
   });
 });

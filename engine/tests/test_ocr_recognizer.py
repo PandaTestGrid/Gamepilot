@@ -40,11 +40,14 @@ class FakeOcr:
         self.payload: dict[str, Any] | None = None
         self.error: Exception | None = None
         self.auto_complete = True
+        self.callbacks: list[Any] = []
 
     def begin(self, frame: Frame, rect: Rect | None, *, on_complete=None, **_: Any) -> dict[str, Any]:
         self.calls.append((frame, rect))
         if self.error is not None:
             raise self.error
+        if on_complete is not None:
+            self.callbacks.append(on_complete)
         if self.auto_complete and on_complete is not None:
             on_complete(self.payload or {"text": "", "score": 0.0, "items": []})
         return {"accepted": True}
@@ -115,6 +118,57 @@ def test_stale_result_is_ignored(fake_ocr: FakeOcr) -> None:
     fake_ocr.auto_complete = False
     ocr.detect(_frame(13))  # 提交但没结果
     assert ocr.detect(_frame(30)) == [], "结果太旧就当没看见"
+
+
+def test_runtime_ttl_keeps_200ms_result_despite_capture_frame_gap(
+    fake_ocr: FakeOcr, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(recognizer_module.time, "time", lambda: now[0])
+    fake_ocr.auto_complete = False
+    ocr = OcrRecognizer(label="金币", text="金币", max_age_frames=2)
+    source = _frame(1)
+    source.ts = now[0]
+    source.async_max_age_seconds = 0.5
+    assert ocr.detect(source) == []
+    # 提交后源对象即使被改写，回调也必须保留提交时刻，而非完成时刻。
+    source.ts = 2000.0
+    now[0] += 0.2
+    fake_ocr.callbacks[0]({"text": "金币", "score": 0.9, "items": []})
+    current = _frame(100)
+    current.async_max_age_seconds = 0.5
+    assert ocr.detect(current), "200ms 推理结果不能因采集跨过99帧而失效"
+    assert ocr._result_ts == 1000.0
+    now[0] = 1000.5
+    assert ocr.detect(current), "TTL 边界仍可用"
+    now[0] = 1000.501
+    assert ocr.detect(current) == [], "重复消费同一Frame也必须真实过期"
+
+
+def test_runtime_ttl_rejects_result_already_expired_when_completed(
+    fake_ocr: FakeOcr, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(recognizer_module.time, "time", lambda: 1001.0)
+    fake_ocr.auto_complete = False
+    ocr = OcrRecognizer(label="金币", text="金币")
+    source = _frame(1)
+    source.ts = 1000.0
+    source.async_max_age_seconds = 0.5
+    ocr.detect(source)
+    fake_ocr.callbacks[0]({"text": "金币", "score": 0.9, "items": []})
+    assert ocr._match(source) == [], "晚到结果不能用完成时刻重新获得TTL"
+
+
+@pytest.mark.parametrize("source_ts", [float("nan"), float("inf"), 1002.0])
+def test_runtime_ttl_rejects_invalid_source_time(
+    fake_ocr: FakeOcr, monkeypatch: pytest.MonkeyPatch, source_ts: float
+) -> None:
+    monkeypatch.setattr(recognizer_module.time, "time", lambda: 1001.0)
+    fake_ocr.payload = {"text": "金币", "score": 0.9, "items": []}
+    frame = _frame(1)
+    frame.ts = source_ts
+    frame.async_max_age_seconds = 0.5
+    assert OcrRecognizer(label="金币", text="金币").detect(frame) == []
 
 
 def test_only_one_job_in_flight(fake_ocr: FakeOcr) -> None:

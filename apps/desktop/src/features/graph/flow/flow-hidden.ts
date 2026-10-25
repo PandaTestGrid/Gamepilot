@@ -8,7 +8,13 @@ export function isImplicitLoopbreak(step: FlowStep | undefined): boolean {
 }
 
 export function isHiddenFlowMark(type: string): boolean {
-  return type === 'else' || type === 'condend' || type === 'loopend';
+  return (
+    type === 'else' ||
+    type === 'condend' ||
+    type === 'loopend' ||
+    type === 'parallelbranch' ||
+    type === 'parallelend'
+  );
 }
 
 export function isHiddenFlowStep(step: FlowStep): boolean {

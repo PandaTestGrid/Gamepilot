@@ -31,7 +31,8 @@ describe('FlowGlobalSettingsDrawer 基础 / 拟人 Tab', () => {
     expect(screen.getByTestId('global-settings-tab-basic')).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByTestId('global-settings-pane-basic')).toBeInTheDocument();
     expect(screen.getByText('步骤间隔')).toBeInTheDocument();
-    expect(screen.getByText('单击按下')).toBeInTheDocument();
+    expect(screen.getByText('动作前延迟')).toBeInTheDocument();
+    expect(screen.queryByText('单击按下')).toBeNull();
     expect(screen.queryByTestId('global-settings-pane-human')).toBeNull();
     expect(screen.queryByTestId('global-swipe-bezier')).toBeNull();
 
@@ -41,6 +42,8 @@ describe('FlowGlobalSettingsDrawer 基础 / 拟人 Tab', () => {
     expect(screen.getByTestId('global-settings-pane-human')).toBeInTheDocument();
     expect(screen.getByText('坐标偏移')).toBeInTheDocument();
     expect(screen.getByText('触点微移')).toBeInTheDocument();
+    // 按下时长是拟人参数，跟偏移 / 微移放一起
+    expect(screen.getByText('单击按下')).toBeInTheDocument();
     expect(screen.getByTestId('global-swipe-bezier')).toBeInTheDocument();
     expect(screen.queryByTestId('global-settings-pane-basic')).toBeNull();
     expect(screen.queryByText('步骤间隔')).toBeNull();

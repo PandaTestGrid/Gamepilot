@@ -53,7 +53,9 @@ function newStepsForModule(module: PaletteModule): FlowStep[] | null {
     !isKnownFlowStepType(module.type) ||
     module.type === 'condend' ||
     module.type === 'else' ||
-    module.type === 'loopend'
+    module.type === 'loopend' ||
+    module.type === 'parallelbranch' ||
+    module.type === 'parallelend'
   ) {
     return null;
   }
@@ -63,6 +65,18 @@ function newStepsForModule(module: PaletteModule): FlowStep[] | null {
   }
   if (module.type === 'loop') {
     return [head, { id: newStepId(), type: 'loopend', params: { back: head.id } }];
+  }
+  if (module.type === 'parallel') {
+    const count = Math.min(4, Math.max(2, Number(head.params?.branches ?? 2)));
+    return [
+      head,
+      ...Array.from({ length: count }, (_, n) => ({
+        id: newStepId(),
+        type: 'parallelbranch',
+        params: { parallel: head.id, branch: n + 1 },
+      })),
+      { id: newStepId(), type: 'parallelend', params: { parallel: head.id } },
+    ];
   }
   return [head];
 }

@@ -197,7 +197,7 @@
 - 前端：OCR 是**独立识别器表单**，不塞进图像模板的「点选素材」浮层（同一个浮层两种语义会让表单越来越长）：
   `draft.kind === 'ocr'` 时由 `DraftForm` 分派出 `OcrRecognizerDialog`，阈值默认 0.6、
   多出「要识别的文字」输入框 + 「包含/相等」下拉，**没填字保存按钮禁用**（引擎也会拒绝，界面先拦）。
-  入口三处：素材区标题行「文字」、详情坞录制工具「文字识别」、条件槽位的「读字」按钮；
+  入口两处：素材区头部录制工具里的「文字识别」（原来的`素材区标题行「文字」`已并进这一组）、条件槽位的「读字」按钮；
   `RecognizerView.text` 让画面栏的 OCR 条目 title 显示"读「金币」"。
 - 验证：`engine/tests/test_ocr_recognizer.py`（10 例，含"走执行器：OCR 能当 wait 的条件"）、
   `tests/test_session_mock.py` 4 例（落盘/模式/缺文字/重载后仍在）、
@@ -257,24 +257,47 @@
 
 ---
 
-## 5. `BACKLOG-W`：Windows 支持（等你有机器再开工）
+## 5. `BACKLOG-W`：Windows 支持（✅ 2026-10-22 已实现）
 
-**现状**：`engine/src/gamepilot/devices/macos.py:30` 只有一句 TODO（"换成 EnumWindows/PrintWindow/BitBlt 即可"）；`devices/__init__.py:47-54` 的扫描来源只有 android / ios / macos。
+**现状**：PC（Windows）本机窗口已经能当设备用。选窗口 → 绑定窗口句柄 → 抓该窗口画面 →
+点/拖/按键/打字都发给它；上层（设备列表、坐标归一化、录制、状态图、运行）与 Android/iOS/macOS 完全同构。
 
-**接口已就位**（这点很关键：不用改架构）：`engine/src/gamepilot/devices/base.py` 的 `Controller` 抽象（`resolution/screenshot/click/swipe/press/text/shell`）就是落点，`Mac://` 已经跑通同一套。
+**实际落地**
+1. `engine/src/gamepilot/devices/windows.py`（新，约 1300 行）：
+   - 枚举：`EnumWindows` + 进程名/标题/类名/`WS_EX_TOOLWINDOW`/DWM cloaked 过滤；窗口矩形优先
+     `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`；客户区 `GetClientRect` + `ClientToScreen`；
+   - 抓图：`PrintWindow(PW_CLIENTONLY|PW_RENDERFULLCONTENT)` → 整窗 PrintWindow 裁剪 → `BitBlt`
+     屏幕 DC → `BitBlt` 窗口 DC；全黑帧自动回退并缓存成功方式；全失败报中文排查建议；
+   - 输入：`post=global`（默认）`SendInput` + 绝对坐标（Per-Monitor DPI 感知），点前用
+     `SwitchToThisWindow`/AttachThreadInput/Alt 键/置顶四级兜底激活窗口，点后指针放回原处；
+     `post=sync` 走 `SendMessageTimeout`（WM_LBUTTON* / WM_KEY* / WM_CHAR），消息直送窗口过程，
+     不抢鼠标焦点 —— 实测 UE 游戏后台按键/鼠标移动/菜单可走通；`post=message`（PostMessage）保留作兼容档；
+     鼠标消息会沿子窗口树下钻到真正接收输入的子窗口；
+   - URI：`Windows:///?hwnd=<十进制>`（手输 `0x…` 由 `parse_device_uri` 归一化），
+     另支持 `pid/title/exe/class` 兜底；只用 stdlib ctypes，没有新增依赖（也没有 pywin32）。
+2. `devices/__init__.py`：Windows 扫描来源（非 Windows 自动返回空）；
+   `devices/macos.py` 补 `window_list_payload()` 与 `deviceId`。
+3. `protocol.py` + `rpc/session.py`：新增统一 `window.list`（Windows/macOS 共用；
+   老 `mac.windows` 保留为兼容别名），`device.connect` 支持 Windows scheme。
+4. 前端：设备弹层 Tab `mac`→`window`（Windows/macOS 通用），`WindowList.tsx`（新）负责
+   枚举/搜索/刷新/`0x` 句柄展示/手输绑定/前台·后台输入方式；`DevicePopover` 用窗口 `deviceId`
+   记录已绑定；`ui.store` 记忆分类并迁移旧值。
+5. 测试：
+   - 引擎纯逻辑 30 例（窗口过滤/句柄解析/归一化坐标/黑帧/按键表/控制器参数）+ `window.list`
+     平台分发 7 例；`tests/test_rpc_session.py` 的"未知 scheme"反例改成不存在的 `Lunar://`。
+   - 前端：`WindowList` 6 例 + `device-kinds`/`DevicePopover`/`ui.store` 更新。
+   - 手工验收：`scripts/smoke-windows-window.py`（真实引擎子进程 + Tk 测试窗口）→
+     枚举 → 绑定句柄 → 首帧非黑 → `engine.frame` 出图 → SendInput 点击真的落到窗口 →
+     `post=message` 重新绑定，**16 项检查全过**。
 
-**开工时的范围**
-1. 新增 `engine/src/gamepilot/devices/windows.py`：
-   - 设备发现：`EnumWindows` + 进程名过滤（`pywin32` 或 ctypes）；
-   - 截图：`PrintWindow`（后台窗口）/ `BitBlt`（前台）二选一，失败回退 `DXGI Desktop Duplication`；
-   - 输入：`SendInput`（坐标用 `ClientToScreen` 换算，DWM 缩放要处理）；键盘走虚拟键码；
-   - URI：`Windows:///?hwnd=<handle>`，与 `Mac:///?window=<id>` 对齐。
-2. `devices/__init__.py`：`discover()` 里按 `platform.system() == "Windows"` 注册来源。
-3. `engine/src/gamepilot/protocol.py`：新增 `win.windows`（对齐 `mac.windows`）。
-4. 前端 `apps/desktop/src/features/device/` 的设备选择器加 Windows 分组（`DeviceKind` 加 `'windows'`）。
-5. 测试：Mock 走 synthetic；真机清单（窗口截图、缩放 125%、最小化窗口）写成手动验收表。
+**还剩的风险（真实游戏尚未逐款验证）**
+- 独占全屏 DirectX 窗口抓不到（已明确报错提示改窗口化/无边框）。**已用真实 Unreal 游戏窗口
+  （SilverPalace，1280×720）做只读验证：`PrintWindow` 实时抓图成功，两帧差异 45.5（画面在动，不是黑帧/静帧）**；
+  真实游戏上的点击/按键未验证（避免干扰正在运行的游戏，留待用户实测）；
+- 带反作弊/管理员权限的游戏：UIPI 会拦输入，必须同权限运行；
+- `post=message` 对 DirectInput/原始输入游戏可能无效（这是游戏侧行为，不是通道 bug）；
+- 缩放 125%/150% 已做 DPI 感知，但未在多显示器不同缩放组合上实测。
 
-**风险提示（开工前要知道）**：很多 PC 游戏用 DirectX 独占全屏，`PrintWindow` 会黑屏；此时只能前台 `BitBlt`，会抢焦点。这是路线级选择，等有机器时先做**可行性验证**再排期。
 
 ---
 

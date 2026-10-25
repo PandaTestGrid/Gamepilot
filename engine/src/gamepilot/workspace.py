@@ -37,7 +37,16 @@ def repo_root() -> str:
 
 
 def recommended_root() -> str:
-    """面板底部「默认工作区」用的推荐目录：`<仓库根>/workspaces/默认`（可以还不存在）。"""
+    """面板底部「默认工作区」用的推荐目录。
+
+    开发态走 `<仓库根>/workspaces/默认`；
+    PyInstaller 冻结态（安装包）下 `__file__` 在临时解压目录 `_MEIxxxxxx` 里，
+    向上三层会落到 `AppData\\Local\\workspaces\\默认`，因此冻结态改用用户配置目录下的 `workspaces/默认`。
+    """
+    import sys
+
+    if getattr(sys, "frozen", False):
+        return os.path.join(config.default_config_dir(), WORKSPACE_ROOT, WORKSPACE_NAME)
     return os.path.join(repo_root(), WORKSPACE_ROOT, WORKSPACE_NAME)
 
 

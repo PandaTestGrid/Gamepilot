@@ -3,26 +3,46 @@
 from __future__ import annotations
 
 import contextlib
+import copy
+import itertools
 import random
+import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..devices.base import Controller
 from .actions import Action
-from .bezier_trajectory import execute_swipe, execute_tap
+from .bezier_trajectory import (
+    ActionCancelledError,
+    ActionDeferredError,
+    apply_point_jitter,
+    execute_swipe,
+    execute_tap,
+    generate_swipe_track,
+    generate_tap_track,
+    normalize_path,
+    resolve_click_human,
+    resolve_swipe_bezier,
+    resolve_swipe_points,
+)
 from .evidence import RunEvidence
-from .flow_model import STEP_KINDS
-from .frame import Detection, Frame
+from .flow_model import STEP_KINDS, explicit_click_target_mode
+from .frame import Detection, Frame, best_per_label
 from .graph import Graph
 from .recognizer import TemplateRecognizer, VoteFilter, perceive
+from .selection import select_rects
 from .state_machine import describe_action
+from .touch_scheduler import TouchHandle, TouchOwner, get_touch_scheduler
 from .trace import TraceBuffer, TraceEvent
 from .variables import VariableStore, VarValue, resolve_spec, resolve_value
 
 #: 单次 tick 最多推进步数
 MAX_STEPS_PER_TICK = 200
+#: 即便没有设备动作，条件/赋值/错误循环也必须及时让出采集线程。
+MAX_ADVANCE_SECONDS = 0.01
 
 
 def _as_int(value: object, fallback: int) -> int:
@@ -66,15 +86,12 @@ def _normalize_click_params(params: dict[str, Any]) -> dict[str, Any]:
 
 def _click_target_mode(params: dict[str, Any]) -> str:
     """与桌面端 `clickTargetMode` 对齐：坐标 / 随机范围 / 识别器。"""
-    by = str(params.get("by") or "").strip()
+    by = explicit_click_target_mode(params)
+    if by is not None:
+        return by
     rec = str(params.get("rec") or "").strip()
-    if by == "识别器":
-        return "recognizer"
-    # 有合法 rect 且未绑识别器 → 随机范围（须在 by=坐标 之前，否则清掉 x/y 后会误走坐标）
-    if by == "随机范围" or (_is_norm_rect(params.get("rect")) and not rec):
+    if _is_norm_rect(params.get("rect")) and not rec:
         return "region"
-    if by == "坐标":
-        return "coord"
     if rec:
         return "recognizer"
     return "coord"
@@ -84,7 +101,7 @@ def _click_target_mode(params: dict[str, Any]) -> str:
 _CONDITION_KINDS = ("wait", "cond")
 
 #: 块的收尾/分隔标记：是块结构的一部分，不参与"未接入"判定
-_BLOCK_END_KINDS = ("else", "condend", "loopend")
+_BLOCK_END_KINDS = ("else", "condend", "loopend", "parallelbranch", "parallelend")
 
 #: "做一件事"的步骤 → 引擎 Action 的类型
 _ACTION_KINDS = {"click": "click", "hold": "long_press", "swipe": "swipe", "key": "key", "text": "text"}
@@ -151,6 +168,7 @@ class _Blocking:
     started_at: float
     entered_frame: int
     stable: int = 0
+    random_wait_ms: int | None = None
 
 
 def _public_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -175,6 +193,8 @@ class FlowEngine:
     trace: TraceBuffer = field(default_factory=TraceBuffer)
     on_event: Callable[[TraceEvent], None] | None = None
     on_call: Callable[[str], None] | None = None
+    # 只保护设备动作事务；识别/证据/事件不持输入锁，手动触控不会被慢识别阻塞。
+    input_guard: Callable[[], contextlib.AbstractContextManager[None]] | None = None
 
     def __post_init__(self) -> None:
         self.steps: list[dict[str, Any]] = list((self.graph.flow or {}).get("steps") or [])
@@ -189,6 +209,22 @@ class FlowEngine:
         }
         self._loop_marks = _loop_marks(self.steps)
         self._loop_stack: list[_LoopFrame] = []
+        self._parallel_children: list[FlowEngine] = []
+        self._parallel_end = -1
+        self._parent: FlowEngine | None = None
+        self._root: FlowEngine = self
+        self._branch_path: list[int] = []
+        self._range_start = 0
+        self._range_end: int | None = None
+        self._touch_owner = TouchOwner(f"flow:{uuid.uuid4().hex}")
+        self._default_finger = 1
+        self._touch_handle: TouchHandle | None = None
+        self._assigned_finger: int | None = None
+        self._cancelled_contact = False
+        self._owner_cancelled = False
+        self._touch_step: str | None = None
+        self._action_finger = 1
+        self._perception_cache: dict[tuple[int, tuple[tuple[str, str], ...]], dict[str, Detection]] = {}
         self.cursor = 0
         self._start_cursor = 0
         self.blocking: _Blocking | None = None
@@ -207,6 +243,7 @@ class FlowEngine:
         self._pause_next = False
         # 出错重试的冷却时间点（`retry_interval_ms`）：到点之前不推进游标
         self._retry_ready_at = 0.0
+        self._stop_requested = threading.Event()
         self.result = "idle"  # idle | running | success | failure | cancelled
         # 调用子工作流时当前链挂起：不是用户暂停，也不发 flow_finished。
         # `_runner_busy` 仍算占用（不能编辑/重复启动），但不参与 tick。
@@ -233,15 +270,35 @@ class FlowEngine:
         self._last_frame: Frame | None = None
         # 整条链开始的时间：`flow_finished` 报总耗时
         self._run_started_at: float | None = None
+        # 这一步实际选中了哪些命中（多目标策略）：`action_executed` 的 extra 用它
+        self._last_selection: dict[str, Any] = {}
         self.reset_variables()
 
     def perceive(self, frame: Frame, search_overrides: dict[str, str] | None = None) -> dict[str, Detection]:
+        """跑一遍识别。搜索范围只有两个来源：步骤写了的，或默认的原区域。
+
+        模板不再带「默认搜索范围」——录制时不设，`graph.json` 里老数据的
+        `recognizers[*].search` 也不再参与，否则界面上看不到、却还在偷偷整帧搜。
+        """
         overrides = search_overrides or {}
-        self.detections = perceive(self.graph.recognizers, frame, self._vote, overrides)
-        self._detection_scope = {
-            label: overrides.get(label) or str(getattr(recognizer, "search", "region") or "region")
-            for label, recognizer in self.graph.recognizers.items()
-        }
+        scopes = {label: overrides.get(label) or "region" for label in self.graph.recognizers}
+        if self._parent is not None:
+            key = (frame.index, tuple(sorted(scopes.items())))
+            cached = self._root._perception_cache.get(key)
+            if cached is None:
+                raw = perceive(self.graph.recognizers, frame, VoteFilter(1), scopes)
+                cached = copy.deepcopy(raw)
+                self._root._perception_cache[key] = cached
+            self.detections = copy.deepcopy(cached)
+            for label, detection in self.detections.items():
+                detection.state = "confirmed" if self._vote.update(label, True) else "pending"
+            for label in self._vote.snapshot():
+                if label not in self.detections:
+                    self._vote.update(label, False)
+        else:
+            self.detections = perceive(self.graph.recognizers, frame, self._vote, scopes)
+            self._perception_cache = {(frame.index, tuple(sorted(scopes.items()))): copy.deepcopy(self.detections)}
+        self._detection_scope = dict(scopes)
         return self.detections
 
     def _step_search_scope(self, params: dict[str, Any]) -> str | None:
@@ -266,10 +323,10 @@ class FlowEngine:
         return labels
 
     def _step_search_overrides(self) -> dict[str, str]:
-        """当前这一步临时覆盖的搜索范围（`params.search` = region / full）。
+        """当前这一步声明的搜索范围（`params.search` = region / full）。
 
         搜索范围是**步骤的能力**：同一个模板，A 步可以只在录制区域找，B 步可以整帧找。
-        没写 / `auto` 时返回空表，用模板自己的默认值。
+        没写就是原区域（引擎不读模板上的历史 `search` 字段）。
         """
         if not 0 <= self.cursor < len(self.steps):
             return {}
@@ -284,28 +341,32 @@ class FlowEngine:
     def _apply_step_search(self, frame: Frame, params: dict[str, Any]) -> None:
         """进入一步时把它声明的搜索范围落到检测结果上（跨步骤同一拍也立刻生效）。
 
-        `auto`（没写）不是"什么都不做"：上一步可能是 full，这一步要回到模板默认（通常是
-        region），否则会拿上一步的整帧结果去判断本步。
+        没写不是"什么都不做"：上一步可能是 full，这一步要回到原区域，否则会拿上一步的
+        整帧结果去判断本步。
         """
         labels = self._step_search_labels(params)
         if not labels:
             return
-        search = self._step_search_scope(params)
+        target = self._step_search_scope(params) or "region"
         for label in labels:
-            target = search
-            if target is None:
-                recognizer = self.graph.recognizers.get(label)
-                target = str(getattr(recognizer, "search", "region") or "region")
             self._ensure_scope(frame, label, target)
 
     def _ensure_scope(self, frame: Frame, label: str, search: str) -> None:
         if self._detection_scope.get(label) == search:
             return
         recognizer = self.graph.recognizers.get(label)
+        if not getattr(recognizer, "enabled", True):
+            self.detections.pop(label, None)
+            self._vote.update(label, False)
+            return
         if not isinstance(recognizer, TemplateRecognizer):
             return
         hits = recognizer.detect(frame, search=search)
-        best = hits[0] if hits else None
+        if self.graph.recognizers.get(label) is not recognizer or not recognizer.enabled:
+            hits = []
+        # 这里也要打包候选：否则切到「全屏」的那一拍会丢掉多目标列表，
+        # 策略只能看到一个最高分，等于白配。
+        best = best_per_label(hits).get(label) if hits else None
         if best is None:
             self.detections.pop(label, None)
             self._vote.update(label, False)
@@ -316,6 +377,8 @@ class FlowEngine:
         self._detection_scope[label] = search
 
     def _hit(self, label: str) -> bool:
+        if not getattr(self.graph.recognizers.get(label), "enabled", True):
+            return False
         detection = self.detections.get(label)
         return detection is not None and detection.state == "confirmed"
 
@@ -352,12 +415,71 @@ class FlowEngine:
         self.variables.reset(self.graph.variables)
 
     @property
+    def uses_scheduled_touches(self) -> bool:
+        return any(
+            step.get("type") in ("parallel", "touch") or "finger" in step.get("params", {})
+            for step in self.steps
+        )
+
+    @property
+    def touch_owner(self) -> str:
+        return self._touch_owner
+
+    @property
+    def active_step_ids(self) -> list[str]:
+        if self.result != "running":
+            return []
+        children = tuple(self._parallel_children)
+        if children:
+            return [step for child in children for step in child.active_step_ids]
+        current = self.paused_at or self.current
+        return [current] if current else []
+
+    def cancel_actions(self, reason: str = "external") -> None:
+        self._owner_cancelled = True
+        owners = [self._touch_owner]
+        for owner in owners:
+            owner.cancelled.set()
+        scheduler = get_touch_scheduler(self.controller, create=False)
+        handle = self._touch_handle
+        if handle is not None and not handle.done.is_set():
+            self._emit("gesture_retry", message="触控动作已取消，继续后从头重试", extra={"reason": reason})
+        elif scheduler is not None and any(scheduler.has_contacts(owner) for owner in owners):
+            self._cancelled_contact = True
+        self._owner_cancelled = True
+        if scheduler is not None:
+            for owner in owners:
+                with contextlib.suppress(Exception):
+                    scheduler.cancel_owner(owner)
+        self._assigned_finger = None
+        if self._touch_handle is not None:
+            self._touch_handle = None
+            self._touch_step = None
+            self._announced = None
+        for child in tuple(self._parallel_children):
+            child.cancel_actions(reason)
+
+    def pause_execution(self) -> None:
+        self.paused_at = self.current
+        self.cancel_actions("pause")
+        for child in tuple(self._parallel_children):
+            child.pause_execution()
+
+    @property
     def paused(self) -> bool:
         return self.paused_at is not None
 
     def resume(self) -> None:
         """继续：清掉暂停标记，下一拍从**当前这一步**接着来。"""
         self.paused_at = None
+        if self._cancelled_contact:
+            self._finish("failure", "持续触点已取消，请从流程起点或所属并行块头重新运行")
+            return
+        if self._owner_cancelled:
+            self._touch_owner = TouchOwner(f"flow:{uuid.uuid4().hex}")
+            self._owner_cancelled = False
+        for child in tuple(self._parallel_children):
+            child.resume()
         # 被恢复的那一步自身再进入一次不算"新的一步"
         self._skip_entry = self._entries + 1
         self._pause_next = False
@@ -369,6 +491,11 @@ class FlowEngine:
 
     def start(self, from_step_id: str | None = None) -> None:
         """从头（或指定步骤）开始跑：再点一次「运行」就是**重跑一遍**（游标、断点经过记录都复位）。"""
+        self.cancel_actions("restart")
+        self._touch_owner = TouchOwner(f"flow:{uuid.uuid4().hex}")
+        self._owner_cancelled = False
+        self._cancelled_contact = False
+        self._parallel_children = []
         raw_steps = list((self.graph.flow or {}).get("steps") or [])
         self.steps = [
             step
@@ -391,6 +518,16 @@ class FlowEngine:
         self._loop_marks = _loop_marks(self.steps)
         self.cursor = 0
         if from_step_id:
+            depth = 0
+            for step in self.steps:
+                if str(step.get("id")) == from_step_id and (
+                    depth or step.get("type") in ("parallelbranch", "parallelend")
+                ):
+                    raise ValueError("不能从并行分支内部启动，请从并行块头运行")
+                if step.get("type") == "parallel":
+                    depth += 1
+                elif step.get("type") == "parallelend":
+                    depth = max(0, depth - 1)
             for index, step in enumerate(self.steps):
                 if str(step.get("id")) == from_step_id:
                     self.cursor = index
@@ -415,6 +552,7 @@ class FlowEngine:
         self.waiting = False
         self.waiting_for = None
         self.current = self.steps[self.cursor]["id"] if self.steps else None
+        self._stop_requested.clear()
         self.result = "running"
         self._run_started_at = time.monotonic()
         tail = f"从第 {self.cursor + 1} 步" if from_step_id else f"{len(self.steps)} 步"
@@ -450,13 +588,26 @@ class FlowEngine:
         self.waiting_for = None
         self._finish("failure", message)
 
+    def request_stop(self) -> None:
+        """置位并同步释放本运行触点；不等待执行锁或新的采集帧。"""
+        self._stop_requested.set()
+        self.cancel_actions("stop")
+        for child in tuple(self._parallel_children):
+            child.request_stop()
+
     def stop_execution(self) -> None:
+        self.request_stop()
         if self.result == "running":
             self._finish("cancelled", "已停止")
 
     def tick(self, frame: Frame) -> list[TraceEvent]:
         self._outbox = []
         self._last_frame = frame
+        # A queued frame must not enter expensive inference after cancellation.
+        # Stop is a control operation, not work to be serviced after YOLO/OCR.
+        if self._stop_requested.is_set():
+            self.stop_execution()
+            return self._flush()
         detections = self.perceive(frame, self._step_search_overrides())
         self.stats["ticks"] += 1
         self.trace.add_frame(frame.index, self.current, [item.to_dict() for item in detections.values()])
@@ -465,8 +616,20 @@ class FlowEngine:
         return self._flush()
 
     def _advance(self, frame: Frame) -> None:
-        for _ in range(MAX_STEPS_PER_TICK):
+        # 一拍最多执行一个设备动作：循环/相邻动作必须先让采集线程推帧，
+        # 下一拍重新识别。步数上限无法约束同步点击的耗时（100 次点击可阻塞数秒）。
+        action_performed = False
+        started = time.perf_counter()
+        for iteration in range(MAX_STEPS_PER_TICK):
+            if self._stop_requested.is_set():
+                self.stop_execution()
+                return
+            if iteration and time.perf_counter() - started >= MAX_ADVANCE_SECONDS:
+                return
             if self.result != "running" or self.paused or self.waiting:
+                return
+            if self._range_end is not None and not self._range_start <= self.cursor < self._range_end:
+                self._finish("success", "并行分支完成")
                 return
             if not 0 <= self.cursor < len(self.steps):
                 self._finish("success", "整条链跑完了")
@@ -500,6 +663,7 @@ class FlowEngine:
             if self._pause_next and self._entries > self._skip_entry:
                 self._pause_next = False
                 self.paused_at = step_id
+                self._root.cancel_actions("breakpoint")
                 self._emit("breakpoint_hit", message=f"单步：第 {self.cursor + 1} 步「{kind}」执行前暂停")
                 return
 
@@ -507,6 +671,7 @@ class FlowEngine:
             if step_id in self.breakpoints and step_id not in self._breakpoint_passed:
                 self._breakpoint_passed.add(step_id)
                 self.paused_at = step_id
+                self._root.cancel_actions("breakpoint")
                 self._emit("breakpoint_hit", message=f"断点：第 {self.cursor + 1} 步「{kind}」执行前暂停")
                 return
 
@@ -522,10 +687,27 @@ class FlowEngine:
                 self._step_started_at = time.monotonic()
                 self._capture_step(self.cursor + 1, step_id, kind, params)
 
-            if kind == "wait":
-                outcome = self._try_wait(step_id, params, frame)
-                if outcome != "ok":
+            if kind == "parallel":
+                outcome = self._try_parallel(frame, params)
+                if outcome != "done":
                     return
+                continue
+            if kind == "touch":
+                try:
+                    self._perform_touch(step_id, params)
+                except ActionDeferredError:
+                    return
+                except Exception as error:
+                    if self._handle_failure(step_id, params, str(error)) == "fail":
+                        return
+                    continue
+            elif kind == "wait":
+                outcome = self._try_wait(step_id, params, frame)
+                if outcome in ("wait", "fail"):
+                    return
+                if outcome != "ok":
+                    # 出错策略已经推进/跳转游标，或要求重新等待：不要再按成功路径推进一次。
+                    continue
             elif kind == "delay":
                 if self._try_delay(step_id, params, frame):
                     return
@@ -559,7 +741,7 @@ class FlowEngine:
                             + ("走「否则」这一支" if else_index is not None else "跳过这一块")
                         ),
                     )
-                    if params.get("_loopRepeat") == "then":
+                    if params.get("_loopRepeat") == "then" and not self._has_explicit_edges():
                         else_empty = else_index is None or else_index + 1 >= end_index
                         if else_empty:
                             if not self._repeat_loop_and_jump(params):
@@ -575,7 +757,7 @@ class FlowEngine:
                     self._announced = None
                     continue
                 self.blocking = None
-                if params.get("_loopRepeat") == "else":
+                if params.get("_loopRepeat") == "else" and not self._has_explicit_edges():
                     else_index, end_index = self._cond_branches.get(self.cursor, (None, -1))
                     then_end = else_index if else_index is not None else end_index
                     if then_end == self.cursor + 1:
@@ -672,22 +854,58 @@ class FlowEngine:
                 self._announced = None
                 continue
             elif kind in _ACTION_KINDS:
-                # 若已在等待本步骤的动作后延迟，只需检查动作后延迟是否结束
-                if self.blocking is not None and self.blocking.step_id == f"{step_id}:post":
+                if action_performed:
+                    return
+                # 一个动作要跨好几拍走完「等命中 → 动作前延迟 → 动作 → 动作后延迟」。
+                # 已经进入哪一段，这一拍就只推进那一段：以前只认 `:post`，其余情况都会
+                # 重新调 `_try_wait_action_target()`，用 `:match` 把正在走的 `:pre` 顶掉
+                # （`_blocking_for` 按 step_id 换槽），执行前延迟永远走不完 —— 表现就是
+                # 「设了 100ms 匹配等待却一直卡在这一步，直到目标出现」。
+                phase = str(self.blocking.step_id) if self.blocking is not None else ""
+                if phase == f"{step_id}:post":
+                    # 已在等动作后延迟：只检查它是否结束（动作已经做过，不能再点一次）
                     if self._try_step_phase_delay(f"{step_id}:post", self._resolve_post_and_interval_ms(params), frame):
                         return
                 else:
-                    # 1) 若是识别器定位的动作，未命中时先按模板匹配等待时间（默认 20s）跨帧等待
-                    match_wait = self._try_wait_action_target(step_id, kind, params, frame)
-                    if match_wait == "wait":
-                        return
+                    if phase != f"{step_id}:pre" and self._touch_step != step_id:
+                        # 1) 若是识别器定位的动作，未命中时先按模板匹配等待时间（默认 20s）跨帧等待
+                        match_wait = self._try_wait_action_target(step_id, kind, params, frame)
+                        if match_wait == "wait":
+                            return
+                        if match_wait == "timeout":
+                            # 等命中超时就是这一步的结论：不能再走动作前延迟去点一个没命中的
+                            # 目标（否则「匹配等待 100ms」实际要多等一个执行前延迟，报错也会
+                            # 变成「目标当前没有命中，无法定位」，看不出是等超时）。
+                            label = str(params.get("rec") or "").strip()
+                            timeout_ms = self._resolve_match_timeout_ms(params, default_fallback=20000)
+                            if (
+                                self._handle_failure(
+                                    step_id,
+                                    params,
+                                    f"等待「{label}」超时（{timeout_ms}ms）："
+                                    f"目标当前没有命中 · {self._best_score_text(label)}",
+                                )
+                                == "fail"
+                            ):
+                                return
+                            continue
 
                     # 2) 动作前延迟（pre_delay_ms / pre_action_delay_ms）
-                    if self._try_step_phase_delay(f"{step_id}:pre", self._resolve_pre_delay_ms(params), frame):
+                    if self._touch_step != step_id and self._try_step_phase_delay(
+                        f"{step_id}:pre", self._resolve_pre_delay_ms(params), frame
+                    ):
                         return
 
                     # 3) 执行本步动作
-                    ok, message = self._perform_step(step_id, kind, params)
+                    try:
+                        ok, message = self._perform_step(step_id, kind, params)
+                    except ActionDeferredError:
+                        # 手动手势抢先占用了输入通道；不走出错策略，下帧重新识别/定位。
+                        return
+                    action_performed = True
+                    if self._stop_requested.is_set():
+                        self.stop_execution()
+                        return
                     if not ok:
                         if self._handle_failure(step_id, params, message) == "fail":
                             return
@@ -720,6 +938,14 @@ class FlowEngine:
 
     def _cursor_after_disabled_block(self, kind: str, index: int) -> int:
         """停用循环/条件头 = 整块不跑，游标落到对应结束标记之后。"""
+        if kind == "parallel":
+            owner = self.steps[index]["id"]
+            for target in range(index + 1, len(self.steps)):
+                if (
+                    self.steps[target].get("type") == "parallelend"
+                    and self.steps[target].get("params", {}).get("parallel") == owner
+                ):
+                    return target + 1
         if kind == "loop":
             meta = self._loop_marks.get(index)
             if meta is not None:
@@ -755,6 +981,14 @@ class FlowEngine:
             self._loop_stack.append(
                 _LoopFrame(loop_index=loop_index, body_start=body_start, remaining=count, total=count)
             )
+
+    def _has_explicit_edges(self) -> bool:
+        """Authored edges make branch tails converge naturally, not implicitly break.
+
+        `_loopRepeat` is legacy layout metadata, never a break instruction in
+        an edge-authored graph. Explicit loopbreak/end steps remain authoritative.
+        """
+        return any(isinstance((step.get("params") or {}).get("_out"), list) for step in self.steps)
 
     def _repeat_loop_and_jump(self, params: dict[str, Any]) -> bool:
         """条件的「这一支再循环」/「另一支结束」：目标循环写进 `_loopRepeatLoop`。
@@ -797,6 +1031,214 @@ class FlowEngine:
         self.cursor = loop_end + 1
         return True
 
+    def _try_parallel(self, frame: Frame, params: dict[str, Any]) -> str:
+        if not self._parallel_children:
+            owner = self.steps[self.cursor]["id"]
+            markers = []
+            end = -1
+            for index in range(self.cursor + 1, len(self.steps)):
+                step = self.steps[index]
+                if step.get("params", {}).get("parallel") != owner:
+                    continue
+                if step.get("type") == "parallelbranch":
+                    markers.append(index)
+                elif step.get("type") == "parallelend":
+                    end = index
+                    break
+            if end < 0 or len(markers) != params.get("branches", 2):
+                self._finish("failure", "并行块边界不完整")
+                return "failed"
+            if sum(1 for _ in self._root._all_engines()) + len(markers) > 32:
+                self._finish("failure", "并行嵌套超过执行分支上限")
+                return "failed"
+            self._parallel_end = end
+            for number, (start, limit) in enumerate(zip(markers, [*markers[1:], end], strict=True), 1):
+                child = FlowEngine(self.graph, self.controller, input_guard=self.input_guard)
+                child.start()
+                child._outbox = []
+                child._parent = self
+                child.breakpoints = self._root.breakpoints
+                child._root = self._root
+                child._stop_requested = self._root._stop_requested
+                child._branch_path = [*self._branch_path, number]
+                child.steps = self.steps
+                child.variables = self.variables
+                child.evidence = self.evidence
+                child.cursor = start + 1
+                child._range_start = start + 1
+                child._range_end = limit
+                child.current = self.steps[start + 1]["id"] if start + 1 < limit else None
+                child._default_finger = number
+                self._parallel_children.append(child)
+                if self._root._stop_requested.is_set() or self._root.paused:
+                    child.cancel_actions("stop")
+                    return "failed"
+        for child in tuple(self._parallel_children):
+            if child.result == "running":
+                child._last_frame = frame
+                child.perceive(frame, child._step_search_overrides())
+                if not child.paused:
+                    child._advance(frame)
+                if child.paused:
+                    self._root.paused_at = child.paused_at
+                    self._root.cancel_actions("breakpoint")
+                    return "waiting"
+            if params.get("mode", "all") == "all" and child.result in ("failure", "cancelled"):
+                self._finish("failure", "并行分支失败")
+                return "failed"
+            if params.get("mode", "all") == "any" and child.result == "success":
+                break
+        outcomes = [child.result for child in self._parallel_children]
+        success = (
+            all(result == "success" for result in outcomes)
+            if params.get("mode", "all") == "all"
+            else "success" in outcomes
+        )
+        if success:
+            for child in self._parallel_children:
+                child.cancel_actions("join")
+            self._parallel_children = []
+            self._emit_step_finished("并行块完成")
+            self._announced = None
+            self.cursor = self._parallel_end + 1
+            return "done"
+        if all(result != "running" for result in outcomes):
+            self._finish("failure", "所有并行分支失败")
+            return "failed"
+        return "waiting"
+
+    def _all_engines(self) -> list[FlowEngine]:
+        return [self, *(engine for child in tuple(self._parallel_children) for engine in child._all_engines())]
+
+    def _poll_touch(self, step_id: str) -> bool:
+        handle = self._touch_handle
+        if handle is None or self._touch_step != step_id:
+            return False
+        if not handle.done.is_set():
+            raise ActionDeferredError("触控动作进行中")
+        self._touch_handle = None
+        self._touch_step = None
+        if handle.error is not None:
+            self._touch_owner = TouchOwner(f"flow:{uuid.uuid4().hex}")
+            self._assigned_finger = None
+            raise RuntimeError(str(handle.error))
+        if handle.cancelled:
+            self._emit("gesture_retry", message="触控动作已取消，从头重试")
+            return False
+        return True
+
+    def _finger_for(self, params: dict[str, Any]) -> int:
+        explicit = params.get("finger")
+        if explicit is not None:
+            if not isinstance(explicit, int) or isinstance(explicit, bool) or not 1 <= explicit <= 10:
+                raise ValueError("finger 必须是 1..10 的整数")
+            self._assigned_finger = explicit
+            return explicit
+        scheduler = get_touch_scheduler(self.controller)
+        assert scheduler is not None
+        self._assigned_finger = scheduler.allocate_finger(
+            self._touch_owner, self._assigned_finger or self._default_finger
+        )
+        return self._assigned_finger
+
+    def _submit_touch(
+        self,
+        step_id: str,
+        params: dict[str, Any],
+        events: list[tuple[float, str, float, float]],
+        *,
+        owner: TouchOwner | None = None,
+    ) -> None:
+        scheduler = get_touch_scheduler(self.controller)
+        assert scheduler is not None
+        finger = int(params["finger"]) if owner is not None else self._finger_for(params)
+        owner = owner if owner is not None else self._touch_owner
+        guard = self.input_guard() if self.input_guard is not None else contextlib.nullcontext()
+        with guard:
+            if self._stop_requested.is_set():
+                raise ActionCancelledError("设备动作已取消")
+            self._touch_handle = scheduler.submit(owner, finger, events)
+        self._touch_step = step_id
+        raise ActionDeferredError("触控动作进行中")
+
+    def _perform_parallel_action(self, step_id: str, spec: dict[str, Any], params: dict[str, Any]) -> str:
+        if self._poll_touch(step_id):
+            self.stats["actions"] += 1
+            return describe_action(spec)
+        resolved = resolve_spec(dict(spec), self.variables, self._scores())
+        action = Action.parse(resolved)
+        defaults = dict(self.graph.defaults)
+        if action.type == "swipe":
+            start = self._resolve_point(action, action.target, action.x, action.y)
+            end = self._resolve_point(action, action.to_target, action.to_x, action.to_y, allow_auto=True)
+            duration = max(0.05, action.duration_ms / 1000)
+            config = resolve_swipe_bezier(resolved, defaults)
+            path = normalize_path(action.path)
+            if path is None:
+                path = (
+                    generate_swipe_track(start, end, duration=duration, config=config)
+                    if config.enabled
+                    else resolve_swipe_points(start, end, duration, None)
+                )
+            lengths = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in itertools.pairwise(path)]
+            total = sum(lengths)
+            events = [(0.0, "down", *path[0])]
+            elapsed = 0.0
+            for index, point in enumerate(path[1:]):
+                elapsed += duration * lengths[index] / total if total else duration / max(1, len(path) - 1)
+                events.append((elapsed, "move", *point))
+            events.append((duration + max(0, action.hold_ms) / 1000, "up", *path[-1]))
+        else:
+            points = self._resolve_points(action, action.target, action.x, action.y)
+            config_click = resolve_click_human(resolved, defaults)
+            duration_ms = max(50, action.duration_ms) if action.type == "long_press" else config_click.duration_ms
+            duration_ms = max(10, duration_ms)
+            if config_click.delay_jitter_ms > 0:
+                duration_ms = max(
+                    10, round(duration_ms + random.uniform(-config_click.delay_jitter_ms, config_click.delay_jitter_ms))
+                )
+            duration = duration_ms / 1000
+            events = []
+            offset = 0.0
+            for point in points:
+                landed = apply_point_jitter(point, config_click.jitter_px)
+                for _ in range(2 if action.type == "double_click" else 1):
+                    path = (
+                        generate_tap_track(landed, duration=duration, micro_px=config_click.micro_px)
+                        if config_click.micro_px > 0
+                        else [landed]
+                    )
+                    events.append((offset, "down", *path[0]))
+                    for index, current in enumerate(path[1:], 1):
+                        events.append((offset + duration * index / max(1, len(path) - 1), "move", *current))
+                    events.append((offset + duration, "up", *path[-1]))
+                    offset += duration + max(0.03, min(0.08, duration))
+                offset += 0.12
+        self._submit_touch(step_id, params, events)
+        return describe_action(resolved)
+
+    def _perform_touch(self, step_id: str, params: dict[str, Any]) -> None:
+        if self._poll_touch(step_id):
+            return
+        phase = str(params.get("phase") or "")
+        scheduler = get_touch_scheduler(self.controller)
+        assert scheduler is not None
+        finger = self._finger_for(params)
+        if phase == "up":
+            x, y = scheduler.position(self._touch_owner, finger)
+        else:
+            x, y = float(params.get("x", 0.5)), float(params.get("y", 0.5))
+        duration = max(0, min(600000, float(params.get("duration_ms", 0)))) / 1000
+        events = [(0.0, phase, x, y)]
+        if phase == "move" and duration:
+            sx, sy = scheduler.position(self._touch_owner, finger)
+            count = max(1, min(1000, int(duration / 0.01)))
+            events = [
+                (duration * i / count, "move", sx + (x - sx) * i / count, sy + (y - sy) * i / count)
+                for i in range(1, count + 1)
+            ]
+        self._submit_touch(step_id, params, events)
+
     def _blocking_for(self, step_id: str, frame_index: int) -> _Blocking:
         """取/建这一步的计时状态。**只认进入之后的帧**（见文件头第 1 条）。"""
         if self.blocking is None or self.blocking.step_id != step_id:
@@ -806,8 +1248,8 @@ class FlowEngine:
     def _try_wait(self, step_id: str, params: dict[str, Any], frame: Frame) -> str:
         label = str(params.get("rec") or "")
         if not label:
-            self._finish("failure", "「等待界面」还没选要等哪个识别器")
-            return "fail"
+            self.blocking = None
+            return self._handle_failure(step_id, params, "「等待界面」还没选要等哪个识别器")
         default_wait_ms = _as_int(self.graph.default("wait_timeout_ms", 20000), 20000)
         timeout_ms = int(params.get("timeout_ms") or default_wait_ms)
         default_vote = _as_int(self.graph.default("vote", 2), 2)
@@ -815,13 +1257,17 @@ class FlowEngine:
         state = self._blocking_for(step_id, frame.index)
 
         if (time.monotonic() - state.started_at) * 1000 >= timeout_ms:
-            self._finish("failure", f"等待「{label}」超时（{timeout_ms}ms）· {self._best_score_text(label)}")
-            return "fail"
+            # 等待失败也必须遵守全局/步骤出错策略；重试时重新计时，不能沿用已超时的状态。
+            self.blocking = None
+            return self._handle_failure(
+                step_id, params, f"等待「{label}」超时（{timeout_ms}ms）· {self._best_score_text(label)}"
+            )
         if frame.index <= state.entered_frame:
             return "wait"  # 还是进入时那一帧：不算数，等下一帧
         state.stable = state.stable + 1 if self._hit(label) else 0
         if state.stable >= stable_frames:
             self.blocking = None
+            self._error_retries.pop(step_id, None)
             return "ok"
         return "wait"
 
@@ -835,6 +1281,36 @@ class FlowEngine:
                 ms = max(0, int(float(raw_ms)))
             except (TypeError, ValueError):
                 ms = 500
+        # 只认严格的 True：手改 graph 写成 "true"/1 时按固定延时走，
+        # 不能在执行途中抛错把整条流程打断（与前端 `random === true` 一致）。
+        random_mode = params.get("random") is True
+        if random_mode:
+            state = self._blocking_for(step_id, frame.index)
+            if state.random_wait_ms is None:
+
+                def bound(value: Any, fallback: int) -> int:
+                    if value is None or isinstance(value, bool):
+                        return min(600000, max(0, fallback))
+                    try:
+                        return min(600000, max(0, int(float(value))))
+                    except (TypeError, ValueError, OverflowError):
+                        return min(600000, max(0, fallback))
+
+                minimum = bound(params.get("minMs"), 0)
+                maximum = bound(params.get("maxMs"), minimum if "minMs" in params else ms)
+                minimum, maximum = sorted((minimum, maximum))
+                state.random_wait_ms = random.randint(minimum, maximum)
+                self._emit(
+                    "random_delay",
+                    message=f"随机等待 {state.random_wait_ms}ms",
+                    extra={**self._step_extra(), "randomWaitMs": state.random_wait_ms},
+                )
+                if self.evidence is not None:
+                    self.evidence.merge(
+                        self.cursor + 1,
+                        {"randomWaitMs": state.random_wait_ms, "message": f"随机等待 {state.random_wait_ms}ms"},
+                    )
+            ms = state.random_wait_ms
         return self._try_step_phase_delay(step_id, ms, frame)
 
     def _general_settings(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1010,12 +1486,15 @@ class FlowEngine:
                 if not rec:
                     raise ValueError("图像点击尚未选择识别器")
                 spec = {"type": action_type, "target": rec}
+                strategy = str(params.get("strategy") or "auto").strip().lower()
+                if strategy and strategy != "auto":
+                    spec["strategy"] = strategy
+                    if strategy == "nth":
+                        spec["index"] = params.get("index", 1)
             if action_type == "long_press":
                 default_long_ms = _as_int(self.graph.default("long_press_duration_ms", 600), 600)
                 spec["duration_ms"] = params.get("duration_ms") or default_long_ms
-            for key in ("tap_duration_ms", "click_jitter_px", "click_micro_px"):
-                if key in params and params[key] is not None and params[key] != "":
-                    spec[key] = params[key]
+            # 拟人参数（偏移 / 按下 / 微移）只读全局设置，不从这里往下传
             return spec
         if kind == "swipe":
             default_swipe_ms = _as_int(self.graph.default("swipe_duration_ms", 300), 300)
@@ -1032,17 +1511,7 @@ class FlowEngine:
                 spec["path"] = params["path"]
             if params.get("hold_ms") not in (None, ""):
                 spec["hold_ms"] = params["hold_ms"]
-            for key in (
-                "bezier",
-                "bezier_order",
-                "bezier_deviation_px",
-                "bezier_bias",
-                "bezier_easing",
-                "bezier_end_wobble",
-                "bezier_end_wobble_px",
-            ):
-                if key in params and params[key] is not None and params[key] != "":
-                    spec[key] = params[key]
+            # 拟人贝塞尔参数只读全局设置，不从这里往下传
             return spec
         if kind == "key":
             return {"type": "key", "value": params.get("value")}
@@ -1148,12 +1617,22 @@ class FlowEngine:
         spec: dict[str, Any] = {}
         try:
             spec = dict(self._spec_for(kind, params))
-            described = self.perform(spec)
+            if (self._parent is not None or self.uses_scheduled_touches) and kind in ("click", "hold", "swipe"):
+                described = self._perform_parallel_action(step_id, spec, params)
+            else:
+                described = self.perform(spec)
+            if self._stop_requested.is_set():
+                raise ActionCancelledError("设备动作已取消")
+        except ActionCancelledError:
+            return False, "已停止"
+        except ActionDeferredError:
+            raise
         except Exception as error:
             self.stats["failed"] += 1
             message = str(error) or error.__class__.__name__
             self._emit("step_failed", message=message, extra={**self._step_extra(params), "reason": message})
             return False, message
+        details = self._match_details(params)
         self._emit(
             "action_executed",
             message=described,
@@ -1161,11 +1640,11 @@ class FlowEngine:
                 "index": self.cursor + 1,
                 "kind": kind,
                 "params": self._resolved_params(spec),
-                **self._match_details(params),
+                **details,
             },
         )
         if self.evidence is not None:
-            self.evidence.merge(self.cursor + 1, {"result": described, **self._match_details(params)})
+            self.evidence.merge(self.cursor + 1, {"result": described, **details})
         return True, described
 
     def _resolved_params(self, spec: dict[str, Any]) -> dict[str, Any]:
@@ -1180,11 +1659,16 @@ class FlowEngine:
         detection = self.detections.get(label) if label else None
         if detection is None:
             return {}
-        return {
+        details: dict[str, Any] = {
             "label": label,
             "score": round(float(detection.score), 4),
             "matchedRect": detection.rect.to_list(),
         }
+        if len(detection.all_rects()) > 1:
+            details["candidates"] = len(detection.all_rects())
+        if self._last_selection:
+            details.update(self._last_selection)
+        return details
 
     def _perform_setvar(self, params: dict[str, Any]) -> tuple[bool, str]:
         """「赋值」：把 `value` 求值后写进运行期变量。"""
@@ -1228,31 +1712,41 @@ class FlowEngine:
             return text
 
     def perform(self, spec: dict[str, Any]) -> str:
+        """在输入事务内执行；手动通道占用时可延后至下帧，不持锁做感知。"""
+        if self._stop_requested.is_set():
+            raise ActionCancelledError("设备动作已取消")
+        guard = self.input_guard() if self.input_guard is not None else contextlib.nullcontext()
+        with guard:
+            # 抢输入锁期间可能已收到停止；不能等到 controller 调用返回才发现。
+            if self._stop_requested.is_set():
+                raise ActionCancelledError("设备动作已取消")
+            return self._perform_guarded(spec)
+
+    def _perform_guarded(self, spec: dict[str, Any]) -> str:
         """执行一个动作 spec（**已求值**）。和状态机共用同一套落点解析与输入方式。"""
+        if self._stop_requested.is_set():
+            raise ActionCancelledError("设备动作已取消")
         resolved = resolve_spec(dict(spec), self.variables, self._scores())
         described = describe_action(resolved)
         action = Action.parse(resolved)
         controller = self.controller
+        self._last_selection = {}
 
         if action.type == "text":
             if not hasattr(controller, "text"):
                 raise ValueError("这个设备不支持「输入文字」")
             controller.text(action.value)
-        elif action.type == "key":
+            self.stats["actions"] += 1
+            return described
+        if action.type == "key":
             self._press(action.value)
-        elif action.type == "long_press":
-            point = self._resolve_point(action, action.target, action.x, action.y)
-            execute_tap(
-                controller,
-                point,
-                resolved,
-                dict(self.graph.defaults),
-                duration_ms=max(50, action.duration_ms),
-            )
-        elif action.type == "double_click":
-            point = self._resolve_point(action, action.target, action.x, action.y)
-            execute_tap(controller, point, resolved, dict(self.graph.defaults), count=2)
-        elif action.type == "swipe":
+            self.stats["actions"] += 1
+            return described
+        if action.type == "wait":
+            # 这一套的"等"是**独立的一步**，不在动作里 —— 走到这里说明有人手写了 wait 动作
+            raise ValueError("步骤链里不要用 wait 动作；用「延时」或「等待界面」那两步")
+
+        if action.type == "swipe":
             start = self._resolve_point(action, action.target, action.x, action.y)
             end = self._resolve_point(action, action.to_target, action.to_x, action.to_y, allow_auto=True)
             execute_swipe(
@@ -1264,22 +1758,82 @@ class FlowEngine:
                 dict(self.graph.defaults),
                 path=action.path,
                 hold_ms=action.hold_ms,
+                cancel_event=self._stop_requested,
             )
-        elif action.type == "wait":
-            # 这一套的"等"是**独立的一步**，不在动作里 —— 走到这里说明有人手写了 wait 动作
-            raise ValueError("步骤链里不要用 wait 动作；用「延时」或「等待界面」那两步")
-        else:
-            point = self._resolve_point(action, action.target, action.x, action.y)
-            execute_tap(controller, point, resolved, dict(self.graph.defaults))
+            self.stats["actions"] += 1
+            return described
 
-        self.stats["actions"] += 1
+        points = self._resolve_points(action, action.target, action.x, action.y)
+        defaults = dict(self.graph.defaults)
+        performed = 0
+        for point in points:
+            if self._stop_requested.is_set():
+                raise ActionCancelledError("设备动作已取消")
+            if action.type == "long_press":
+                execute_tap(
+                    controller,
+                    point,
+                    resolved,
+                    defaults,
+                    duration_ms=max(50, action.duration_ms),
+                    cancel_event=self._stop_requested,
+                )
+            elif action.type == "double_click":
+                execute_tap(controller, point, resolved, defaults, count=2, cancel_event=self._stop_requested)
+            else:
+                execute_tap(controller, point, resolved, defaults, cancel_event=self._stop_requested)
+            performed += 1
+            # 等待可被停止信号唤醒；停止后不能再遍历并点击剩余候选。
+            if len(points) > 1:
+                self._stop_requested.wait(0.12)
+
+        self.stats["actions"] += performed
+        if len(points) > 1:
+            return f"{described}（共 {len(points)} 个候选，依次点击）"
         return described
 
     def run_action(self, action: dict[str, Any]) -> str:
         """调试用："单独执行这一步" —— 不影响游标。"""
+        if action.get("type") == "touch":
+            raise ValueError("持续触控只能在完整流程运行，请使用运行和停止控制")
         described = self.perform(dict(action))
         self._emit("action_manual", message=f"单独执行：{described}")
         return described
+
+    def _resolve_points(
+        self,
+        action: Action,
+        target: str | None,
+        x: float | None,
+        y: float | None,
+    ) -> list[tuple[float, float]]:
+        """把目标解析成要点的点列表（多目标策略可能返回多个）。"""
+        if not target:
+            return [self._resolve_point(action, None, x, y)]
+        detection = self.detections.get(target)
+        if detection is None:
+            # 素材当前没命中 → **不退回坐标**，直接失败（点错地方比不点更糟）
+            raise ValueError(f"目标 {target} 当前没有命中，无法定位")
+        rects = select_rects(
+            detection,
+            action.strategy,
+            anchor=self._anchor_of(target),
+            index=action.index,
+        )
+        self._last_selection = {
+            "strategy": action.strategy,
+            "candidates": len(detection.all_rects()),
+            "picked": [rect.to_list() for rect in rects],
+        }
+        return [rect.center for rect in rects]
+
+    def _anchor_of(self, label: str) -> tuple[float, float] | None:
+        """「离录制位置最近」的锚点：识别器录制时框选区域的中心。"""
+        recognizer = self.graph.recognizers.get(label)
+        roi = getattr(recognizer, "roi", None)
+        if roi is None:
+            return None
+        return (roi.cx, roi.cy)
 
     def _resolve_point(
         self,
@@ -1293,12 +1847,18 @@ class FlowEngine:
         if target:
             detection = self.detections.get(target)
             if detection is not None:
-                if detection.ambiguous:
-                    # 整帧搜索时画面里可能有两个一模一样的按钮：猜一个 = 有一定概率点错
-                    raise ValueError(
-                        f"目标 {target} 有多个同分候选，无法确定点哪一个（提高阈值或把搜索范围改回原区域）"
-                    )
-                return detection.rect.center
+                rects = select_rects(
+                    detection,
+                    action.strategy,
+                    anchor=self._anchor_of(target),
+                    index=action.index,
+                )
+                self._last_selection = {
+                    "strategy": action.strategy,
+                    "candidates": len(detection.all_rects()),
+                    "picked": [rect.to_list() for rect in rects],
+                }
+                return rects[0].center
             # 素材当前没命中 → **不退回坐标**，直接失败（点错地方比不点更糟）
             if not allow_auto:
                 raise ValueError(f"目标 {target} 当前没有命中，无法定位")
@@ -1326,6 +1886,7 @@ class FlowEngine:
             controller.key(name)
 
     def _finish(self, result: str, message: str) -> None:
+        self.cancel_actions("finish")
         self.result = result
         self.waiting = False
         self.waiting_for = None
@@ -1355,6 +1916,7 @@ class FlowEngine:
             "stats": dict(self.stats),
             "detections": [item.to_dict() for item in self.detections.values()],
             "waiting": self.waiting,
+            "activeStepIds": self.active_step_ids,
         }
 
     def _flush(self) -> list[TraceEvent]:
@@ -1435,6 +1997,20 @@ class FlowEngine:
         return evidence
 
     def _emit(self, type_: str, *, message: str = "", extra: dict[str, Any] | None = None) -> TraceEvent:
+        if self._parent is not None:
+            if type_ == "flow_finished":
+                type_ = "branch_finished"
+            payload = dict(extra or {})
+            payload.setdefault("loops", self._loop_progress())
+            payload["branchPath"] = list(self._branch_path)
+            payload["stepId"] = self.current
+            root = self._root
+            current = root.current
+            root.current = self.current
+            try:
+                return root._emit(type_, message=message, extra=payload)
+            finally:
+                root.current = current
         self.seq += 1
         payload = dict(extra or {})
         if "loops" not in payload:

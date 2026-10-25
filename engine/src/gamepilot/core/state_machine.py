@@ -24,6 +24,7 @@ from .conditions import Condition, ConditionTimer
 from .frame import Detection, Frame
 from .graph import Edge, Graph
 from .recognizer import VoteFilter, perceive
+from .selection import select_rects
 from .trace import TraceBuffer, TraceEvent
 from .variables import CALL_ACTION, SET_ACTION, VariableStore, resolve_spec
 
@@ -455,48 +456,36 @@ class Engine:
                 self._emit("action_executed", node=self.current, edge=edge, message=action.describe())
                 return
 
-            start_point = self._resolve_point(action, action.target, action.x, action.y)
             defaults = dict(self.graph.defaults)
-            if action.type == "click":
-                execute_tap(self.controller, start_point, spec if isinstance(spec, dict) else {}, defaults)
-                self.stats["actions"] += 1
-                self._emit(
-                    "action_executed",
-                    node=self.current,
-                    edge=edge,
-                    message=f"click({start_point[0]:.3f},{start_point[1]:.3f})",
-                )
-            elif action.type == "double_click":
-                execute_tap(
-                    self.controller,
-                    start_point,
-                    spec if isinstance(spec, dict) else {},
-                    defaults,
-                    count=2,
-                )
-                self.stats["actions"] += 1
-                self._emit(
-                    "action_executed",
-                    node=self.current,
-                    edge=edge,
-                    message=f"double_click({start_point[0]:.3f},{start_point[1]:.3f})",
-                )
-            elif action.type == "long_press":
-                execute_tap(
-                    self.controller,
-                    start_point,
-                    spec if isinstance(spec, dict) else {},
-                    defaults,
-                    duration_ms=max(50, action.duration_ms),
-                )
-                self.stats["actions"] += 1
-                self._emit(
-                    "action_executed",
-                    node=self.current,
-                    edge=edge,
-                    message=f"long_press({start_point[0]:.3f},{start_point[1]:.3f},{action.duration_ms}ms)",
-                )
+            if action.type in ("click", "double_click", "long_press"):
+                points = self._resolve_points(action, action.target, action.x, action.y)
+                for point in points:
+                    if action.type == "double_click":
+                        execute_tap(self.controller, point, spec if isinstance(spec, dict) else {}, defaults, count=2)
+                    elif action.type == "long_press":
+                        execute_tap(
+                            self.controller,
+                            point,
+                            spec if isinstance(spec, dict) else {},
+                            defaults,
+                            duration_ms=max(50, action.duration_ms),
+                        )
+                    else:
+                        execute_tap(self.controller, point, spec if isinstance(spec, dict) else {}, defaults)
+                    if len(points) > 1:
+                        time.sleep(0.12)
+                self.stats["actions"] += len(points)
+                first = points[0]
+                suffix = f"（共 {len(points)} 个候选）" if len(points) > 1 else ""
+                if action.type == "click":
+                    message = f"click({first[0]:.3f},{first[1]:.3f}){suffix}"
+                elif action.type == "double_click":
+                    message = f"double_click({first[0]:.3f},{first[1]:.3f}){suffix}"
+                else:
+                    message = f"long_press({first[0]:.3f},{first[1]:.3f},{action.duration_ms}ms){suffix}"
+                self._emit("action_executed", node=self.current, edge=edge, message=message)
             elif action.type == "swipe":
+                start_point = self._resolve_point(action, action.target, action.x, action.y)
                 end_point = self._resolve_point(action, action.to_target, action.to_x, action.to_y, allow_auto=True)
                 execute_swipe(
                     self.controller,
@@ -525,6 +514,27 @@ class Engine:
             self.stats["failed"] += 1
             self._emit("action_failed", node=self.current, edge=edge, message=f"{action.type} 失败: {exc}")
 
+    def _resolve_points(
+        self,
+        action: Action,
+        target: str | None,
+        x: float | None,
+        y: float | None,
+    ) -> list[tuple[float, float]]:
+        """按多目标策略解析落点（`all` 可能返回多个）。"""
+        if not target:
+            return [self._resolve_point(action, None, x, y)]
+        detection = self.detections.get(target)
+        if detection is None:
+            raise ValueError(f"目标 {target} 当前没有命中，无法定位")
+        rects = select_rects(
+            detection,
+            action.strategy,
+            anchor=self._anchor_of(target),
+            index=action.index,
+        )
+        return [rect.center for rect in rects]
+
     def _resolve_point(
         self,
         action: Action,
@@ -542,11 +552,13 @@ class Engine:
         if target:
             detection = self.detections.get(target)
             if detection is not None:
-                if detection.ambiguous:
-                    raise ValueError(
-                        f"目标 {target} 有多个同分候选，无法确定点哪一个（提高阈值或把搜索范围改回原区域）"
-                    )
-                return detection.rect.center
+                rects = select_rects(
+                    detection,
+                    action.strategy,
+                    anchor=self._anchor_of(target),
+                    index=action.index,
+                )
+                return rects[0].center
             if not allow_auto:
                 raise ValueError(f"目标 {target} 当前没有命中，无法定位")
         if action.rect is not None:
@@ -557,6 +569,14 @@ class Engine:
         if allow_auto:
             return (0.5, 0.5)
         raise ValueError(f"{action.type} 缺少可定位的目标: {action.to_dict()}")
+
+    def _anchor_of(self, label: str) -> tuple[float, float] | None:
+        """「离录制位置最近」的锚点：识别器录制时框选区域的中心。"""
+        recognizer = self.graph.recognizers.get(label)
+        roi = getattr(recognizer, "roi", None)
+        if roi is None:
+            return None
+        return (roi.cx, roi.cy)
 
     def _press(self, name: str) -> None:
         """功能键：优先用控制器的 press（scrcpy 控制通道），否则回退 key。"""

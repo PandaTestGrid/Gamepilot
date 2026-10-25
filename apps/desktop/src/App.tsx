@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 import { DevicePopover } from '@/features/device/DevicePopover';
@@ -26,7 +27,9 @@ import { useSessionStore } from '@/stores/session.store';
  *   - 独立窗口：`?pane=screen&device=dev-a` 只渲染那一栏（DESIGN.md §4.6）
  */
 export function App(): ReactNode {
-  const { pane, deviceId } = readPaneQuery();
+  const { pane, deviceId, launch } = readPaneQuery();
+  const needsLaunchHandoff = launch === 'main' && !pane;
+  // 只有测试环境可在不启动真实引擎时直接进入主壳；生产构建里 Vite 会把它折叠为 false。
   useDismissCaptureOnBlur();
   const init = useEngineStore((state) => state.init);
   const selfCheck = useEngineStore((state) => state.selfCheck);
@@ -60,13 +63,29 @@ export function App(): ReactNode {
     };
   }, [init, initSession]);
 
-  // 启动即拉起引擎（不再要求用户先点某个按钮），失败时由错误条提示并可重试
+  // 正常启动由独立 Splash 窗口拉起引擎并完成握手。
+  //
+  // 但每个 WebView 的 JS 状态是**各自一份**的：Splash 握完手，主窗口里的
+  // `useEngineStore.status` 仍然是 idle（截图里就是「引擎未连接」但画面上已经在推帧）。
+  // 所以主窗口和独立窗口挂载后都要自己探一次 —— `engine_start` 是幂等的（已在跑就返回），
+  // 探测只是 ping/info，不会重复拉起进程。
+  // 浏览器预览没有 Rust 命令，`invoke` 会失败；那里仍然走 selfCheck 的兼容路径。
   useEffect(() => {
+    if (launch === 'splash' || !import.meta.env.VITEST) {
+      // 生产/打包：任何窗口（主窗口 / 独立窗口）挂载都探一次
+      devLog('界面已挂载，探测引擎');
+      void selfCheck();
+      return;
+    }
+    if (pane || launch !== null) {
+      return;
+    }
     devLog('界面已挂载，开始启动引擎');
     void selfCheck();
-  }, [selfCheck]);
+  }, [selfCheck, pane, launch]);
 
   // 引擎连上后自动扫描一次真实设备
+  // `pane` 独立窗口只渲染单个栏，不参与主窗口的启动门禁；主窗口才注册。
   const engineStatus = useEngineStore((state) => state.status);
   const scanDevices = useDeviceStore((state) => state.scan);
   const adoptLiveDevices = useSessionStore((state) => state.adoptLiveDevices);
@@ -76,12 +95,19 @@ export function App(): ReactNode {
       return;
     }
     void (async () => {
+      // 独立窗口也要设备清单：它只渲染一栏，但仍要靠 devices 找到 URL 里那台设备
+      // （以前这里 `pane !== null` 直接 return，结果独立窗口里设备列表是空的，
+      //  画面永远停在空态 —— 看起来像"窗口打开了却没有投屏"）。
       await scanDevices();
-      // 引擎那边的会话可能还活着（界面重载/重启）：把状态对齐，别在画面还在动时显示"未连接"
-      adoptLiveDevices();
+      // 引擎那边的会话可能还活着（界面重载/重启）：把状态对齐，别在画面还在动时显示"未连接"。
+      // 独立窗口只认 URL 里那一台（见 adoptLiveDevices 的注释）。
+      adoptLiveDevices(pane === null ? null : deviceId);
+      // 独立窗口**也要**当前工作流：框选/点选/录操作/文字识别都要先有工作流才能落盘
+      // （`setRecordMode` 没工作流就只弹一句提示，按钮看起来"点了没反应"）。
+      // `project.get` / `graph.get` 都是只读的，多开一个窗口读一次不会互相顶掉。
       await refreshCurrentWorkflow();
     })();
-  }, [engineStatus, scanDevices, adoptLiveDevices, refreshCurrentWorkflow]);
+  }, [pane, deviceId, engineStatus, scanDevices, adoptLiveDevices, refreshCurrentWorkflow]);
 
   // 每台设备首次出现时补齐它的状态图与事件桶（M1 换成从引擎拉取）
   const devices = useDeviceStore((state) => state.devices);
@@ -163,7 +189,11 @@ export function App(): ReactNode {
         paneDeviceId: deviceId,
       });
       if (fps !== null) {
-        setStreamPolicy(device.id, fps);
+        // 画面已经弹到独立窗口的设备：引擎仍要按 fps 推（那边在看），
+        // 但**本窗口**不必再拉字节解码 —— 否则同一路投屏被两个 WebView 各解一遍，
+        // 主窗口那块区域还留着旧画面，看起来像"独立窗口没生效"。
+        const pollFps = pane === null && device.windowed ? 0 : fps;
+        setStreamPolicy(device.id, fps, pollFps);
       }
     }
   }, [devices, activeId, gridView, windowHidden, ready, setStreamPolicy, pane, deviceId]);
@@ -196,6 +226,20 @@ export function App(): ReactNode {
     };
   }, [pane]);
 
+  // 主窗口已经完成这次 React 提交，此时才销毁启动窗口；Splash 多留一帧，
+  // 用来覆盖主 WebView 的首屏绘制，切换过程不会露出空白背景。
+  useEffect(() => {
+    if (!needsLaunchHandoff) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      void invoke('close_launch_window').catch((error: unknown) => {
+        devLog(`关闭启动窗口失败: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [needsLaunchHandoff]);
+
   if (pane) {
     return <StandalonePane pane={pane} deviceId={deviceId} />;
   }
@@ -214,3 +258,10 @@ export function App(): ReactNode {
     </div>
   );
 }
+
+
+
+
+
+
+

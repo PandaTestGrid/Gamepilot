@@ -3,7 +3,6 @@
  */
 import {
   Columns2,
-  Maximize2,
   MoreHorizontal,
   Play,
   Redo2,
@@ -20,14 +19,10 @@ import { cn } from '@/lib/utils';
 import { FLOW_EDIT_LOCKED_HINT } from '@/lib/flow-edit-lock';
 import { useCurrentWorkflowLive } from '@/lib/useLiveWorkflow';
 import { useGraphStore } from '@/stores/graph.store';
-import { NODE_SCALES, useUiStore, type NodeScale } from '@/stores/ui.store';
-
-const NODE_SCALE_LABEL: Record<NodeScale, string> = { sm: '小', md: '中', lg: '大' };
+import { useUiStore } from '@/stores/ui.store';
 
 export function GraphToolbar(): ReactNode {
   const run = useRunControl();
-  const nodeScale = useUiStore((state) => state.nodeScale);
-  const setNodeScale = useUiStore((state) => state.setNodeScale);
   const workflowSplitOpen = useUiStore((state) => state.workflowSplitOpen);
   const toggleWorkflowSplit = useUiStore((state) => state.toggleWorkflowSplit);
   const relayoutFlowCanvas = useUiStore((state) => state.relayoutFlowCanvas);
@@ -106,6 +101,13 @@ export function GraphToolbar(): ReactNode {
       >
         <Redo2 className="size-3.5" strokeWidth={1.75} />
       </IconGhostButton>
+      <IconGhostButton
+        active={flowGlobalSettingsOpen}
+        onClick={toggleFlowGlobalSettings}
+        title="全局配置"
+      >
+        <SlidersHorizontal className="size-3.5" strokeWidth={1.75} />
+      </IconGhostButton>
       <div className="relative" ref={menuRef}>
         <IconGhostButton
           active={menuOpen}
@@ -120,32 +122,7 @@ export function GraphToolbar(): ReactNode {
               'absolute right-0 top-full z-50 mt-0.5 min-w-[10.5rem] rounded-sm border border-line bg-panel py-1 text-badge shadow-lg',
             )}
           >
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-dim hover:bg-raised hover:text-fg"
-              onClick={() => {
-                const next = NODE_SCALES[(NODE_SCALES.indexOf(nodeScale) + 1) % NODE_SCALES.length];
-                setNodeScale(next ?? 'md');
-              }}
-            >
-              <Maximize2 className="size-3.5 shrink-0 text-faint" strokeWidth={1.75} />
-              <span>模块大小 · {NODE_SCALE_LABEL[nodeScale]}</span>
-            </button>
-            <div className="my-0.5 border-t border-line" />
-            <button
-              type="button"
-              className={cn(
-                'flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-raised hover:text-fg',
-                flowGlobalSettingsOpen ? 'text-brand' : 'text-dim',
-              )}
-              onClick={() => {
-                toggleFlowGlobalSettings();
-                setMenuOpen(false);
-              }}
-            >
-              <SlidersHorizontal className="size-3.5 shrink-0" strokeWidth={1.75} />
-              <span>全局配置</span>
-            </button>
+
           </div>
         )}
       </div>

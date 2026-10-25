@@ -72,16 +72,27 @@ export function IconGhostButton({
   active,
   title,
   disabled,
+  testId,
+  label,
+  pressed,
 }: {
   children: ReactNode;
   onClick?: () => void;
   active?: boolean;
   title?: string;
   disabled?: boolean;
+  testId?: string;
+  /** 无可见文字时给读屏/测试用的名字 */
+  label?: string;
+  /** 有 aria-pressed 语义的开关（播放/检测/录制） */
+  pressed?: boolean;
 }): ReactNode {
   return (
     <button
       type="button"
+      data-testid={testId}
+      aria-label={label}
+      aria-pressed={pressed}
       onClick={onClick}
       title={title}
       disabled={disabled}
@@ -102,16 +113,25 @@ export function GhostButton({
   active,
   title,
   disabled,
+  testId,
+  label,
+  pressed,
 }: {
   children: ReactNode;
   onClick?: () => void;
   active?: boolean;
   title?: string;
   disabled?: boolean;
+  testId?: string;
+  label?: string;
+  pressed?: boolean;
 }): ReactNode {
   return (
     <button
       type="button"
+      data-testid={testId}
+      aria-label={label}
+      aria-pressed={pressed}
       onClick={onClick}
       title={title}
       disabled={disabled}

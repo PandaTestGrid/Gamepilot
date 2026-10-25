@@ -33,7 +33,7 @@ class FakeSession:
     next_frame: np.ndarray | None = None
     next_error: str | None = None
 
-    def __init__(self, _id: str, controller: FakeController, _project: Project, _emit: Any) -> None:
+    def __init__(self, _id: str, controller: FakeController, _project: Project, _emit: Any, **_kwargs: Any) -> None:
         self.controller = controller
         self.last_frame = self.next_frame
         self.capture_error = self.next_error

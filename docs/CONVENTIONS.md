@@ -271,6 +271,7 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 | 引擎 | pillow | HPND(MIT-CMU) | 合成测试画面 |
 | 引擎 | rapidocr-onnxruntime（可选） | Apache-2.0 | OCR 识别器 |
 | 引擎 | av (PyAV) | BSD-3 | scrcpy H.264 解码（投屏主通道） |
+| 引擎 | windows-capture（可选，`--extra wgc`） | MIT | **Windows Graphics Capture 官方抓图通道**（D3D/GPU/被遮挡窗口；回退 PrintWindow/BitBlt） |
 | 引擎 | scrcpy-server（vendor/，非 Python 依赖） | Apache-2.0 | 设备端投屏/控制程序，版本 3.3.4 与 `devices/scrcpy.py::SCRCPY_VERSION` 对齐 |
 | 引擎 | pytest / ruff / mypy | MIT | 测试与静态检查 |
 
@@ -326,7 +327,8 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 ### 11.1 加一个设备（例如 iOS、云手机）
 
 1. `engine/src/gamepilot/devices/<name>.py`：实现 `Controller` 协议（`connect/close/resolution/screenshot` + 归一化输入方法）。
-2. 注册 URI scheme：`Android:///`、`Windows:///?title_re=...` 这种形式。
+2. 注册 URI scheme：`Android:///?serial=...`、`Windows:///?hwnd=...`、`Mac:///?window=...` 这种形式
+   （Windows 窗口的参考实现见 `devices/windows.py`，决策见 ADR 0003）。
 3. 在 `devices/__init__.py` 里 import 以触发注册。
 4. 写单测：归一化↔像素换算 + 点击命中（用 Mock 画面，不连真机）。
 5. 更新 `docs/CONVENTIONS.md` §1 的目录说明 + `docs/DESIGN.md` §6.4 选型表。
@@ -431,6 +433,9 @@ scope: desktop | engine | core | devices | rpc | docs | deps | ci
 | 系统 Python 3.9 | numpy 需源码编译，装不上或极慢 | 同上 |
 | 首次 `cargo build` | 要拉几百个 crate，几分钟 | 正常；CI 用缓存 |
 | macOS Gatekeeper | 未签名的 app 首次打开被拦 | M5 处理签名/公证；开发态用 `pnpm tauri dev` |
+| Windows 独占全屏游戏 | `PrintWindow` 抓到全黑（这是游戏渲染方式，不是代码 bug） | 游戏改「窗口化 / 无边框窗口」；`BitBlt` 只能抓可见窗口。错误信息里已给这三条建议 |
+| Windows 缩放 125%/150% | 窗口矩形/点击位置整体偏 1.25/1.5 倍 | 引擎启动即声明 Per-Monitor DPI 感知；新增窗口类设备必须同样声明，否则拿到的是逻辑像素 |
+| 游戏以管理员运行 | 点击/按键"没反应"（UIPI 拦下低权限进程注入） | GamePilot 也用管理员身份运行；`window.list` 的 `protected=true` 会提示 |
 | 引擎未启动就调 RPC | Rust 返回「引擎未启动」 | 前端先 `engineStart()`（骨架自检按钮就是这么做的） |
 
 ---

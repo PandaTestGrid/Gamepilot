@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { normalizeDeviceTab } from '@/features/device/device-kinds';
 import { useEventStore } from '@/stores/event.store';
 import { useSessionStore } from '@/stores/session.store';
-import { useUiStore } from '@/stores/ui.store';
+import { loadDeviceTab, useUiStore } from '@/stores/ui.store';
 import { useDeviceStore } from '@/stores/device.store';
 import type { RecordDraft } from '@/types';
 
@@ -182,6 +183,30 @@ describe('草稿与设备的联动', () => {
   });
 });
 
+describe('设备弹层分类（Tab）持久化', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it('旧版本存下的 mac（macOS 专用时期）读出来迁移成 window，不会落在不存在的分类上', () => {
+    window.localStorage.setItem('gamepilot.device-tab', 'mac');
+    expect(loadDeviceTab()).toBe('window');
+
+    window.localStorage.setItem('gamepilot.device-tab', 'nope');
+    expect(loadDeviceTab()).toBe('all');
+
+    window.localStorage.setItem('gamepilot.device-tab', 'windows');
+    expect(loadDeviceTab()).toBe('all');
+  });
+
+  it('setDeviceTab 迁移旧值并落盘，下次打开弹层还是上次那一类', () => {
+    useUiStore.getState().setDeviceTab(normalizeDeviceTab('mac'));
+
+    expect(useUiStore.getState().deviceTab).toBe('window');
+    expect(window.localStorage.getItem('gamepilot.device-tab')).toBe('window');
+  });
+});
+
 describe('中间区域的 IDE 式标签（打开过的工作流）', () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -238,6 +263,29 @@ describe('中间区域的 IDE 式标签（打开过的工作流）', () => {
     expect(useUiStore.getState().openWorkflowTabs).toEqual([]);
     expect(useUiStore.getState().workflowSplitOpen).toBe(false);
     expect(JSON.parse(window.localStorage.getItem('gamepilot.open-workflow-tabs') ?? 'null')).toEqual([]);
+  });
+
+  it('打开工作流会记进「历史」（关标签也不丢，重启后还在）', () => {
+    useUiStore.setState({ openWorkflowTabs: [], workflowHistory: [] });
+    useUiStore.getState().openWorkflowTab('/p/甲/斗技');
+    useUiStore.getState().openWorkflowTab('/p/甲/百鬼');
+    useUiStore.getState().openWorkflowTab('/p/甲/斗技');
+
+    // 最近访问的排最前，且同一个目录只有一条
+    expect(useUiStore.getState().workflowHistory.map((item) => item.root)).toEqual([
+      '/p/甲/斗技',
+      '/p/甲/百鬼',
+    ]);
+    expect(JSON.parse(window.localStorage.getItem('gamepilot.workflow-history.v1') ?? 'null')).toHaveLength(
+      2,
+    );
+
+    // 关掉标签不影响历史
+    useUiStore.getState().closeWorkflowTab('/p/甲/斗技');
+    expect(useUiStore.getState().workflowHistory.map((item) => item.root)).toEqual([
+      '/p/甲/斗技',
+      '/p/甲/百鬼',
+    ]);
   });
 
   it('标签落 localStorage：重开应用时上次开着的那几张还在', () => {

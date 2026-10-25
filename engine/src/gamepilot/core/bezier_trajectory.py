@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -123,20 +124,22 @@ def ease(t: float, kind: str) -> float:
     return t
 
 
-def _pick(step: dict[str, Any], step_key: str, defaults: dict[str, Any], global_key: str, fallback: object) -> object:
-    if step_key in step and step[step_key] is not None and step[step_key] != "":
-        return step[step_key]
-    if global_key in defaults and defaults[global_key] is not None and defaults[global_key] != "":
-        return defaults[global_key]
+def _pick(defaults: dict[str, Any], key: str, fallback: object) -> object:
+    """拟人参数只有一个来源：工作流的全局设置。
+
+    节点/边上写的同名字段一律忽略（老 `graph.json` 里残留的也不再生效）——
+    同一份工作流的拟人风格必须一致，不能这一步 3px、那一步 40px。
+    """
+    if key in defaults and defaults[key] is not None and defaults[key] != "":
+        return defaults[key]
     return fallback
 
 
 def resolve_swipe_bezier(step: dict[str, Any] | None, defaults: dict[str, Any] | None) -> SwipeBezierConfig:
-    """单步字段覆盖全局；缺省跟随 `graph.defaults`。"""
-    spec = step or {}
+    """只看 `graph.defaults`；`step` 参数保留只为兼容调用方（节点级值不生效）。"""
     global_cfg = defaults or {}
     enabled = _as_bool(
-        _pick(spec, "bezier", global_cfg, "swipe_bezier", DEFAULT_SWIPE_BEZIER.enabled),
+        _pick(global_cfg, "swipe_bezier", DEFAULT_SWIPE_BEZIER.enabled),
         DEFAULT_SWIPE_BEZIER.enabled,
     )
     order = max(
@@ -144,7 +147,7 @@ def resolve_swipe_bezier(step: dict[str, Any] | None, defaults: dict[str, Any] |
         min(
             8,
             _as_int(
-                _pick(spec, "bezier_order", global_cfg, "swipe_bezier_order", DEFAULT_SWIPE_BEZIER.order),
+                _pick(global_cfg, "swipe_bezier_order", DEFAULT_SWIPE_BEZIER.order),
                 DEFAULT_SWIPE_BEZIER.order,
             ),
         ),
@@ -152,9 +155,7 @@ def resolve_swipe_bezier(step: dict[str, Any] | None, defaults: dict[str, Any] |
     deviation_px = max(
         0.0,
         _as_number(
-            _pick(
-                spec, "bezier_deviation_px", global_cfg, "swipe_bezier_deviation_px", DEFAULT_SWIPE_BEZIER.deviation_px
-            ),
+            _pick(global_cfg, "swipe_bezier_deviation_px", DEFAULT_SWIPE_BEZIER.deviation_px),
             DEFAULT_SWIPE_BEZIER.deviation_px,
         ),
     )
@@ -163,13 +164,13 @@ def resolve_swipe_bezier(step: dict[str, Any] | None, defaults: dict[str, Any] |
         max(
             0.05,
             _as_number(
-                _pick(spec, "bezier_bias", global_cfg, "swipe_bezier_bias", DEFAULT_SWIPE_BEZIER.bias),
+                _pick(global_cfg, "swipe_bezier_bias", DEFAULT_SWIPE_BEZIER.bias),
                 DEFAULT_SWIPE_BEZIER.bias,
             ),
         ),
     )
     easing = normalize_easing(
-        _pick(spec, "bezier_easing", global_cfg, "swipe_easing", DEFAULT_SWIPE_BEZIER.easing),
+        _pick(global_cfg, "swipe_easing", DEFAULT_SWIPE_BEZIER.easing),
         DEFAULT_SWIPE_BEZIER.easing,
     )
     end_wobble = max(
@@ -177,7 +178,7 @@ def resolve_swipe_bezier(step: dict[str, Any] | None, defaults: dict[str, Any] |
         min(
             8,
             _as_int(
-                _pick(spec, "bezier_end_wobble", global_cfg, "swipe_end_wobble", DEFAULT_SWIPE_BEZIER.end_wobble),
+                _pick(global_cfg, "swipe_end_wobble", DEFAULT_SWIPE_BEZIER.end_wobble),
                 DEFAULT_SWIPE_BEZIER.end_wobble,
             ),
         ),
@@ -185,7 +186,7 @@ def resolve_swipe_bezier(step: dict[str, Any] | None, defaults: dict[str, Any] |
     end_wobble_px = max(
         0.0,
         _as_number(
-            _pick(spec, "bezier_end_wobble_px", global_cfg, "swipe_end_wobble_px", DEFAULT_SWIPE_BEZIER.end_wobble_px),
+            _pick(global_cfg, "swipe_end_wobble_px", DEFAULT_SWIPE_BEZIER.end_wobble_px),
             DEFAULT_SWIPE_BEZIER.end_wobble_px,
         ),
     )
@@ -201,33 +202,33 @@ def resolve_swipe_bezier(step: dict[str, Any] | None, defaults: dict[str, Any] |
 
 
 def resolve_click_human(step: dict[str, Any] | None, defaults: dict[str, Any] | None) -> ClickHumanConfig:
-    spec = step or {}
+    """点击拟人参数只看 `graph.defaults`；节点级值不再生效（见 `_pick`）。"""
     global_cfg = defaults or {}
     jitter_px = max(
         0.0,
         _as_number(
-            _pick(spec, "click_jitter_px", global_cfg, "click_jitter_px", DEFAULT_CLICK_HUMAN.jitter_px),
+            _pick(global_cfg, "click_jitter_px", DEFAULT_CLICK_HUMAN.jitter_px),
             DEFAULT_CLICK_HUMAN.jitter_px,
         ),
     )
     duration_ms = max(
         10,
         _as_int(
-            _pick(spec, "tap_duration_ms", global_cfg, "tap_duration_ms", DEFAULT_CLICK_HUMAN.duration_ms),
+            _pick(global_cfg, "tap_duration_ms", DEFAULT_CLICK_HUMAN.duration_ms),
             DEFAULT_CLICK_HUMAN.duration_ms,
         ),
     )
     micro_px = max(
         0.0,
         _as_number(
-            _pick(spec, "click_micro_px", global_cfg, "click_micro_px", DEFAULT_CLICK_HUMAN.micro_px),
+            _pick(global_cfg, "click_micro_px", DEFAULT_CLICK_HUMAN.micro_px),
             DEFAULT_CLICK_HUMAN.micro_px,
         ),
     )
     delay_jitter_ms = max(
         0,
         _as_int(
-            _pick(spec, "delay_jitter_ms", global_cfg, "delay_jitter_ms", DEFAULT_CLICK_HUMAN.delay_jitter_ms),
+            _pick(global_cfg, "delay_jitter_ms", DEFAULT_CLICK_HUMAN.delay_jitter_ms),
             DEFAULT_CLICK_HUMAN.delay_jitter_ms,
         ),
     )
@@ -426,20 +427,46 @@ def _resample_uniform(points: Sequence[Point], count: int) -> list[Point]:
     return out
 
 
-def play_swipe_path(touch: TouchFn, points: Sequence[Point], duration: float, hold: float = 0.0) -> None:
+class ActionDeferredError(RuntimeError):
+    """输入通道暂被手动手势占用：下一帧重新感知后再尝试，不算失败。"""
+
+
+class ActionCancelledError(RuntimeError):
+    """协作取消：不是设备失败，调用方不应重试或继续发送输入。"""
+
+
+def _check_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ActionCancelledError("设备动作已取消")
+
+
+def _wait(seconds: float, cancel_event: threading.Event | None) -> None:
+    if cancel_event is None:
+        time.sleep(seconds)
+    elif cancel_event.wait(seconds):
+        raise ActionCancelledError("设备动作已取消")
+
+
+def play_swipe_path(
+    touch: TouchFn,
+    points: Sequence[Point],
+    duration: float,
+    hold: float = 0.0,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> None:
     """逐点注入 `down → move… → up`。
 
     时序**按弧长分配**而不是每段均分：曲线采样点常在拐弯处变密，均分会让拐弯处莫名变慢。
     `hold` 是抬手前的按住时长（摇杆"推住"就靠它）。
     """
+    _check_cancelled(cancel_event)
     if not points:
         return
     points = list(points)
     duration = max(0.05, duration)
     if len(points) == 1:
-        touch("down", points[0][0], points[0][1])
-        time.sleep(duration + max(0.0, hold))
-        touch("up", points[0][0], points[0][1])
+        play_tap(touch, points[0], duration + max(0.0, hold), cancel_event=cancel_event)
         return
     # 每段至少 2ms，点数超过这个预算就先按弧长降采样（形状不变，采样变稀）
     budget = max(2, int(duration / 0.002) + 1)
@@ -451,14 +478,20 @@ def play_swipe_path(touch: TouchFn, points: Sequence[Point], duration: float, ho
     ]
     total = sum(segments)
     per_unit = duration / total if total > 1e-9 else 0.0
-    touch("down", points[0][0], points[0][1])
-    for index, point in enumerate(points[1:], start=1):
-        touch("move", point[0], point[1])
-        time.sleep(segments[index - 1] * per_unit if total > 1e-9 else duration / (len(points) - 1))
-    if hold > 0:
-        time.sleep(hold)
-    last = points[-1]
-    touch("up", last[0], last[1])
+    _check_cancelled(cancel_event)
+    last = points[0]
+    try:
+        touch("down", last[0], last[1])
+        for index, point in enumerate(points[1:], start=1):
+            _check_cancelled(cancel_event)
+            last = point
+            touch("move", point[0], point[1])
+            _wait(segments[index - 1] * per_unit if total > 1e-9 else duration / (len(points) - 1), cancel_event)
+        if hold > 0:
+            _wait(hold, cancel_event)
+        _check_cancelled(cancel_event)
+    finally:
+        touch("up", last[0], last[1])
 
 
 def execute_drag(
@@ -466,12 +499,15 @@ def execute_drag(
     points: Sequence[Point],
     duration: float,
     hold_ms: int = 0,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """按显式轨迹连续拖动（连续滑动 / 摇杆）。
 
     优先走实时触控通道（`controller.touch`：scrcpy/HID/CGEvent），这样"按住"是真的按住；
     只有合成通道的设备退回一次 `swipe(path=…)`，按住时间会被并进滑动时长（并告警）。
     """
+    _check_cancelled(cancel_event)
     normalized = normalize_path(list(points)) or list(points)
     if len(normalized) < 2:
         raise ValueError("连续滑动至少需要两个轨迹点")
@@ -479,7 +515,7 @@ def execute_drag(
     hold = max(0, hold_ms) / 1000.0
     touch = getattr(controller, "touch", None)
     if callable(touch):
-        play_swipe_path(touch, normalized, duration, hold)
+        play_swipe_path(touch, normalized, duration, hold, cancel_event=cancel_event)
         return
     swipe = getattr(controller, "swipe", None)
     if not callable(swipe):
@@ -488,10 +524,13 @@ def execute_drag(
         logger.warning("设备没有实时触控通道，hold_ms 被并入滑动时长（不是真按住）")
     start, end = normalized[0], normalized[-1]
     kwargs: dict[str, Any] = {"duration": duration + hold, "path": list(normalized)}
+    _check_cancelled(cancel_event)
     try:
         swipe(start[0], start[1], end[0], end[1], **kwargs)
     except TypeError:
+        _check_cancelled(cancel_event)
         swipe(start[0], start[1], end[0], end[1], duration=duration + hold)
+    _check_cancelled(cancel_event)
 
 
 def apply_controller_swipe(
@@ -500,7 +539,10 @@ def apply_controller_swipe(
     end: Point,
     duration: float,
     path: Sequence[Point] | None,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> None:
+    _check_cancelled(cancel_event)
     swipe = getattr(controller, "swipe", None)
     if not callable(swipe):
         raise RuntimeError("这个设备不支持滑动")
@@ -511,7 +553,9 @@ def apply_controller_swipe(
     try:
         swipe(start[0], start[1], end[0], end[1], **kwargs)
     except TypeError:
+        _check_cancelled(cancel_event)
         swipe(start[0], start[1], end[0], end[1], duration=duration)
+    _check_cancelled(cancel_event)
 
 
 def execute_swipe(
@@ -524,29 +568,43 @@ def execute_swipe(
     *,
     path: object | None = None,
     hold_ms: int = 0,
+    cancel_event: threading.Event | None = None,
 ) -> None:
-    """一次滑动。给了 `path` 就按轨迹走（不再套贝塞尔），`hold_ms` > 0 则在终点按住不动。"""
+    """一次滑动；可选取消信号优先使用实时 touch，合成调用只能在返回后检查取消。"""
+    _check_cancelled(cancel_event)
     explicit = normalize_path(path)
     if explicit is not None:
-        execute_drag(controller, explicit, duration, hold_ms)
+        execute_drag(controller, explicit, duration, hold_ms, cancel_event=cancel_event)
         return
     cfg = resolve_swipe_bezier(spec, defaults)
     track = generate_swipe_track(start, end, duration=duration, config=cfg) if cfg.enabled else None
-    if hold_ms > 0:
-        # 「滑到底按住」：把（可能是贝塞尔的）轨迹交给实时触控通道，末端多停一会儿
-        execute_drag(controller, track or [start, end], duration, hold_ms)
+    if hold_ms > 0 or (cancel_event is not None and callable(getattr(controller, "touch", None))):
+        # 可取消路径不能困在同步 controller.swipe 内；无取消信号仍沿用原分发方式。
+        points = track or ([start, end] if cancel_event is None else resolve_swipe_points(start, end, duration, None))
+        execute_drag(controller, points, duration, hold_ms, cancel_event=cancel_event)
         return
-    apply_controller_swipe(controller, start, end, duration, track)
+    apply_controller_swipe(controller, start, end, duration, track, cancel_event=cancel_event)
 
 
-def play_tap(touch: TouchFn, point: Point, duration: float, path: Sequence[Point] | None = None) -> None:
+def play_tap(
+    touch: TouchFn,
+    point: Point,
+    duration: float,
+    path: Sequence[Point] | None = None,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> None:
     """scrcpy / HID 点击：down →（可选微移）→ up，不用 adb/WDA。"""
+    _check_cancelled(cancel_event)
     if path and len(path) >= 2:
-        play_swipe_path(touch, path, duration)
+        play_swipe_path(touch, path, duration, cancel_event=cancel_event)
         return
-    touch("down", point[0], point[1])
-    time.sleep(max(0.01, duration))
-    touch("up", point[0], point[1])
+    try:
+        touch("down", point[0], point[1])
+        _wait(max(0.01, duration), cancel_event)
+        _check_cancelled(cancel_event)
+    finally:
+        touch("up", point[0], point[1])
 
 
 def apply_controller_click(
@@ -554,7 +612,14 @@ def apply_controller_click(
     point: Point,
     duration: float,
     path: Sequence[Point] | None,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> None:
+    _check_cancelled(cancel_event)
+    touch = getattr(controller, "touch", None)
+    if cancel_event is not None and callable(touch):
+        play_tap(touch, point, duration, path, cancel_event=cancel_event)
+        return
     click = getattr(controller, "click", None)
     if not callable(click):
         raise RuntimeError("这个设备不支持点击")
@@ -565,7 +630,9 @@ def apply_controller_click(
     try:
         click(point[0], point[1], **kwargs)
     except TypeError:
+        _check_cancelled(cancel_event)
         click(point[0], point[1])
+    _check_cancelled(cancel_event)
 
 
 def execute_tap(
@@ -576,7 +643,9 @@ def execute_tap(
     *,
     duration_ms: int | None = None,
     count: int = 1,
+    cancel_event: threading.Event | None = None,
 ) -> None:
+    _check_cancelled(cancel_event)
     cfg = resolve_click_human(spec, defaults)
     landed = apply_point_jitter(point, cfg.jitter_px)
     hold_ms = duration_ms if duration_ms is not None else cfg.duration_ms
@@ -587,6 +656,7 @@ def execute_tap(
     path = generate_tap_track(landed, duration=duration, micro_px=cfg.micro_px) if cfg.micro_px > 0 else None
     gap = max(0.03, min(0.08, duration))
     for index in range(max(1, count)):
-        apply_controller_click(controller, landed, duration, path)
+        _check_cancelled(cancel_event)
+        apply_controller_click(controller, landed, duration, path, cancel_event=cancel_event)
         if index + 1 < count:
-            time.sleep(gap)
+            _wait(gap, cancel_event)

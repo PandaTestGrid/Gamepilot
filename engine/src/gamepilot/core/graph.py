@@ -261,6 +261,21 @@ class Graph:
         self.specs[label] = dict(spec)
         self.recognizers[label] = build_recognizer(label, spec, self.base_dir)
 
+    def set_recognizer_enabled(self, label: str, enabled: bool) -> dict[str, Any]:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled 必须是布尔值")
+        spec = self.specs.get(label)
+        if spec is None:
+            raise KeyError(f"识别器不存在: {label}")
+        updated = {**spec, "enabled": enabled}
+        replacement = build_recognizer(label, updated, self.base_dir)
+        previous = self.recognizers.get(label)
+        if previous is not None:
+            previous.enabled = False  # type: ignore[attr-defined]
+        self.specs[label] = updated
+        self.recognizers[label] = replacement
+        return {"label": label, "enabled": enabled, "graph": self.to_dict()}
+
     def set_threshold(self, label: str, threshold: float) -> None:
         spec = self.specs.get(label)
         if spec is None:
@@ -378,8 +393,13 @@ class Graph:
     # ---------- 校验 ----------
 
     def validate(self) -> None:
+        for label, spec in self.specs.items():
+            if not isinstance(spec.get("enabled", True), bool):
+                raise ValueError(f"识别器「{label}」：enabled 必须是布尔值")
         if self.flow is not None:
-            self.flow = validate_flow(self.flow, set(self.recognizers), strict=False)
+            self.flow = validate_flow(
+                self.flow, set(self.recognizers), strict=False
+            )
         for edge in self.edges:
             if edge.src and edge.src not in self.nodes:
                 raise ValueError(f"边 {edge.id} 的 from 节点不存在: {edge.src}")

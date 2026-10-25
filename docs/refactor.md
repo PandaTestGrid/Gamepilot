@@ -95,7 +95,7 @@
 | 文件 | 行数 | 建议 |
 |---|---|---|
 | `apps/desktop/src/features/device/ScreenPane.tsx` | 1590 | `SingleScreen` 已迁到 `useScreenSurface`；下一步拆 `ScreenGrid` / `MaterialArea`（366 行）/ `TouchFeedback` / `EmptyState` |
-| `engine/src/gamepilot/session.py` | 1383 | 先拆零风险的图编辑纯函数（`:56-235` → `core/graph_edit.py`），再把录制（`:755-1208`）拆成 `recording.py` |
+| [session.py](../engine/src/gamepilot/session.py) | 57 | **已拆分**：稳定导出入口；实现进入 [sessions/](../engine/src/gamepilot/sessions/)，按采集、执行、输入、录屏、历史、素材、AI、图编辑拆为组合服务，详见[模块边界](session-architecture.md) |
 | `apps/desktop/src/stores/graph.store.ts` | 1245 | 按域拆 slice：加载 / 步骤链编辑 / 快照 / 位置 |
 | `apps/desktop/src/stores/session.store.ts` | 1138 | 引擎生命周期 / 运行控制 / 录制 / 识别器 CRUD |
 | `apps/desktop/src/lib/rpc.ts` | 890 | 类型（31 个 interface）与传输、按域调用分开 |

@@ -41,8 +41,8 @@ describe('flow-click-region', () => {
   });
 
   it('点击方式识别随机范围', () => {
-    expect(clickTargetMode({ by: '随机范围', rect: [0.1, 0.2, 0.3, 0.4] })).toBe('region');
-    expect(formatClickCoordSummary({ by: '随机范围', rect: [0.1, 0.2, 0.3, 0.4] })).toContain('随机');
+    expect(clickTargetMode({ by: 'region', rect: [0.1, 0.2, 0.3, 0.4] })).toBe('region');
+    expect(formatClickCoordSummary({ by: 'region', rect: [0.1, 0.2, 0.3, 0.4] })).toContain('随机');
     expect(formatClickRegionSummary({ rect: [0.1, 0.2, 0.3, 0.4] })).toContain('0.30×0.40');
   });
 });

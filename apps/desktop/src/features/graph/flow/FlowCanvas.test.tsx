@@ -1,6 +1,8 @@
 import { ReactFlowProvider } from '@xyflow/react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import * as workflowHooks from '@/lib/useLiveWorkflow';
+import { useEventStore } from '@/stores/event.store';
 
 import { FlowCanvas } from '@/features/graph/flow/FlowCanvas';
 import { FlowModulePointerDragProvider } from '@/features/graph/flow/flow-module-pointer-drag';
@@ -97,6 +99,36 @@ describe('FlowCanvas 渲染冒烟', () => {
     // 普通模块仍有执行按钮
     const trigger = document.querySelector('[data-flow-step-id="t"]');
     expect(trigger?.querySelector('[data-testid="flow-step-run"]')).not.toBeNull();
+  });
+
+  it('运行中普通事件批次不唤起画布，停止后仍恢复最新失败节点', async () => {
+    useDeviceStore.setState({ activeId: 'dev-perf' });
+    useSessionStore.setState({
+      currentWorkflow: { root: '/perf', graphPath: '/perf/graph.json', nodes: 0, edges: 0, recognizers: 0, templates: 0 },
+      running: { 'dev-perf': true }, runningWorkflowRoots: { 'dev-perf': ['/perf'] },
+    });
+    useEventStore.setState({ events: {} });
+    const renders = vi.spyOn(workflowHooks, 'useCurrentWorkflowLive');
+    render(
+      <ReactFlowProvider>
+        <FlowModulePointerDragProvider>
+          <FlowCanvas graph={graphOf([{ id: 't', type: 'manual', params: {} }])} />
+        </FlowModulePointerDragProvider>
+      </ReactFlowProvider>,
+    );
+    await act(() => Promise.resolve());
+    renders.mockClear();
+    act(() => {
+      for (let batch = 0; batch < 20; batch++) {
+        useEventStore.getState().appendEngineEvent({ deviceId: 'dev-perf', seq: batch, ts: 1, type: 'step_started', node: 't', edge: null, message: '' });
+      }
+    });
+    expect(renders).not.toHaveBeenCalled();
+    act(() => useSessionStore.setState({ running: {}, runningWorkflowRoots: {} }));
+    renders.mockClear();
+    act(() => useEventStore.getState().appendEngineEvent({ deviceId: 'dev-perf', seq: 21, ts: 1, type: 'step_failed', node: 't', edge: null, message: 'failed' }));
+    expect(renders).toHaveBeenCalled();
+    renders.mockRestore();
   });
 
   it('空链也能渲染', () => {

@@ -69,7 +69,7 @@ describe('flow-layout', () => {
     const loopSteps: FlowStep[] = [
       { id: 't', type: 'manual' },
       { id: 'lp', type: 'loop', params: { count: 10 } },
-      { id: 'body', type: 'click', params: { by: '坐标', x: 0.5, y: 0.5 } },
+      { id: 'body', type: 'click', params: { by: 'coord', x: 0.5, y: 0.5 } },
       { id: 'le', type: 'loopend', params: { back: 'lp' } },
       { id: 'after', type: 'delay', params: { ms: 1 } },
     ];
@@ -111,7 +111,7 @@ describe('flow-layout', () => {
   it('没接进流程的模块：整条运行被拦，单模块调试放行', () => {
     const steps: FlowStep[] = [
       { id: 't', type: 'manual', params: { _out: ['out>a'] } },
-      { id: 'a', type: 'click', params: { by: '坐标', x: 0.5, y: 0.5, _out: [] } },
+      { id: 'a', type: 'click', params: { by: 'coord', x: 0.5, y: 0.5, _out: [] } },
       { id: 'orphan', type: 'wait', params: { rec: 'region_10' } },
     ];
     const titleOf = (step: FlowStep): string => step.id;
@@ -121,7 +121,7 @@ describe('flow-layout', () => {
       unconnectedFlowRunError(
         [
           { id: 't', type: 'manual', params: { _out: [] } },
-          { id: 'a', type: 'click', params: { by: '坐标', x: 0.5, y: 0.5 } },
+          { id: 'a', type: 'click', params: { by: 'coord', x: 0.5, y: 0.5 } },
         ],
         undefined,
         titleOf,
@@ -134,7 +134,7 @@ describe('flow-layout', () => {
       { id: 't', type: 'manual' },
       { id: 'outer', type: 'loop', params: { count: 10 } },
       { id: 'inner', type: 'loop', params: { count: 10 } },
-      { id: 'body', type: 'click', params: { by: '坐标', x: 0.5, y: 0.5 } },
+      { id: 'body', type: 'click', params: { by: 'coord', x: 0.5, y: 0.5 } },
       { id: 'ile', type: 'loopend', params: { back: 'inner' } },
       { id: 'ole', type: 'loopend', params: { back: 'outer' } },
       { id: 'after', type: 'delay', params: { ms: 1 } },

@@ -25,7 +25,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// 引擎通知转发给前端时用的事件名（前端 src/lib/rpc.ts 订阅同名事件）
 const EVENT_ENGINE: &str = "engine://event";
 /// 单次 RPC 的等待上限；超时说明引擎卡死或崩溃
-const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+/// 首次握手（ping / info / workspace.* / project.get）可能撞上 PyInstaller 单文件冷启动解压与杀软扫描。
+/// 解压 192MB 在慢盘 / 杀软全量扫描的机器上能到 60s 以上（"别人电脑上引擎 timeout"的常见成因之一），
+/// 所以给到 90s：慢一点可以等，误报"超时"会让人去查错方向。
+const BOOT_RPC_TIMEOUT: Duration = Duration::from_secs(90);
 /// 连接会等到首帧，ADB 降级可能先等待 scrcpy 再等一次完整截图。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -65,6 +69,16 @@ impl Default for Bridge {
     }
 }
 
+/// 日志文件路径（给用户看的那种）：出错信息里直接写出来，省得再问"日志在哪"。
+fn log_file_hint(app: &AppHandle) -> String {
+    match app.path().app_log_dir() {
+        Ok(dir) => dir.join("GamePilot.log").display().to_string(),
+        Err(_) => {
+            "应用日志目录（%LOCALAPPDATA%\\com.gamepilot.desktop\\logs\\GamePilot.log）".to_string()
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct Notification {
     method: String,
@@ -96,6 +110,8 @@ pub fn engine_start(app: AppHandle, bridge: State<'_, Bridge>) -> Result<String,
     command
         .args(&args)
         .current_dir(&cwd)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // 引擎日志留在应用日志目录，不继承控制台，也不污染协议 stdout。
@@ -140,19 +156,84 @@ pub fn engine_start(app: AppHandle, bridge: State<'_, Bridge>) -> Result<String,
     let app_handle = app.clone();
     std::thread::spawn(move || read_loop(app_handle, stdout));
     std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        for line in BufReader::new(stderr).split(b'\n') {
+            let line = match line {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    log::warn!("读取引擎 stderr 失败: {error}");
+                    break;
+                }
+            };
+            // 第三方库可能仍写系统代码页字节；不能因一条日志解码失败就丢掉后面所有诊断。
+            let line = String::from_utf8_lossy(&line);
             log::info!(target: "gamepilot.engine", "{line}");
         }
     });
 
     if let Ok(Some(status)) = child.try_wait() {
         return Err(format!(
-            "引擎进程启动后立刻退出 ({status})，原因见日志 gamepilot.engine（stderr）"
+            "引擎进程启动后立刻退出 ({status})，原因见日志 {}（里面的 gamepilot.engine 那几行）",
+            log_file_hint(&app)
         ));
     }
 
+    let started_pid = child.id();
     *guard = Some(EngineProcess { child, stdin });
+    drop(guard);
+    watch_engine_exit(app, started_pid);
     Ok(format!("started: {}", program.display()))
+}
+
+/// 盯着引擎进程：**它退出时必须有声音**。
+///
+/// 以前没人盯：子进程死了，界面上只会冒出一句"引擎未启动，请先调用 engine_start"（开发者文案），
+/// 日志里也一行都没有 —— 崩溃现场就这么没了（用户报的「滑动录到一半直接就崩了」）。
+/// 现在退出会：写一条 WARN（含退出码）+ 把「引擎已退出」推给前端，界面直接给「重启引擎」。
+fn watch_engine_exit(app: AppHandle, pid: u32) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let bridge = app.state::<Bridge>();
+            let mut guard = match bridge.process.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let Some(process) = guard.as_mut() else {
+                return; // 已经有人清掉了（engine_stop / 上一次退出）
+            };
+            if process.child.id() != pid {
+                return; // 换了新进程：老进程的事不归我管
+            }
+            match process.child.try_wait() {
+                Ok(Some(status)) => {
+                    log::warn!("引擎进程已退出: {status}（界面会提示「重启引擎」）");
+                    *guard = None;
+                    drop(guard);
+                    notify_engine_exit(&app, &status.to_string());
+                    return;
+                }
+                Ok(None) => drop(guard),
+                Err(error) => {
+                    log::warn!("查询引擎进程状态失败: {error}");
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// 把「引擎退出了」推给前端（走和引擎通知同一条事件通道）。
+fn notify_engine_exit(app: &AppHandle, detail: &str) {
+    let params = json!({ "reason": detail });
+    if let Err(error) = app.emit(
+        EVENT_ENGINE,
+        Notification {
+            method: "engine.exited".to_string(),
+            params,
+        },
+    ) {
+        log::warn!("转发引擎退出通知失败: {error}");
+    }
 }
 
 /// 绑定帧通道的 unix socket（仅 unix 编译）。
@@ -263,6 +344,7 @@ fn read_one_frame_stream(app: AppHandle, stream: impl std::io::Read) {
 /// 发一个 JSON-RPC 请求并等待对应响应。
 #[tauri::command]
 pub async fn engine_rpc(
+    app: AppHandle,
     bridge: State<'_, Bridge>,
     method: String,
     params: Option<Value>,
@@ -270,6 +352,10 @@ pub async fn engine_rpc(
     let timeout = match method.as_str() {
         "device.connect" => CONNECT_TIMEOUT,
         "device.list" => SCAN_TIMEOUT,
+        // 首屏启动时的引擎握手与工作区读取：允许单文件 sidecar 冷启动解压完成
+        "engine.ping" | "engine.info" | "workspace.list" | "workspace.tree" | "project.get" => {
+            BOOT_RPC_TIMEOUT
+        }
         // OCR 识别在引擎内异步执行，RPC 只负责提交任务
         "ocr.recognize" | "ocr.cancel" | "ocr.load" | "ocr.status" => Duration::from_secs(30),
         "device.touch" => Duration::from_secs(20),
@@ -292,15 +378,20 @@ pub async fn engine_rpc(
 
     {
         let mut guard = bridge.process.lock().map_err(|e| e.to_string())?;
-        let process = guard.as_mut().ok_or("引擎未启动，请先调用 engine_start")?;
+        // 文案是给用户看的：不说 engine_start，直接说怎么办
+        let process = guard
+            .as_mut()
+            .ok_or("引擎没在运行（可能刚退出）：点「重启引擎」重开一次")?;
         if let Err(error) = writeln!(process.stdin, "{request}") {
             *guard = None;
+            log::warn!("写入引擎失败，已把引擎视为不可用: {error}");
             return Err(format!(
                 "写入引擎失败: {error}（引擎可能已退出，请点「重启引擎」或重试）"
             ));
         }
         if let Err(error) = process.stdin.flush() {
             *guard = None;
+            log::warn!("刷新引擎 stdin 失败，已把引擎视为不可用: {error}");
             return Err(format!(
                 "写入引擎失败: {error}（引擎可能已退出，请点「重启引擎」或重试）"
             ));
@@ -333,7 +424,15 @@ pub async fn engine_rpc(
         }
         Err(_) => {
             let _ = bridge.pending.lock().map(|mut map| map.remove(&id));
-            Err(format!("引擎响应超时（>{timeout:?}）"))
+            // 以前只说"超时"，既不说哪个方法，也不说日志在哪 —— 别人电脑上就只能来问我们
+            // 引擎那侧同时在写"慢请求 / 卡在哪一行（线程栈）"，两边对着看就能定位
+            log::warn!(
+                "引擎响应超时（>{timeout:?}）: {method}（引擎可能还在忙：它的日志里会有这个请求的耗时与线程栈）"
+            );
+            Err(format!(
+                "引擎响应超时（>{timeout:?}）：{method} 没回。手机没授权 / adb 被杀软拦或被模拟器占用 / 首次启动正在解压都会这样；细节见 {}",
+                log_file_hint(&app)
+            ))
         }
     }
 }
@@ -382,7 +481,21 @@ pub fn engine_stop(bridge: State<'_, Bridge>) -> Result<(), String> {
 /// 读引擎 stdout：带 `id` 的是响应（路由给等待方），其余是通知（转发给前端）。
 fn read_loop(app: AppHandle, stdout: impl std::io::Read) {
     let bridge = app.state::<Bridge>();
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+    for line in BufReader::new(stdout).split(b'\n') {
+        let line = match line {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                log::warn!("读取引擎 stdout 失败: {error}");
+                return;
+            }
+        };
+        let line = match std::str::from_utf8(&line) {
+            Ok(line) => line,
+            Err(error) => {
+                log::warn!("引擎输出不是 UTF-8，已跳过该行并继续读取: {error}");
+                continue;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -493,11 +606,12 @@ fn resolve_engine_command() -> Result<(PathBuf, Vec<String>, PathBuf), String> {
 
     // `tauri dev` 会把 binaries/ 里的 sidecar 拷到 gamepilot.exe 旁边；那份往往是上次 build 的快照，
     // 不会跟着 `uv sync` 变。Debug 默认走 venv；要测 sidecar 可设 GAMEPILOT_USE_SIDECAR=1。
-    if cfg!(debug_assertions) && std::env::var("GAMEPILOT_USE_SIDECAR").is_err() {
-        if let Some((program, args, cwd)) = resolve_repo_venv_engine() {
-            log::info!("开发模式使用 engine/.venv: {}", program.display());
-            return Ok((program, args, cwd));
-        }
+    if cfg!(debug_assertions)
+        && std::env::var("GAMEPILOT_USE_SIDECAR").is_err()
+        && let Some((program, args, cwd)) = resolve_repo_venv_engine()
+    {
+        log::info!("开发模式使用 engine/.venv: {}", program.display());
+        return Ok((program, args, cwd));
     }
 
     if let Some((program, cwd)) = resolve_packaged_sidecar() {

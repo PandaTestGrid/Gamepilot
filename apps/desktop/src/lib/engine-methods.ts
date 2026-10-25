@@ -18,6 +18,29 @@ export const REQUIRED_ENGINE_METHODS: readonly string[] = [
   // 识别器：搜索范围（模板默认全屏 / 区域）—— 旧引擎没有它时，
   // 界面上的「全屏」只是本地勾选，引擎仍按原区域搜，滚动后必然未命中
   'recognizer.search',
+  // AI 识别器：不录模板直接注册 + 可选组件（旧引擎没有这些方法时，界面按"不支持"处理）
+  'recognizer.create',
+  'yolo.status',
+  'yolo.warmup',
+  'yolo.install',
+  'yolo.remove',
+  // AI 识别弹窗的实时检测预览 / 模型切换
+  'recognizer.preview',
+  'yolo.models',
+  'yolo.model.set',
+  'yolo.model.add',
+  'recognizer.detail',
+  'recognizer.update',
+  'recognizer.frames.meta',
+  'recognizer.frame',
+  // AI 弹窗的无帧数上限录制：独立持久化及分页/逐帧读取
+  'recording.start',
+  'recording.stop',
+  'recording.meta',
+  'recording.frameAt',
+  'recording.delete',
+  // 本机窗口选择器：Windows / macOS 统一枚举（旧引擎只有 mac.windows，Windows 上挑不到窗口）
+  'window.list',
 ];
 
 /** 引擎方法表里缺了哪些前端需要的方法（空数组 = 兼容）。 */

@@ -31,6 +31,71 @@ def _wait(predicate: Any, timeout: float = 5.0, interval: float = 0.05) -> bool:
     return False
 
 
+def test_fast_flow_keeps_streaming_and_stop_does_not_wait_for_next_click(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    controller = SyntheticController()
+    controller.connect()
+    project = Project(root=str(tmp_path)).ensure()
+    payload = {
+        "version": 1,
+        "nodes": [],
+        "edges": [],
+        "recognizers": {},
+        "flow": {
+            "steps": [
+                {"id": "trigger", "type": "manual", "params": {}},
+                {"id": "loop", "type": "loop", "params": {"count": 1000}},
+                {"id": "click", "type": "click", "params": {"by": "coord", "x": 0.2, "y": 0.3}},
+                {"id": "end", "type": "loopend", "params": {"back": "loop"}},
+            ]
+        },
+    }
+    Path(project.graph_path).write_text(json.dumps(payload), encoding="utf-8")
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def blocking_click(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            entered.set()
+            assert release.wait(timeout=3)
+
+    monkeypatch.setattr(controller, "touch", None)
+    monkeypatch.setattr(controller, "click", blocking_click)
+    events: list[tuple[str, dict[str, Any]]] = []
+    session = DeviceSession(
+        "synthetic:test-1",
+        controller,
+        project,
+        lambda method, params: events.append((method, params)),
+        fps=30.0,
+    )
+    stopping: threading.Thread | None = None
+    try:
+        session.set_stream_fps(30)
+        session.start_run()
+        session.start()
+        assert entered.wait(timeout=3)
+        # 第一次和第二次点击之间必须交付画面，不能整批点击完才推帧。
+        assert any(method == "engine.frame" for method, _ in events)
+        stopping = threading.Thread(target=session.stop_run)
+        stopping.start()
+        stopping.join(timeout=1)
+        assert not stopping.is_alive(), "停止 RPC 不得等待同步点击返回"
+        release.set()
+        assert _wait(lambda: not session.running)
+        assert calls == 2
+        assert any(method == "run.stopped" for method, _ in events)
+    finally:
+        release.set()
+        if stopping is not None:
+            stopping.join(timeout=3)
+        session.stop()
+
+
 def test_capture_failure_notifies_once_then_recovers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     controller = SyntheticController()
     controller.connect()
@@ -432,6 +497,7 @@ def test_manual_tap_does_not_hold_session_lock(tmp_path: Path) -> None:
         assert release.wait(timeout=5)
 
     controller.click = slow_click  # type: ignore[method-assign]
+    controller.touch = None  # type: ignore[method-assign, assignment]
     session = DeviceSession(
         "synthetic:test-1",
         controller,
@@ -462,6 +528,7 @@ def test_workflow_click_does_not_hold_session_lock(tmp_path: Path) -> None:
         assert release.wait(timeout=5)
 
     controller.click = slow_click  # type: ignore[method-assign]
+    controller.touch = None  # type: ignore[method-assign, assignment]
     session = DeviceSession(
         "synthetic:test-1",
         controller,
@@ -473,7 +540,7 @@ def test_workflow_click_does_not_hold_session_lock(tmp_path: Path) -> None:
     graph["flow"] = {
         "steps": [
             {"id": "t", "type": "manual", "params": {}},
-            {"id": "c", "type": "click", "params": {"by": "坐标", "x": 0.5, "y": 0.5}},
+            {"id": "c", "type": "click", "params": {"by": "coord", "x": 0.5, "y": 0.5}},
         ]
     }
     session.save_graph(graph)

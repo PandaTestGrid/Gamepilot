@@ -5,7 +5,6 @@ import { type ReactNode, useMemo, useState } from 'react';
 import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels';
 
 import { FlowCanvas } from '@/features/graph/flow/FlowCanvas';
-import { FlowGlobalSettingsDrawer } from '@/features/graph/flow/FlowGlobalSettingsDrawer';
 import { FlowModulePointerDragProvider } from '@/features/graph/flow/flow-module-pointer-drag';
 import { ModulePaletteRail } from '@/features/graph/flow/ModulePaletteRail';
 import { taskName } from '@/features/graph/task-name';
@@ -114,7 +113,6 @@ export function WorkflowWorkspace({
     return (
       <div className="relative flex h-full min-h-0">
         <div className="relative min-w-0 flex-1">{emptyOverlay}</div>
-        <FlowGlobalSettingsDrawer />
       </div>
     );
   }
@@ -158,7 +156,6 @@ export function WorkflowWorkspace({
               <WorkflowColumn workflowRoot={primaryRoot} />
             )}
           </div>
-          <FlowGlobalSettingsDrawer />
         </div>
       </ModulePaletteRail>
     </FlowModulePointerDragProvider>

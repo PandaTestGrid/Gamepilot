@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import numpy as np
 
-from .base import SUPPORTED_KEYS, Controller, Size, register
+from .base import (
+    SUPPORTED_KEYS,
+    Controller,
+    Size,
+    normalize_touch_point,
+    register,
+    validate_touch_identity,
+    validate_touch_owner,
+)
 
 BUTTON: tuple[float, float, float, float] = (0.30, 0.30, 0.20, 0.10)
 LOGO: tuple[float, float, float, float] = (0.60, 0.30, 0.16, 0.12)
@@ -30,6 +39,9 @@ class SyntheticController(Controller):
         self.keys: list[str] = []
         self.swipes: list[tuple[float, float, float, float, float]] = []
         self.touches: list[tuple[str, float, float]] = []
+        self.pointer_events: list[tuple[str, int, str, float, float]] = []
+        self.active_touches: dict[int, tuple[str, float, float]] = {}
+        self._touch_lock = threading.RLock()
 
     def connect(self) -> None:
         self.frames = 0
@@ -37,6 +49,8 @@ class SyntheticController(Controller):
         self.keys = []
         self.swipes = []
         self.touches = []
+        self.pointer_events = []
+        self.active_touches = {}
         self._connected = True
 
     @property
@@ -63,6 +77,54 @@ class SyntheticController(Controller):
         if name not in SUPPORTED_KEYS:
             raise ValueError(f"不支持的按键: {name}")
         self.keys.append(name)
+
+    @property
+    def max_touch_points(self) -> int:
+        return 10 if self._connected else 0
+
+    def touch_down(self, x: float, y: float, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        x, y = normalize_touch_point(x, y)
+        with self._touch_lock:
+            if not self._connected:
+                raise RuntimeError("设备未连接")
+            if pointer_id in self.active_touches:
+                raise ValueError(f"触点 {pointer_id} 已被 owner 占用")
+            self.active_touches[pointer_id] = (owner, x, y)
+            self.pointer_events.append(("down", pointer_id, owner, x, y))
+
+    def touch_move(self, x: float, y: float, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        x, y = normalize_touch_point(x, y)
+        with self._touch_lock:
+            previous = self.active_touches.get(pointer_id)
+            if previous is None or previous[0] != owner:
+                raise ValueError(f"触点 {pointer_id} 不属于 owner")
+            self.active_touches[pointer_id] = (owner, x, y)
+            self.pointer_events.append(("move", pointer_id, owner, x, y))
+
+    def touch_up(self, *, pointer_id: int, owner: str) -> None:
+        validate_touch_identity(pointer_id, owner)
+        with self._touch_lock:
+            previous = self.active_touches.get(pointer_id)
+            if previous is None:
+                return
+            if previous[0] != owner:
+                raise ValueError(f"触点 {pointer_id} 不属于 owner")
+            del self.active_touches[pointer_id]
+            self.pointer_events.append(("up", pointer_id, owner, previous[1], previous[2]))
+
+    def release_touches(self, *, owner: str | None = None) -> None:
+        if owner is not None:
+            validate_touch_owner(owner)
+        with self._touch_lock:
+            for pointer_id, (held_by, _x, _y) in reversed(list(self.active_touches.items())):
+                if owner is None or held_by == owner:
+                    self.touch_up(pointer_id=pointer_id, owner=held_by)
+
+    def close(self) -> None:
+        self.release_touches()
+        super().close()
 
     def touch(self, phase: str, x: float, y: float) -> None:
         self.touches.append((phase, round(x, 4), round(y, 4)))

@@ -43,6 +43,19 @@ const payload: GraphPayload = {
 };
 
 describe('graph.json → 界面模型', () => {
+  it('enabled默认开启，显式关闭屏蔽旧命中但保留素材和步骤引用', () => {
+    const graph = toGraphData('dev', {
+      ...payload,
+      recognizers: { on: { type: 'template' }, off: { type: 'yolo', enabled: false, classes: ['target'] } },
+    });
+    expect(graph.recognizers.find((item) => item.label === 'on')?.enabled).toBe(true);
+    expect(graph.recognizers.find((item) => item.label === 'off')).toMatchObject({
+      enabled: false,
+      classes: ['target'],
+      score: 0,
+      state: 'idle',
+    });
+  });
   const graph = toGraphData('dev', payload);
 
   it('没写 condition 的边等价于 all_of=[when]', () => {
@@ -70,6 +83,42 @@ describe('graph.json → 界面模型', () => {
     const color = graph.recognizers.find((item) => item.label === 'popup');
     expect(color?.type).toBe('color');
     expect(color?.template).toBeUndefined();
+  });
+
+  it('AI 类别去重并保持首次出现顺序；显式类别优先于示例标签', () => {
+    const adapted = toGraphData('dev', {
+      ...payload,
+      recognizers: {
+        classes: { type: 'yolo', classes: ['enemy', 'boss', 'enemy'], examples: [{ label: 'ignored' }] },
+        examples: {
+          type: 'yolo',
+          classes: [],
+          examples: [{ label: ' enemy ' }, { label: 'boss' }, { label: 'enemy' }, {}, { label: ' ' }, null],
+        },
+        empty: { type: 'yolo', classes: [], examples: [] },
+      },
+    });
+
+    expect(adapted.recognizers[0]?.classes).toEqual(['enemy', 'boss']);
+    expect(adapted.recognizers[1]?.classes).toEqual(['enemy', 'boss']);
+    expect(adapted.recognizers[1]?.examplesCount).toBe(6);
+    expect(adapted.recognizers[2]?.classes).toBeUndefined();
+  });
+
+  it('YOLO 缺省阈值为 0.3，其他类型仍为 0.82；显式阈值不覆盖', () => {
+    const adapted = toGraphData('dev', {
+      ...payload,
+      recognizers: {
+        ai: { type: 'yolo' },
+        ai_custom: { type: 'yolo', threshold: 0.47 },
+        template: { type: 'template' },
+        ocr: { type: 'ocr' },
+        color: { type: 'color' },
+        unspecified: {},
+      },
+    });
+
+    expect(adapted.recognizers.map((item) => item.threshold)).toEqual([0.3, 0.47, 0.82, 0.82, 0.82, 0.82]);
   });
 
   it('搜索范围：缺省 region、显式 full 保留；没写 roi 映射成全屏而不是 0×0', () => {

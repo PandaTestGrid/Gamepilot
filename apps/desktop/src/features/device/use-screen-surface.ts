@@ -137,21 +137,29 @@ export function useScreenSurface({
     if (!container) {
       return;
     }
+    // 持续测量画面实际显示矩形：素材区展开/收起、面板拖动、窗口缩放都会改变它，
+    // 只靠 ResizeObserver 在动画/快速布局时可能漏一帧，识别框就会和画面错位。
+    let raf = 0;
+    let lastKey = '';
     const measure = (): void => {
       const imageSize = screenImageSize(frame?.resolution, imgRef.current);
-      if (!imageSize) {
-        return;
-      }
       const rect = container.getBoundingClientRect();
-      const box = containBox({ width: rect.width, height: rect.height }, imageSize);
-      setImageBox(box);
-      setViewportRect({ left: rect.left, top: rect.top });
+      if (imageSize && rect.width > 0 && rect.height > 0) {
+        const box = containBox({ width: rect.width, height: rect.height }, imageSize);
+        if (box) {
+          const key = `${Math.round(box.left * 10)},${Math.round(box.top * 10)},${Math.round(box.width * 10)},${Math.round(box.height * 10)},${Math.round(rect.left)},${Math.round(rect.top)}`;
+          if (key !== lastKey) {
+            lastKey = key;
+            setImageBox(box);
+            setViewportRect({ left: rect.left, top: rect.top });
+          }
+        }
+      }
+      raf = requestAnimationFrame(measure);
     };
     measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(container);
-    return () => observer.disconnect();
-  }, [frame?.index, frame?.resolution]);
+    return () => cancelAnimationFrame(raf);
+  }, [frame?.resolution]);
 
   /** 指针 → 画面归一化坐标（`clamp=false` 时落在黑边上返回 null：背景不算画面） */
   const toCanvas = useCallback(
@@ -188,10 +196,16 @@ export function useScreenSurface({
   const lastMoveAt = useRef(0);
   /** 本次按下的采样轨迹（含按下时刻），抬手时折成 path + hold_ms */
   const controlTrack = useRef<GestureSample[]>([]);
+  // PointerEvent 的 shiftKey 在某些 Chromium/WebView 版本的 pointerup 上会丢失；
+  // 录制期间持续记住修饰键状态，确保「连续 + Shift 直线」不会退化成普通轨迹。
+  const swipeShiftHeld = useRef(false);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
     if (recordMode !== 'off') {
       return; // 录制模式走 mouse 那一套（框选/点选）
+    }
+    if (event.button !== 0) {
+      return; // 只处理主键：中键/右键不当作控制手势（也不触发兼容模式的抢焦点）
     }
     if (!active) {
       // 多开里点别人的格子：先切过去。切完这一下就结束 —— "先切再操作"，
@@ -211,6 +225,7 @@ export function useScreenSurface({
     event.currentTarget.setPointerCapture(event.pointerId);
     const startedAt = performance.now();
     controlStart.current = { x: point[0], y: point[1], moved: false, at: startedAt };
+    swipeShiftHeld.current = event.shiftKey;
     controlTrack.current = [{ point, at: startedAt }];
     lastMoveAt.current = 0;
     onGesture?.({ phase: 'down', from: point, to: point, swipe: false, durationMs: 0, points: [point] });
@@ -220,6 +235,20 @@ export function useScreenSurface({
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
     const start = controlStart.current;
     if (!start) {
+      return;
+    }
+    // 录制模式绝不往下发控制：否则上一笔残留的"正在拖"会在框选时继续把 move 发到设备，
+    // 兼容/光标跟随模式会把系统鼠标吸到游戏窗口上（录制直接没法用）。
+    if (recordMode !== 'off') {
+      controlStart.current = null;
+      controlTrack.current = [];
+      return;
+    }
+    // 主键已经松开（例如兼容模式抢焦点后 pointerup 丢了）：清掉残留手势，别再把
+    // 鼠标移动转发成 touch(move) —— 那就是"鼠标一放到画面就被吸到游戏窗口"的来源。
+    if ((event.buttons & 1) === 0) {
+      controlStart.current = null;
+      controlTrack.current = [];
       return;
     }
     const point = toCanvas(event.clientX, event.clientY, true);
@@ -239,10 +268,11 @@ export function useScreenSurface({
     lastMoveAt.current = now;
     void touchDevice(deviceId, 'move', point[0], point[1]);
     const ui = useUiStore.getState();
+    swipeShiftHeld.current = swipeShiftHeld.current || event.shiftKey;
     // 点对点录制只写起止点；连续录制按住 Shift 时也只画起止直线 ——
     // 屏幕上那条线就是松手后会写进步骤的线。
     const straight =
-      ui.pendingFlowSwipeMode === 'track' ? event.shiftKey : ui.pendingFlowSwipeMode === 'single';
+      ui.pendingFlowSwipeMode === 'track' ? swipeShiftHeld.current : ui.pendingFlowSwipeMode === 'single';
     const points: GesturePoint[] =
       ui.pendingFlowSwipeStepId && straight
         ? [
@@ -277,9 +307,12 @@ export function useScreenSurface({
     const pendingSwipeMode = useUiStore.getState().pendingFlowSwipeMode;
     const duration = Math.round(releasedAt - start.at);
     const pathPoints = samples.map((sample) => sample.point);
+    swipeShiftHeld.current = swipeShiftHeld.current || event.shiftKey;
+    const shiftHeld = swipeShiftHeld.current;
+    swipeShiftHeld.current = false;
     // 连续录制按住 Shift：把这一笔锁成起止直线（屏幕上画的和写进步骤的都是直线）；
     // 只对待录的滑动步骤生效，别影响全局「录操作」的手势判定
-    const straight = Boolean(pendingSwipeStep) && pendingSwipeMode === 'track' && event.shiftKey;
+    const straight = Boolean(pendingSwipeStep) && pendingSwipeMode === 'track' && shiftHeld;
     // 带上真实走过的点：画圈时起止点几乎重合，只看合位移会把它判成轻点（录不进去）；
     // Shift 直线只看起止距离，画圈但首尾很近的就不算滑动
     const swipe = isSwipeGesture(

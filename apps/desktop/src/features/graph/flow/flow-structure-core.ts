@@ -13,10 +13,10 @@ import { isKnownFlowStepType, isTriggerType } from '@/features/graph/flow/flow-s
 import type { FlowSourceHandleId } from '@/features/graph/flow/flow-step-ports';
 import type { FlowStep } from '@/types';
 
-export type BlockKind = 'cond' | 'loop';
+export type BlockKind = 'cond' | 'loop' | 'parallel';
 
 export function isBlockHead(type: string): boolean {
-  return type === 'cond' || type === 'loop';
+  return type === 'cond' || type === 'loop' || type === 'parallel';
 }
 
 export function isBlockMark(type: string): boolean {
@@ -31,13 +31,14 @@ export interface BlockSpan {
   readonly endId: string;
   readonly elseIndex: number | null;
   readonly elseId: string | null;
+  readonly branches?: readonly { markerId: string; markerIndex: number; branch: number; endIndex: number }[];
 }
 
 export function parseBlocks(steps: readonly FlowStep[]): BlockSpan[] {
   const blocks: BlockSpan[] = [];
   const open: { kind: BlockKind; index: number; elseIndex: number | null }[] = [];
   steps.forEach((step, index) => {
-    if (step.type === 'cond' || step.type === 'loop') {
+    if (step.type === 'cond' || step.type === 'loop' || step.type === 'parallel') {
       open.push({ kind: step.type, index, elseIndex: null });
       return;
     }
@@ -48,8 +49,8 @@ export function parseBlocks(steps: readonly FlowStep[]): BlockSpan[] {
       }
       return;
     }
-    if (step.type === 'condend' || step.type === 'loopend') {
-      const back = coerceStr(step.params?.back).trim();
+    if (step.type === 'condend' || step.type === 'loopend' || step.type === 'parallelend') {
+      const back = coerceStr(step.type === 'parallelend' ? step.params?.parallel : step.params?.back).trim();
       const top = open.at(-1);
       if (!top || steps[top.index]!.id !== back) {
         return;
@@ -63,6 +64,27 @@ export function parseBlocks(steps: readonly FlowStep[]): BlockSpan[] {
         endId: step.id,
         elseIndex: top.kind === 'cond' ? top.elseIndex : null,
         elseId: top.elseIndex !== null ? steps[top.elseIndex]!.id : null,
+        ...(top.kind === 'parallel'
+          ? {
+              branches: steps
+                .flatMap((item, markerIndex) =>
+                  markerIndex > top.index &&
+                  markerIndex < index &&
+                  item.type === 'parallelbranch' &&
+                  item.params?.parallel === back
+                    ? [
+                        {
+                          markerId: item.id,
+                          markerIndex,
+                          branch: Number(item.params?.branch),
+                          endIndex: index,
+                        },
+                      ]
+                    : [],
+                )
+                .map((branch, n, all) => ({ ...branch, endIndex: all[n + 1]?.markerIndex ?? index })),
+            }
+          : {}),
       });
     }
   });
@@ -111,8 +133,32 @@ export function validateFlowSteps(steps: readonly FlowStep[]): string | null {
       return `第 ${index + 1} 步的类型不认识: ${step.type}`;
     }
     const back = coerceStr(step.params?.back).trim();
-    if (step.type === 'cond' || step.type === 'loop') {
+    if (step.type === 'call' && frames.some((frame) => frame.kind === 'parallel'))
+      return '并行分支内不能调用工作流';
+    if (step.type === 'cond' || step.type === 'loop' || step.type === 'parallel') {
+      if (step.type === 'parallel') {
+        const count = Number(step.params?.branches ?? 2);
+        if (!Number.isInteger(count) || count < 2 || count > 4) return '并行分支数必须为 2–4';
+        if (step.params?.mode !== undefined && step.params.mode !== 'all' && step.params.mode !== 'any')
+          return '并行模式必须为 all 或 any';
+        const concurrent = frames
+          .filter((frame) => frame.kind === 'parallel')
+          .reduce(
+            (n, frame) => n * Number(steps.find((item) => item.id === frame.id)?.params?.branches ?? 2),
+            count,
+          );
+        if (concurrent > 16) return '嵌套并行最多同时 16 个分支';
+      }
       frames.push({ kind: step.type, id: step.id });
+    } else if (step.type === 'parallelbranch') {
+      const top = frames.at(-1);
+      if (top?.kind !== 'parallel' || step.params?.parallel !== top.id)
+        return '并行分支标记必须属于最近的并行模块';
+    } else if (step.type === 'parallelend') {
+      const top = frames.at(-1);
+      if (top?.kind !== 'parallel' || step.params?.parallel !== top.id)
+        return '并行结束标记必须匹配最近的并行模块';
+      frames.pop();
     } else if (step.type === 'else') {
       const top = frames.at(-1);
       if (top?.kind !== 'cond') {
@@ -145,9 +191,23 @@ export function validateFlowSteps(steps: readonly FlowStep[]): string | null {
   }
   if (frames.length > 0) {
     const top = frames.at(-1)!;
+    if (top.kind === 'parallel') return '有「并行」没有对应的「并行结束」';
     return top.kind === 'cond' ? '有「条件」没有对应的「条件结束」' : '有「循环」没有对应的「循环结束」';
   }
+  for (const block of parseBlocks(steps).filter((item) => item.kind === 'parallel')) {
+    const branches = block.branches ?? [];
+    const count = Number(steps[block.headIndex]?.params?.branches ?? 2);
+    if (branches.length !== count || branches.some((branch, n) => branch.branch !== n + 1))
+      return '并行必须包含依次编号的完整分支';
+  }
   return null;
+}
+
+export function parallelContainingStep(steps: readonly FlowStep[], stepId: string): BlockSpan | undefined {
+  const index = steps.findIndex((step) => step.id === stepId);
+  return parseBlocks(steps).find(
+    (block) => block.kind === 'parallel' && block.headIndex < index && index < block.endIndex,
+  );
 }
 
 export function condLoopRepeat(step: FlowStep | undefined): 'then' | 'else' | null {

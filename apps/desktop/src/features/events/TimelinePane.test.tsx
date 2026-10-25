@@ -58,7 +58,7 @@ const BUNDLE = {
       ts: 1,
       screenshot: '001_step_s1.jpg',
       message: '',
-      params: { by: '坐标', x: 0.5, y: 0.5 },
+      params: { by: 'coord', x: 0.5, y: 0.5 },
       result: '点击 · 0.50, 0.50',
       score: 0.9321,
       matchedRect: [0.1, 0.2, 0.3, 0.4],

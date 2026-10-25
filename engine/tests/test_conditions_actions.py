@@ -151,6 +151,9 @@ def test_wait_key_text_validation() -> None:
         Action.parse({"type": "wait", "seconds": 0})
 
     assert Action.parse({"type": "key", "value": "back"}).describe() == "按键 back"
+    # Windows 窗口游戏键：动作层允许保存，具体设备不支持时运行时报错
+    assert Action.parse({"type": "key", "value": "w"}).describe() == "按键 w"
+    assert Action.parse({"type": "key", "value": "f12"}).describe() == "按键 f12"
     with pytest.raises(ValueError, match=r"key\.value"):
         Action.parse({"type": "key", "value": "回车"})
 

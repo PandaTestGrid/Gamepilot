@@ -23,7 +23,7 @@ function shortHintForModule(module: PaletteModule): string {
     case 'wait':
       return '识别器命中';
     case 'delay':
-      return '毫秒延时';
+      return '固定 / 随机范围';
     case 'cond':
       return '成立 / 不成立分流';
     case 'loop':

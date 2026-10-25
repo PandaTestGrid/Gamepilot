@@ -1,47 +1,61 @@
 /**
  * 识别器选择：节点内只展示当前图 + 按钮；点开后浮层网格看图点选（Automa 式磁贴）。
  * 详情配置区（`showThreshold` / `previewSide`）在「更换 / 录制」下方提供该图像模板的匹配阈值配置。
- * 搜索范围：步骤里只显示步骤级的「搜索」（StepSearchScope）；模板默认值在录制浮层设置。
+ * 搜索范围只在步骤上配置（StepSearchScope）；录制时不再设模板默认值。
  */
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ImageIcon, ScanLine, ScanText } from 'lucide-react';
+import { ImageIcon, Pencil, ScanLine, ScanText } from 'lucide-react';
+
+import { YoloRecognizerDialog } from '@/features/device/YoloRecognizerDialog';
 
 import { RecognizerInlinePreview } from '@/features/recognizers/RecognizerInlinePreview';
+import { YoloExampleGallery } from '@/features/recognizers/YoloExampleGallery';
 import { cn } from '@/lib/utils';
 import { useDeviceStore } from '@/stores/device.store';
-import { graphForDevice, useGraphStore } from '@/stores/graph.store';
+import { graphForDevice, SCRIPT_SCOPE, useGraphStore } from '@/stores/graph.store';
 import { useSessionStore } from '@/stores/session.store';
 import { useTemplateStore } from '@/stores/template.store';
 import { useUiStore } from '@/stores/ui.store';
-
-const SEARCH_OPTIONS = [
-  { id: 'region' as const, label: '原区域' },
-  { id: 'full' as const, label: '全屏' },
-];
 
 function TemplateGridTile({
   label,
   selected,
   imageHeight,
   onPick,
+  kind,
+  deviceId,
+  examplesCount,
+  revision,
+  hasWorkflow,
 }: {
   label: string;
   selected: boolean;
   imageHeight: number;
   onPick: () => void;
+  /** AI 使用标记范围裁剪图，其他类型保留模板预览。 */
+  kind?: 'template' | 'color' | 'ocr' | 'yolo';
+  deviceId: string;
+  examplesCount?: number;
+  revision: string;
+  hasWorkflow: boolean;
 }): ReactNode {
   const key = `${label}:color`;
   const entry = useTemplateStore((state) => state.entries[key]);
   const load = useTemplateStore((state) => state.load);
 
+  const isYolo = kind === 'yolo';
   useEffect(() => {
-    load(label, false);
-  }, [label, load]);
+    if (!isYolo) {
+      load(label, false);
+    }
+  }, [label, load, isYolo]);
 
   return (
     <button
       type="button"
+      aria-label={`选择 ${label}`}
+      aria-pressed={selected}
       onClick={(event) => {
         event.stopPropagation();
         onPick();
@@ -55,7 +69,19 @@ function TemplateGridTile({
         className="flex w-full items-center justify-center border-b border-line bg-panel/80 p-1"
         style={{ height: imageHeight }}
       >
-        {entry?.url ? (
+        {isYolo ? (
+          deviceId || hasWorkflow ? (
+            <YoloExampleGallery
+              deviceId={deviceId}
+              label={label}
+              examplesCount={examplesCount}
+              revision={revision}
+              presentation="tile"
+              tileSize={imageHeight - 8}
+              emptyHint="暂无标记图片"
+            />
+          ) : <span className="text-[10px] text-dim">未连接设备</span>
+        ) : entry?.url ? (
           <img
             src={entry.url}
             alt={label}
@@ -76,6 +102,7 @@ function PickerPopover({
   labels,
   value,
   compact,
+  revision,
   onPick,
   onClose,
 }: {
@@ -83,6 +110,7 @@ function PickerPopover({
   labels: readonly string[];
   value: string;
   compact: boolean;
+  revision: string;
   onPick: (label: string) => void;
   onClose: () => void;
 }): ReactNode {
@@ -90,11 +118,18 @@ function PickerPopover({
   const [pos, setPos] = useState({ top: anchor.bottom + 6, left: anchor.left, width: compact ? 248 : 300 });
 
   const load = useTemplateStore((state) => state.load);
+  const activeId = useDeviceStore((state) => state.activeId);
+  const workflowRoot = useSessionStore((state) => state.currentWorkflow?.root ?? '');
+  const graph = useGraphStore((state) => graphForDevice(state, activeId));
+  const recognizerOf = (label: string) => graph?.recognizers.find((item) => item.label === label);
 
   useEffect(() => {
     for (const label of labels) {
-      load(label, false);
+      if (recognizerOf(label)?.type !== 'yolo') {
+        load(label, false);
+      }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [labels, load]);
 
   useLayoutEffect(() => {
@@ -149,7 +184,7 @@ function PickerPopover({
         style={{ top: pos.top, left: pos.left, width: pos.width }}
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="border-b border-line px-2 py-1 text-[11px] text-dim">点选模板 · Esc 关闭</div>
+        <div className="border-b border-line px-2 py-1 text-[11px] text-dim">点选识别器 · Esc 关闭</div>
         <div className="min-h-0 flex-1 overflow-auto p-2">
           <div className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
             {labels.map((label) => (
@@ -158,6 +193,11 @@ function PickerPopover({
                 label={label}
                 selected={value === label}
                 imageHeight={imageHeight}
+                kind={recognizerOf(label)?.type}
+                deviceId={activeId}
+                examplesCount={recognizerOf(label)?.examplesCount}
+                revision={revision}
+                hasWorkflow={Boolean(workflowRoot)}
                 onPick={() => onPick(label)}
               />
             ))}
@@ -198,6 +238,9 @@ export function RecognizerPicker({
   className?: string;
 }): ReactNode {
   const [open, setOpen] = useState(false);
+  const [editingAi, setEditingAi] = useState(false);
+  const [galleryRevision, setGalleryRevision] = useState(0);
+  const workflowRoot = useSessionStore((state) => state.currentWorkflow?.root ?? '');
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -220,24 +263,14 @@ export function RecognizerPicker({
   const activeId = useDeviceStore((state) => state.activeId);
   const graph = useGraphStore((state) => graphForDevice(state, activeId));
   const updateThreshold = useGraphStore((state) => state.updateRecognizerThreshold);
-  const updateSearch = useGraphStore((state) => state.updateRecognizerSearch);
   const pushThreshold = useSessionStore((state) => state.setThreshold);
-  const pushSearch = useSessionStore((state) => state.setRecognizerSearch);
   const recognizer = graph?.recognizers.find((item) => item.label === value);
-  const threshold = recognizer?.threshold ?? 0.82;
-  const search = recognizer?.search ?? 'region';
   const isColor = recognizer?.type === 'color';
+  const isYolo = recognizer?.type === 'yolo';
+  const threshold = recognizer?.threshold ?? (isYolo ? 0.3 : 0.82);
   // OCR 识别器没有"模板长什么样"这回事，预览要改成"读哪段字"（见 RecognizerInlinePreview）
   const ocrText = recognizer?.type === 'ocr' ? (recognizer.text ?? '') : undefined;
-
-  const handleSearchChange = (next: 'region' | 'full'): void => {
-    const trimmed = value.trim();
-    if (!trimmed || next === search) {
-      return;
-    }
-    updateSearch(activeId, trimmed, next);
-    void pushSearch(activeId, trimmed, next);
-  };
+  const yoloClasses = isYolo ? (recognizer.classes ?? []) : undefined;
 
   useEffect(() => {
     return () => {
@@ -252,7 +285,7 @@ export function RecognizerPicker({
     if (!trimmed) {
       return;
     }
-    const clamped = Math.min(1, Math.max(0.5, Number(nextRaw.toFixed(2))));
+    const clamped = Math.min(1, Math.max(isYolo ? 0.05 : 0.5, Number(nextRaw.toFixed(2))));
     updateThreshold(activeId, trimmed, clamped);
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
@@ -293,8 +326,13 @@ export function RecognizerPicker({
       label={value}
       maxHeight={previewHeight}
       className="w-full"
-      emptyHint="点下方按钮选择模板"
+      emptyHint="点下方按钮选择识别器"
       ocrText={ocrText}
+      yoloClasses={yoloClasses}
+      deviceId={activeId ?? SCRIPT_SCOPE}
+      yoloExamplesCount={recognizer?.examplesCount}
+      yoloRevision={`${workflowRoot}:${galleryRevision}`}
+      compact={compact}
     />
   );
 
@@ -308,7 +346,7 @@ export function RecognizerPicker({
           title={
             labels.length === 0
               ? '当前工作流还没有已录制的模板，请先点右侧「录制」在画面中框选'
-              : '从已录制的模板中选择'
+              : '从当前工作流的识别器中选择（图像、AI 或文字）'
           }
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => {
@@ -321,9 +359,29 @@ export function RecognizerPicker({
           )}
         >
           <ImageIcon className="size-3 shrink-0" strokeWidth={1.75} />
-          {value ? '更换' : '选择'}
+          {value ? (isYolo && !compact ? '更换识别器' : '更换') : '选择'}
         </button>
-        {flowStepId ? (
+        {isYolo ? (
+          <button
+            type="button"
+            disabled={!activeId}
+            data-testid="recognizer-edit-ai"
+            title="编辑此 AI 识别器的标记图片、置信度与推理参数"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              closePicker();
+              setEditingAi(true);
+            }}
+            className={cn(
+              'nodrag nopan flex min-w-0 flex-1 items-center justify-center gap-1 rounded-sm border border-line bg-canvas text-brand hover:border-brand/50 hover:bg-raised focus-visible:outline-2 focus-visible:outline-brand',
+              compact ? 'px-1 py-0.5 text-[10px]' : 'px-1.5 py-1 text-badge',
+            )}
+          >
+            <Pencil className="size-3 shrink-0" strokeWidth={1.75} />
+            {compact ? '编辑 AI' : '编辑 AI 识别器'}
+          </button>
+        ) : flowStepId ? (
           <>
             <button
               type="button"
@@ -378,10 +436,10 @@ export function RecognizerPicker({
           className={cn('flex items-center gap-2 pt-0.5', compact ? 'text-[10px]' : 'text-badge')}
           data-testid="recognizer-threshold-control"
         >
-          <span className="shrink-0 text-faint">阈值</span>
+          <span className="shrink-0 text-dim">{isYolo ? 'AI 置信度' : '阈值'}</span>
           <input
             type="range"
-            min={0.5}
+            min={isYolo ? 0.05 : 0.5}
             max={1}
             step={0.01}
             value={threshold}
@@ -389,11 +447,13 @@ export function RecognizerPicker({
             data-testid="recognizer-threshold-slider"
             onChange={(event) => handleThresholdChange(Number(event.target.value))}
             className="nodrag nopan h-1 flex-1 accent-[var(--brand)]"
-            title="调整该图像模板的匹配阈值（0.50 ~ 1.00，越高越严格）"
+            title={isYolo
+              ? 'AI 置信度（0.05 ~ 1.00），越高越严格；当前工作流内引用此识别器的步骤共用'
+              : '调整该图像模板的匹配阈值（0.50 ~ 1.00，越高越严格）'}
           />
           <input
             type="number"
-            min={0.5}
+            min={isYolo ? 0.05 : 0.5}
             max={1}
             step={0.01}
             value={Number(threshold.toFixed(2))}
@@ -410,46 +470,13 @@ export function RecognizerPicker({
         </div>
       ) : null}
 
-      {/*
-        步骤里只显示「步骤级搜索」（由 StepSearchScope 渲染）。
-        模板默认值只在录制浮层里设置，避免同一个面板出现两排几乎一样的「搜索」。
-      */}
-      {showThreshold && value.trim() && !flowStepId ? (
-        <div
-          className={cn('flex items-center gap-1 pt-0.5', compact ? 'text-[10px]' : 'text-badge')}
-          data-testid="recognizer-search-control"
-          title={
-            isColor
-              ? '颜色识别只按录制区域找同色像素，不支持整帧搜索'
-              : '模板默认搜索范围；步骤里可以再覆盖成原区域或全屏'
-          }
-        >
-          <span className="shrink-0 text-faint">模板默认</span>
-          {SEARCH_OPTIONS.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              disabled={isColor}
-              data-testid={`recognizer-search-${option.id}`}
-              aria-pressed={search === option.id}
-              onClick={() => handleSearchChange(option.id)}
-              className={cn(
-                'nodrag nopan rounded-sm px-1.5 py-0.5 text-badge transition-colors disabled:opacity-40',
-                search === option.id
-                  ? 'bg-brand/20 font-medium text-brand'
-                  : 'text-dim hover:bg-raised hover:text-fg',
-              )}
-            >
-              {option.label}
-            </button>
-          ))}
-          <span className="ml-auto truncate text-[10px] text-faint">
-            {isColor ? '颜色识别·固定区域' : search === 'full' ? '整帧搜索' : '只在框选区'}
-          </span>
-        </div>
+      {isYolo && showThreshold ? (
+        <p className="text-[10px] leading-snug text-dim">
+          越高越严格；当前工作流内引用此识别器的步骤共用。
+        </p>
       ) : null}
 
-      {recognizer?.recordedSize && !isColor ? (
+      {recognizer?.recordedSize && !isColor && !isYolo ? (
         <p className="text-[10px] leading-snug text-faint">
           换分辨率会自动缩放（录制于 {recognizer.recordedSize[0]}×{recognizer.recordedSize[1]}）
         </p>
@@ -469,8 +496,29 @@ export function RecognizerPicker({
 
   return (
     <div className={cn('nodrag nopan space-y-1', className)} data-testid="recognizer-picker">
+      {isYolo && !compact ? (
+        <div className="flex min-w-0 items-center justify-between gap-2 pb-1 text-badge">
+          <span className="truncate font-medium text-fg" title={value}>{value}</span>
+          <span className="shrink-0 text-dim">{recognizer?.examplesCount ?? 0} 张标记图片</span>
+        </div>
+      ) : null}
       {preview}
       {controls}
+
+      {editingAi && activeId && isYolo ? createPortal(
+        <div className="nodrag nopan" onPointerDown={(event) => event.stopPropagation()}>
+          <YoloRecognizerDialog
+            deviceId={activeId}
+            open
+            editLabel={value}
+            onClose={() => {
+              setEditingAi(false);
+              setGalleryRevision((revision) => revision + 1);
+            }}
+          />
+        </div>,
+        document.body,
+      ) : null}
 
       {open && anchorRect ? (
         <PickerPopover
@@ -478,6 +526,7 @@ export function RecognizerPicker({
           labels={labels}
           value={value}
           compact={compact}
+          revision={`${workflowRoot}:${galleryRevision}`}
           onPick={handlePick}
           onClose={closePicker}
         />

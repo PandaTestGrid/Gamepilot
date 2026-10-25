@@ -7,6 +7,7 @@
  *  - 量不到时（首次渲染、刚插入还没上屏的节点）用 `estimateFlowNodeSize()` 估个偏大的值。
  */
 import { condGroupsFromParams } from '@/features/graph/flow/flow-cond-params';
+import { parallelBranchCount } from '@/features/graph/flow/flow-step-ports';
 import type { FlowStep } from '@/types';
 
 export interface FlowNodeSize {
@@ -21,7 +22,10 @@ export function estimateFlowNodeSize(step: FlowStep): FlowNodeSize {
     // 实测：1 行 218，2 行 345 → 90 + 行数 × 130
     return { w: 228, h: 90 + rows * 130 };
   }
-  if (step.type === 'loop') {
+  if (step.type === 'parallel') {
+    // Include the join output and preserve enough separation between 2–4 branch handles.
+    return { w: 300, h: Math.max(240, 100 + parallelBranchCount(step) * 40) };
+  }  if (step.type === 'loop') {
     return { w: 260, h: 130 };
   }
   return { w: 300, h: 240 };

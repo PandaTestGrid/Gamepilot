@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GraphToolbar } from '@/features/graph/GraphToolbar';
@@ -37,6 +37,27 @@ describe('工作流头部', () => {
       switchingWorkflowRoot: '',
       holdRunningDuringSwitch: false,
     });
+  });
+
+  it('丢失运行态时仍能直接向引擎停止当前工作流', () => {
+    const stopRun = vi.fn(() => Promise.resolve());
+    const original = useSessionStore.getState().stopRun;
+    useSessionStore.setState({ running: {}, runningWorkflowRoots: {}, stopRun });
+    try {
+      render(<GraphToolbar />);
+      const stop = screen.getByTitle('停止当前工作流（即使界面未显示运行状态，也向引擎发送停止请求）');
+      expect(stop).not.toBeDisabled();
+      fireEvent.click(stop);
+      expect(stopRun).toHaveBeenCalledWith(MUMU.id);
+    } finally {
+      useSessionStore.setState({ stopRun: original });
+    }
+  });
+
+  it('已知运行中即使设备扫描滞后或图为空也不能禁用停止', () => {
+    useDeviceStore.setState({ devices: [{ ...MUMU, status: 'discovered' }] });
+    render(<GraphToolbar />);
+    expect(screen.getByTitle('停止（MuMu）')).not.toBeDisabled();
   });
 
   it('运行中也不在头部画设备/脚本归属', () => {

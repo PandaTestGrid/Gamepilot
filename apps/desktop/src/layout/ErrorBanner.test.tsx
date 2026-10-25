@@ -66,11 +66,32 @@ describe('错误条', () => {
   it('引擎起不来：给「重启引擎」，点了会重新拉起', async () => {
     const user = userEvent.setup();
     const restart = vi.fn(() => Promise.resolve());
-    useEngineStore.setState({ status: 'error', info: '引擎未启动', missingMethods: [], restart });
+    useEngineStore.setState({
+      status: 'error',
+      info: '引擎启动失败：sidecar 不存在',
+      missingMethods: [],
+      restart,
+    });
     render(<ErrorBanner />);
 
     expect(screen.getByText(/引擎启动失败/)).toBeInTheDocument();
     await user.click(screen.getByText('重启引擎'));
     expect(restart).toHaveBeenCalled();
+  });
+
+  it('引擎中途退出：info 原样显示（不说成"启动失败"），照样给「重启引擎」', () => {
+    useEngineStore.setState({
+      status: 'error',
+      info: '引擎已退出（exit status: 1）：点「重启引擎」重开一次',
+      missingMethods: [],
+    });
+    render(<ErrorBanner />);
+
+    // 原样显示：套一层"引擎启动失败："就把"已退出"说错了
+    expect(screen.getByText(/引擎已退出/)).toBeInTheDocument();
+    expect(screen.queryByText(/启动失败/)).not.toBeInTheDocument();
+    expect(screen.getByText('重启引擎')).toBeInTheDocument();
+    // 引擎出问题时，顺手给一个"复制诊断"（别人电脑上跑不起来时最省事的一步）
+    expect(screen.getByText('复制诊断')).toBeInTheDocument();
   });
 });

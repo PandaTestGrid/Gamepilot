@@ -109,7 +109,7 @@ def test_protocol_constant_values_are_unique() -> None:
 def test_rpc_doc_documents_every_method() -> None:
     doc = RPC_DOC.read_text(encoding="utf-8")
     # 方法名一律写成反引号包起来的 `domain.action`
-    documented = set(re.findall(r"`([a-z][a-z0-9]*\.[a-z][a-z0-9.]*)`", doc))
+    documented = set(re.findall(r"`([a-z][a-z0-9]*\.[a-z][a-zA-Z0-9.]*)`", doc))
     declared = set(_protocol_constants().values())
     missing = sorted(declared - documented)
     assert not missing, "docs/rpc.md 没写这几个方法（新增 RPC 必须同步文档）：\n  " + "\n  ".join(missing)

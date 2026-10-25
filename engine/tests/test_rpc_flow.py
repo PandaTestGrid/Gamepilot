@@ -65,7 +65,7 @@ def test_saved_step_chain_runs_in_order_over_stdio(tmp_path: Path) -> None:
             engine,
             [
                 step("s1", "manual"),
-                step("s2", "click", by="坐标", x=0.3, y=0.4),
+                step("s2", "click", by="coord", x=0.3, y=0.4),
                 step("s3", "key", value="back"),
             ],
         )
@@ -249,7 +249,7 @@ def test_breakpoint_pauses_then_step_advances_one_step(tmp_path: Path) -> None:
             engine,
             [
                 step("s1", "manual"),
-                step("s2", "click", by="坐标", x=0.3, y=0.4),
+                step("s2", "click", by="coord", x=0.3, y=0.4),
                 step("s3", "key", value="back"),
             ],
         )
@@ -300,7 +300,7 @@ def test_run_records_evidence_over_stdio(tmp_path: Path) -> None:
             engine,
             [
                 step("s1", "manual"),
-                step("s2", "click", by="坐标", x=0.3, y=0.4),
+                step("s2", "click", by="coord", x=0.3, y=0.4),
             ],
         )
 
@@ -315,7 +315,7 @@ def test_run_records_evidence_over_stdio(tmp_path: Path) -> None:
 
         click_record = bundle["steps"][1]
         assert click_record["kind"] == "click"
-        assert click_record["params"] == {"by": "坐标", "x": 0.3, "y": 0.4}
+        assert click_record["params"] == {"by": "coord", "x": 0.3, "y": 0.4}
         assert isinstance(click_record["durationMs"], int)
 
         shot = next(item["screenshot"] for item in bundle["steps"] if item["screenshot"])

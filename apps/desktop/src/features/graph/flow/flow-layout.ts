@@ -35,7 +35,7 @@ function hasVisibleStep(steps: readonly FlowStep[], from: number, to: number): b
  * （头节点多高就往下让多少，所以条件卡片再高也不会压住下面的分支）；
  * 循环后、条件后的下一步仍在头节点右侧同一行。
  *
- * 返回这一列排到的最低点（`y + h`），供外层算 else 分支的位置。
+ * 返回完整子树包围盒：下一条 lane 避开所有嵌套分支，后续步骤避开最长分支。
  */
 function layoutSequence(
   steps: readonly FlowStep[],
@@ -46,13 +46,23 @@ function layoutSequence(
   result: Record<string, { x: number; y: number }>,
   blockByHead: ReadonlyMap<number, BlockSpan>,
   sizeOf: FlowSizeLookup,
-): number {
+): { bottom: number; right: number } {
   let x = originX;
   let bottom = originY;
+  let right = originX;
   const place = (step: FlowStep, y: number): void => {
     result[step.id] = { x, y };
     bottom = Math.max(bottom, y + sizeOf(step).h);
+    right = Math.max(right, x + sizeOf(step).w);
   };
+  const layoutBranch = (start: number, end: number, y: number): number => {
+    const bounds = layoutSequence(steps, start, end, x, y, result, blockByHead, sizeOf);
+    bottom = Math.max(bottom, bounds.bottom);
+    right = Math.max(right, bounds.right);
+    return bounds.bottom;
+  };
+  // Retain the established grid for ordinary cards, but honor measured wider cards.
+  const nextColumn = (edge: number): number => Math.max(x + X_GAP, edge + X_GAP - 300);
   let i = from;
   while (i < to) {
     const step = steps[i];
@@ -66,19 +76,37 @@ function layoutSequence(
     }
     const height = sizeOf(step).h;
     const block = blockByHead.get(i);
+    if (block?.kind === 'parallel') {
+      place(step, originY);
+      let laneBottom = originY + height;
+      for (const branch of block.branches ?? []) {
+        const laneY = laneBottom + BRANCH_GAP;
+        result[branch.markerId] = { x, y: laneY };
+        const start = branch.markerIndex + 1;
+        if (hasVisibleStep(steps, start, branch.endIndex)) {
+          laneBottom = layoutBranch(start, branch.endIndex, laneY);
+        } else {
+          // Empty lanes still reserve a card-sized drop target for a later connection.
+          layoutBranch(start, branch.endIndex, laneY);
+          laneBottom = laneY + height;
+        }
+      }
+      bottom = Math.max(bottom, laneBottom);
+      x = nextColumn(right);
+      result[block.endId] = { x, y: originY };
+      i = block.endIndex + 1;
+      continue;
+    }
     if (block?.kind === 'loop') {
       place(step, originY);
       result[block.endId] = { x, y: originY };
       const bodyY = originY + height + BRANCH_GAP;
       if (hasVisibleStep(steps, i + 1, block.endIndex)) {
-        bottom = Math.max(
-          bottom,
-          layoutSequence(steps, i + 1, block.endIndex, x, bodyY, result, blockByHead, sizeOf),
-        );
+        layoutBranch(i + 1, block.endIndex, bodyY);
       } else {
         layoutSequence(steps, i + 1, block.endIndex, x, originY, result, blockByHead, sizeOf);
       }
-      x += X_GAP;
+      x = nextColumn(right);
       i = block.endIndex + 1;
       continue;
     }
@@ -94,7 +122,7 @@ function layoutSequence(
       if (hasVisibleStep(steps, i + 1, thenEnd)) {
         branchBottom = Math.max(
           branchBottom,
-          layoutSequence(steps, i + 1, thenEnd, x, branchBottom + BRANCH_GAP, result, blockByHead, sizeOf),
+          layoutBranch(i + 1, thenEnd, branchBottom + BRANCH_GAP),
         );
       } else {
         layoutSequence(steps, i + 1, thenEnd, x, originY, result, blockByHead, sizeOf);
@@ -103,29 +131,20 @@ function layoutSequence(
       if (hasVisibleStep(steps, elseStart, block.endIndex)) {
         bottom = Math.max(
           bottom,
-          layoutSequence(
-            steps,
-            elseStart,
-            block.endIndex,
-            x,
-            branchBottom + BRANCH_GAP,
-            result,
-            blockByHead,
-            sizeOf,
-          ),
+          layoutBranch(elseStart, block.endIndex, branchBottom + BRANCH_GAP),
         );
       } else {
         layoutSequence(steps, elseStart, block.endIndex, x, originY, result, blockByHead, sizeOf);
       }
-      x += X_GAP;
+      x = nextColumn(right);
       i = block.endIndex + 1;
       continue;
     }
     place(step, originY);
-    x += X_GAP;
+    x = nextColumn(x + sizeOf(step).w);
     i += 1;
   }
-  return bottom;
+  return { bottom, right };
 }
 
 /** 按循环 / 条件结构自动排版（隐藏的 else / condend / loopend 不占格）。 */

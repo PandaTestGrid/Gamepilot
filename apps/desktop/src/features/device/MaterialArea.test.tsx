@@ -1,10 +1,10 @@
 /**
- * 画面栏下半格「素材区」：缩略图 + 筛选（全部/命中）+ 行内改名 + 阈值 + 行尾删除 + 整区收起。
+ * 画面栏下半格「素材区」：缩略图 + 筛选（全部/命中）+ 头部右侧的录制工具 + 行内改名 + 行尾删除 + 整区收起。
  *
  * 为什么单独一个文件：这一格的功能都是"就地操作"（不弹框、不跳页），
  * 分开测能直接渲染组件本身，不用把整块画面（<img> 量测、ResizeObserver、指针坐标）也搭起来。
  */
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RefObject } from 'react';
 import type { PanelImperativeHandle } from 'react-resizable-panels';
@@ -84,6 +84,45 @@ describe('素材区：全部 / 命中', () => {
     useUiStore.setState({ materialFilter: 'all', materialOpen: true });
   });
 
+  it('每行可关闭识别，不删除素材或引用', async () => {
+    const toggle = vi.fn(() => Promise.resolve(true));
+    useSessionStore.setState({ setRecognizerEnabled: toggle });
+    setup();
+    const button = screen.getByRole('switch', { name: 'main_region_2 参与识别' });
+    expect(button).toHaveAttribute('aria-checked', 'true');
+    await act(() => { fireEvent.click(button); return Promise.resolve(); });
+    expect(toggle).toHaveBeenCalledWith(DEVICE, 'main_region_2', false);
+    expect(screen.getAllByTestId('recognizer-name')).toHaveLength(3);
+  });
+
+  it('关闭的识别器显示已关闭、不计入命中，并能重新开启', async () => {
+    const toggle = vi.fn(() => Promise.resolve(true));
+    useSessionStore.setState({ setRecognizerEnabled: toggle });
+    setup({ recognizers: [{ ...recognizer('ai_12', 'confirmed', 0.99), enabled: false }] });
+    expect(screen.getByText('已关闭')).toBeInTheDocument();
+    expect(screen.queryByText('0.99')).not.toBeInTheDocument();
+    expect(screen.getByTestId('material-filter-hit')).toHaveTextContent('命中 0');
+    const button = screen.getByRole('switch', { name: 'ai_12 参与识别' });
+    expect(button).toHaveAttribute('aria-checked', 'false');
+    await act(() => { fireEvent.click(button); return Promise.resolve(); });
+    expect(toggle).toHaveBeenCalledWith(DEVICE, 'ai_12', true);
+  });
+
+  it('请求期间禁止重复切换，失败后保留原状态并恢复按钮', async () => {
+    let finish!: (result: boolean) => void;
+    const toggle = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    useSessionStore.setState({ setRecognizerEnabled: toggle });
+    setup();
+    const button = screen.getByRole('switch', { name: 'main_region_1 参与识别' });
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(toggle).toHaveBeenCalledTimes(1);
+    await act(() => { finish(false); return Promise.resolve(); });
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveAttribute('aria-checked', 'true');
+  });
+
   it('默认显示全部，两个按钮都带计数，三态照旧', () => {
     setup();
 
@@ -121,6 +160,45 @@ describe('素材区：全部 / 命中', () => {
 
     expect(screen.queryByTestId('recognizer-name')).toBeNull();
     expect(screen.getByText(/这一帧没有命中的素材/)).toHaveTextContent('全部 1');
+  });
+});
+
+describe('素材区：独立分类折叠', () => {
+  it('AI、模板、文字分开，各分区可以独立收起并保留其他分类', () => {
+    setup({
+      recognizers: [
+        { ...recognizer('ai_enemy', 'idle', 0), type: 'yolo', examplesCount: 0, classes: ['敌人'] },
+        recognizer('image_btn', 'confirmed', 1),
+        { ...recognizer('color_area', 'idle', 0), type: 'color' },
+        { ...recognizer('text_start', 'pending', 0.9), type: 'ocr', text: '开始' },
+      ],
+    });
+    const ai = screen.getByTestId('material-group-ai');
+    const template = screen.getByTestId('material-group-template');
+    const text = screen.getByTestId('material-group-text');
+    expect(within(ai).getByText('ai_enemy')).toBeInTheDocument();
+    expect(within(template).getByText('image_btn')).toBeInTheDocument();
+    expect(within(template).getByText('color_area')).toBeInTheDocument();
+    expect(within(template).queryByText('text_start')).not.toBeInTheDocument();
+    expect(within(text).getByText('text_start')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('material-group-toggle-ai'));
+    expect(screen.getByTestId('material-group-toggle-ai')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('ai_enemy')).not.toBeInTheDocument();
+    expect(screen.getByText('image_btn')).toBeInTheDocument();
+    expect(screen.getByText('text_start')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('material-group-toggle-template'));
+    expect(screen.queryByText('image_btn')).not.toBeInTheDocument();
+    expect(screen.getByText('text_start')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('material-group-toggle-ai'));
+    expect(screen.getByText('ai_enemy')).toBeInTheDocument();
+  });
+
+  it('没有素材也保留三类入口和总空态', () => {
+    setup({ recognizers: [] });
+    for (const id of ['ai', 'template', 'text']) {
+      expect(screen.getByTestId(`material-group-toggle-${id}`)).toHaveAttribute('aria-expanded', 'true');
+    }
+    expect(screen.getByText(/还没有素材/)).toBeInTheDocument();
   });
 });
 
@@ -174,25 +252,41 @@ describe('素材区：搜索', () => {
   });
 });
 
-describe('素材区：文字识别入口', () => {
+describe('素材区：头部右侧的录制工具', () => {
   beforeEach(() => {
     useUiStore.setState({ materialFilter: 'all', materialOpen: true });
   });
 
-  it('标题行有「文字」按钮；点了走 OCR 框选入口（没有工作流时给出提示）', () => {
+  /** 标题行 = 「素材区」开关那一行的父节点 */
+  function headerRow(): HTMLElement {
+    return screen.getByTestId('material-toggle').parentElement as HTMLElement;
+  }
+
+  it('四个录制工具（框选 / 点选 / 文字识别 / 录操作）都在标题行里，且排在最右侧', () => {
     setup();
 
-    const button = screen.getByTestId('material-ocr-new');
-    expect(button).toHaveTextContent('文字');
+    const tools = within(headerRow()).getByRole('group', { name: '录制工具' });
+    expect(tools).toBeInTheDocument();
+    for (const label of ['框选录制', '点选录制', '文字识别', '录操作']) {
+      expect(within(tools).getByRole('button', { name: label })).toBeInTheDocument();
+    }
+    // 右侧：这一行里它后面没有别的兄弟节点（搜索框是 flex-1，把它顶到最右）
+    expect(headerRow().lastElementChild).toBe(tools);
+  });
 
+  it('「文字识别」点了走 OCR 框选入口（没有工作流时给出提示，不是点了没反应）', () => {
+    setup();
+
+    const button = screen.getByRole('button', { name: '文字识别' });
     useSessionStore.setState({ error: null, currentWorkflow: null });
     fireEvent.click(button);
     expect(useSessionStore.getState().error).toContain('还没有工作流');
   });
 
-  it('收起时入口跟着标题行一起收起', () => {
+  it('收起素材区后录制工具还在（它们跟着画面走，不跟着列表收）', () => {
     setup({ open: false });
-    expect(screen.queryByTestId('material-ocr-new')).toBeNull();
+    expect(screen.queryByTestId('material-search')).toBeNull();
+    expect(within(headerRow()).getByRole('group', { name: '录制工具' })).toBeInTheDocument();
   });
 });
 
