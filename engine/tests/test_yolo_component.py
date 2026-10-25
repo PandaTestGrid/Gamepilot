@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -11,8 +12,10 @@ import pytest
 from gamepilot.core import yolo_component
 
 
-def _make_component(target: Path, version: str = "0.1.0", worker: str = "gamepilot-yolo.exe") -> Path:
+def _make_component(target: Path, version: str = "0.1.0", worker: str | None = None) -> Path:
     """造一个最小可用的组件目录。"""
+    if worker is None:
+        worker = "gamepilot-yolo.exe" if os.name == "nt" else "gamepilot-yolo"
     target.mkdir(parents=True, exist_ok=True)
     (target / "manifest.json").write_text(
         json.dumps(
@@ -57,9 +60,25 @@ def test_install_from_zip(component_root: Path, tmp_path: Path) -> None:
 
     assert result["installed"] is True
     assert result["version"] == "0.1.0"
-    assert yolo_component.worker_exe() == component_root / "0.1.0" / "gamepilot-yolo.exe"
+    worker = "gamepilot-yolo.exe" if os.name == "nt" else "gamepilot-yolo"
+    assert yolo_component.worker_exe() == component_root / "0.1.0" / worker
     assert (component_root / "0.1.0" / "models" / "dummy.txt").is_file()
     assert any(event["state"] == "done" for event in events)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Unix executable bits only")
+def test_install_from_zip_preserves_worker_executable_bit(component_root: Path, tmp_path: Path) -> None:
+    """zip 解压默认不还原 mode；worker 没执行位时 macOS/Linux 预热会 Permission denied。"""
+    source = _make_component(tmp_path / "src")
+    (source / "gamepilot-yolo").chmod(0o755)
+    archive = _zip_dir(source, tmp_path / "component.zip")
+
+    result = yolo_component.install(str(archive))
+
+    assert result["installed"] is True
+    worker = yolo_component.worker_exe()
+    assert worker is not None
+    assert worker.stat().st_mode & 0o111
 
 
 def test_install_from_directory(component_root: Path, tmp_path: Path) -> None:

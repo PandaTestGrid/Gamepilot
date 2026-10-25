@@ -319,7 +319,28 @@ def _extract(archive: Path, work: Path) -> Path:
         ]
         if still_missing:
             raise RuntimeError(f"组件包解压不完整，缺少 {len(still_missing)} 个文件（例如 {still_missing[0]}）")
+        _restore_zip_modes(bundle, content)
     return _content_root(content)
+
+
+def _restore_zip_modes(bundle: zipfile.ZipFile, content: Path) -> None:
+    """恢复 zip 里的可执行位。
+
+    `ZipFile.extractall` 只还原内容，不还原 Unix mode；macOS/Linux 上 worker 会变成
+    0644，安装成功后一预热就是 `Permission denied`。只还原普通权限位，不还原 setuid。
+    """
+    for member in bundle.infolist():
+        if member.is_dir():
+            continue
+        mode = (member.external_attr >> 16) & 0o777
+        if not mode:
+            continue
+        target = content / member.filename
+        try:
+            os.chmod(target, mode & 0o755)
+        except OSError:
+            # Windows / 只读文件系统不关心 Unix 可执行位；不要因此让安装失败。
+            continue
 
 
 def _content_root(content: Path) -> Path:
