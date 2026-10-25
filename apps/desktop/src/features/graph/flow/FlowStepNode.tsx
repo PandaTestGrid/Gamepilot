@@ -393,6 +393,20 @@ export function FlowStepNode({ data, selected }: NodeProps<FlowStepNodeType>): R
             labels={recognizerLabels}
             onChange={(rec) => patchParams({ rec })}
           />
+          <div className="mt-1 flex items-center gap-1 text-[10px] text-dim">
+            <span className="shrink-0">超时</span>
+            <input
+              type="number"
+              aria-label="等待超时"
+              title="最多等待多久；超时后按失败/恢复分支处理"
+              min={100}
+              step={500}
+              value={Number(params.timeout_ms ?? 10000)}
+              onChange={(event) => patchParams({ timeout_ms: Math.max(100, Number(event.target.value) || 10000) })}
+              className="nodrag nopan h-5 w-20 rounded-sm border border-line bg-canvas px-1 text-fg focus:border-brand focus:outline-none"
+            />
+            <span>ms</span>
+          </div>
         </div>
       ) : null}
 

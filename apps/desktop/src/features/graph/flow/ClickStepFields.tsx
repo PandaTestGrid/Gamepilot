@@ -5,7 +5,6 @@ import { Crosshair, MapPin, X } from 'lucide-react';
 import { type ReactNode } from 'react';
 
 import { ClickRegionPreview } from '@/features/graph/flow/ClickRegionPreview';
-import { TouchFingerFields } from '@/features/graph/flow/TouchFingerFields';
 import {
   CLICK_BY_COORD,
   CLICK_BY_RECOGNIZER,
@@ -186,8 +185,6 @@ export function ClickStepFields({
           </div>
         </div>
       )}
-
-      {showMode && <TouchFingerFields params={params} onPatch={onPatch} compact={compact} />}
 
       {showMode && eventKind === 'long_press' && (
         <label className={cn('flex items-center gap-1 text-dim', compact && 'text-[11px]')}>

@@ -110,8 +110,8 @@ export const FLOW_MODULE_GROUPS: ReadonlyArray<{
       {
         type: 'touch',
         label: '触点',
-        hint: '按下 / 移动 / 松开；Android 多指',
-        defaultParams: { phase: 'down', finger: 1, x: 0.5, y: 0.5 },
+        hint: '按下 / 移动 / 松开',
+        defaultParams: { phase: 'down', x: 0.5, y: 0.5 },
       },      { type: 'text', label: '输入文字', hint: 'ADB 文本', defaultParams: { value: '' } },
     ],
   },
@@ -243,7 +243,7 @@ export function flowStepTitle(step: FlowStep | null | undefined): string {
   }
   if (step.type === 'parallel')
     return `${base} · ${Number(params.branches ?? 2)} 支 · ${params.mode === 'any' ? '首个成功' : '全部完成'}`;  if (step.type === 'touch')
-    return `${base} · ${params.phase === 'move' ? '移动' : params.phase === 'up' ? '松开' : '按下'} · 手指 ${Number(params.finger ?? 1)}`;
+    return `${base} · ${params.phase === 'move' ? '移动' : params.phase === 'up' ? '松开' : '按下'}`;
   if (step.type === 'delay') {
     if (delayIsRandom(params)) {
       const range = randomDelayRangeOf(params);

@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react';
 
-import { TouchFingerFields } from '@/features/graph/flow/TouchFingerFields';
 import { clampUnitCoord } from '@/features/graph/flow/flow-coord-utils';
 import { cn } from '@/lib/utils';
 
@@ -21,7 +20,6 @@ export function TouchStepFields({ params, onPatch, compact = false, className }:
           <option value="down">按下</option><option value="move">移动</option><option value="up">抬起</option>
         </select>
       </label>
-      <TouchFingerFields params={params} onPatch={onPatch} required compact={compact} />
       <div className="flex flex-wrap items-center gap-1">
         <span>归一化</span>
         {(['x', 'y'] as const).map((axis) => <label key={axis} className="flex min-w-0 items-center gap-0.5">
@@ -40,7 +38,7 @@ export function TouchStepFields({ params, onPatch, compact = false, className }:
           onChange={(event) => onPatch({ duration_ms: event.target.value === '' ? undefined : Math.max(0, Math.round(Number(event.target.value) || 0)) })} />
         <span>ms</span>
       </label>}
-      {!compact && <p className="text-[10px] leading-snug text-dim">移动前需在同一分支先按下同一手指。按下后在本分支接延迟或循环保持，直到抬起；分支完成或取消时自动释放。</p>}
+      {!compact && <p className="text-[10px] leading-snug text-dim">移动前需在同一分支先按下、再移动、最后抬起；触点由引擎在分支内自动分配并复用。分支完成或取消时自动释放。</p>}
     </div>
   );
 }
