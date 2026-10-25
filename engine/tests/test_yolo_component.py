@@ -81,6 +81,22 @@ def test_install_from_zip_preserves_worker_executable_bit(component_root: Path, 
     assert worker.stat().st_mode & 0o111
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Unix executable bits only")
+def test_worker_exe_heals_executable_bit(component_root: Path, tmp_path: Path) -> None:
+    """旧安装器留下的 0644 组件也要能自愈，不必让用户重装 1.4GB。"""
+    source = _make_component(tmp_path / "src")
+    yolo_component.install(str(source))
+
+    worker = yolo_component.worker_exe()
+    assert worker is not None
+    worker.chmod(0o644)
+
+    healed = yolo_component.worker_exe()
+
+    assert healed == worker
+    assert healed.stat().st_mode & 0o111
+
+
 def test_install_from_directory(component_root: Path, tmp_path: Path) -> None:
     source = _make_component(tmp_path / "src")
 

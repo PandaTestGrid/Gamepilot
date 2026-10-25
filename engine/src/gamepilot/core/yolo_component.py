@@ -125,6 +125,16 @@ def _manifest_path(version: str) -> Path:
     return root() / version / MANIFEST_FILE
 
 
+def _ensure_executable(path: Path) -> Path:
+    """老版本安装器/外部工具可能把 worker 解成 0644；启动前自愈 x 位。"""
+    if os.name != "nt":
+        with contextlib.suppress(OSError):
+            mode = path.stat().st_mode
+            if not mode & 0o111:
+                path.chmod(mode | 0o755)
+    return path
+
+
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -153,12 +163,12 @@ def worker_exe() -> Path | None:
     override = os.environ.get(WORKER_EXE_ENV, "").strip()
     if override:
         path = Path(override)
-        return path if path.is_file() else None
+        return _ensure_executable(path) if path.is_file() else None
     version = current_version()
     if not version:
         return None
     candidate = root() / version / _exe_name()
-    return candidate if candidate.is_file() else None
+    return _ensure_executable(candidate) if candidate.is_file() else None
 
 
 def worker_variant() -> str:
