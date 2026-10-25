@@ -781,6 +781,14 @@ def test_target_lost_during_pre_delay_waits_instead_of_failing(tmp_path: Path, c
     assert h.controller.calls == []
     assert not any("无法定位" in str(event.get("message") or "") for event in h.engine.trace.recent_events(8))
 
+    # 关键：默认匹配等待是 20s，这里必须仍按该步骤的 1,000,000ms 等待，
+    # 不能在第 20 秒就报“目标没有命中”。
+    clock.advance(25)
+    h.tick()
+    assert h.engine.result == "running"
+    assert not any("无法定位" in str(event.get("message") or "") for event in h.engine.trace.recent_events(8))
+    assert not any("等待" in str(event.get("message") or "") and "超时" in str(event.get("message") or "") for event in h.engine.trace.recent_events(8))
+
     h.hits.update(hit("开始"))
     h.tick()  # 重新命中 → 重新进入执行前延迟
     clock.advance(3.1)
