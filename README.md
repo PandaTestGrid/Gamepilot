@@ -20,6 +20,7 @@ GamePilot 是一款面向游戏的状态机式自动化工作台：框选界面�
 | 文档 | 内容 |
 |---|---|
 | [使用与开发](./docs/USAGE.md) | 环境要求、启动、设备连接、工作流编辑、发布打包、提交前检查 |
+| [自动更新](./docs/updater.md) | Tauri Updater 签名、GitHub Release、latest.json 与发版流程 |
 | [总体设计](./docs/DESIGN.md) | 数据模型、UI、里程碑 |
 | [项目规范](./docs/CONVENTIONS.md) | 依赖方向、命名、坐标、测试、DoD |
 | [RPC 契约](./docs/rpc.md) | 前端 ⇄ 引擎 |

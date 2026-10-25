@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 import { DevicePopover } from '@/features/device/DevicePopover';
+import { UpdateBanner } from '@/features/updater/UpdateBanner';
 import { DeviceTabs } from '@/layout/DeviceTabs';
 import { ErrorBanner } from '@/layout/ErrorBanner';
 import { StandalonePane } from '@/layout/StandalonePane';
@@ -255,13 +256,7 @@ export function App(): ReactNode {
       </main>
 
       <DevicePopover />
+      <UpdateBanner />
     </div>
   );
 }
-
-
-
-
-
-
-

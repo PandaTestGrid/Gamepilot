@@ -15,9 +15,18 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE2M0IzQUU3QkU5QzE5QzAKUldUQUdaeSs1em83RmpZVkkxVG9XaFBpYnk0Vy9FR2JRMUo3cW9pZjIvSG93UXhHTG1BVVhoeFYK",
+      "endpoints": [
+        "https://github.com/PandaTestGrid/Gamepilot/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "externalBin": ["binaries/gamepilot-engine"],
     "icon": [
       "icons/32x32.png",

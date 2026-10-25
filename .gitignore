@@ -40,6 +40,8 @@ runs/
 workspaces/
 # 仓库根的准备区/暂存区（脚本和人工操作挪进来的东西，不入库）
 .trash/
+# Tauri updater 发布清单（由 scripts/make-latest-json.mjs 生成，随 Release 上传，不入库）
+/latest.json
 # 老布局，已废弃（工作区目录现在由用户选，记录在 config.json）
 projects/
 # 引擎的工作区列表配置（active + 最近使用）

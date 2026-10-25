@@ -25,6 +25,9 @@ pub fn run() {
         // 前端是**动态 import + try/catch** 调的：拿不到原生对话框就退回手输绝对路径，
         // 所以这个插件即使没装/没权限也不会让界面出现"点＋没反应"（见 features/library/native-dialog.ts）。
         .plugin(tauri_plugin_dialog::init())
+        // 发布版自动更新：检查签名更新包、下载并重启。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(Bridge::new())
         .setup(|app| {
             window::create_windows(app.handle()).map_err(|error| std::io::Error::other(error))?;
