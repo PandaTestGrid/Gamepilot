@@ -1619,10 +1619,15 @@ class IosController(Controller):
         """执行一次 HID 操作。
 
         断线时返回错误并在后台重连，不在 RPC 里同步重连以免超时。
+        RemoteXPC 被系统回收时，pymobiledevice3 抛的是 NotConnectedError
+        （"RemoteXPCConnection is not open"），它不是 OSError，必须显式接住，
+        否则界面会直接冒出裸英文异常，而且不会触发后台重连。
         """
+        from pymobiledevice3.exceptions import ConnectionTerminatedError, NotConnectedError
+
         try:
             return call(self._hid_or_raise())
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError) as exc:
+        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError, NotConnectedError, ConnectionTerminatedError) as exc:
             logger.warning("iOS 控制通道断了（%s: %s），已安排后台重连", action, exc)
             self._schedule_recovery()
             raise RuntimeError("iOS 控制通道断了（隧道被系统回收）。已在后台自动重连，1~2 秒后再点一次即可") from exc

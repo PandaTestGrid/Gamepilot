@@ -839,3 +839,30 @@ def test_broken_pipe_error_message_is_readable() -> None:
     message = str(info.value)
     assert "BrokenPipeError" not in message
     assert "再点一次" in message
+
+
+def test_closed_remote_xpc_service_recovers_in_background() -> None:
+    """RemoteXPC 被系统回收时库抛 NotConnectedError，不能漏成裸英文异常。"""
+    from pymobiledevice3.exceptions import NotConnectedError
+
+    class ClosedRemoteXpcHid(FlakyHid):
+        def touch(self, phase: str, x: int, y: int) -> None:
+            raise NotConnectedError("RemoteXPCConnection is not open")
+
+    controller = ios.IosController(udid="UDID-TEST")
+    controller._hid = ClosedRemoteXpcHid()  # type: ignore[assignment]
+    controller._orientation_at = float("inf")
+    recovered: list[str] = []
+    controller._recover_hid = lambda: recovered.append("recover")  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError) as info:
+        controller.touch("down", 0.5, 0.5)
+    message = str(info.value)
+    assert "RemoteXPCConnection" not in message
+    assert "再点一次" in message
+
+    for _ in range(60):
+        if recovered:
+            break
+        time.sleep(0.02)
+    assert recovered == ["recover"]
